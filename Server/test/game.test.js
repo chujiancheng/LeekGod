@@ -3,6 +3,7 @@
  */
 const { Game, ACTIONS } = require('../src/game');
 const config = require('../src/config');
+const { NewsSystem, TEMPLATES, STOCK_TEMPLATES } = require('../src/news');
 
 // ---- 多股票测试辅助：测试聚焦「大米集团」(config.stocks[0]) ----
 // P(g)/N(g)：取某局里大米集团的市场与做市引擎（多股票后 Game 持的是 Map）
@@ -490,6 +491,109 @@ console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动
   for (let i = 0; i < 40; i++) g.snapshotHolders(acc, 'order', STOCK.id);
   assert(g.holderHistoryFor(tk, STOCK.id).snapshots.length === 30, '快照环形缓冲封顶 30');
   assert(!g.holderHistoryFor('bogus-token', STOCK.id).ok, '无有效令牌不返回股东历史');
+}
+
+console.log('\n[15] 个股消息文案：每只股票走自己的专属池');
+{
+  // 十只股票各按「原型公司」（大米集团←小米、腾迅←腾讯、阿狸←阿里…）的真实业务写了专属文案池。
+  // 这里守住两件事：池子齐全、个股消息真的落到该股自己的池子里——股票改名忘了同步
+  // STOCK_TEMPLATES 时会静默回退通用池，playtest 很难发现，所以在这条测试里红掉。
+  const scopes = ['机构', '散户'];
+  assert(
+    config.stocks.every((s) => STOCK_TEMPLATES[s.name]),
+    `十只股票都有专属文案池 (${config.stocks.filter((s) => STOCK_TEMPLATES[s.name]).length}/${config.stocks.length})`
+  );
+
+  const thin = [];
+  const dup = [];
+  for (const s of config.stocks) {
+    for (const scope of scopes) {
+      for (const key of ['positive', 'negative']) {
+        const pool = (STOCK_TEMPLATES[s.name] || {})[scope] ? STOCK_TEMPLATES[s.name][scope][key] : null;
+        const tag = `${s.alias}·${scope}·${key === 'positive' ? '利好' : '利空'}`;
+        if (!pool || pool.length < 8) thin.push(tag);
+        else if (pool.length !== new Set(pool).size) dup.push(tag);
+      }
+    }
+  }
+  assert(thin.length === 0, `每只股票四个池各 ≥8 条（不足：${thin.join('、') || '无'}）`);
+  assert(dup.length === 0, `池内无重复文案（重复：${dup.join('、') || '无'}）`);
+
+  // 抽取结果必须落在该股池内（不是通用池），且 320 条文案全局唯一
+  const sys = new NewsSystem(config.stocks);
+  const allTexts = [];
+  let leaked = 0;
+  let shortPools = 0;
+  for (const s of config.stocks) {
+    for (const scope of scopes) {
+      for (const key of ['positive', 'negative']) {
+        const pool = STOCK_TEMPLATES[s.name][scope][key];
+        const got = new Set();
+        for (let i = 0; i < 300; i++) got.add(sys.pickText(scope, key === 'positive' ? 1 : -1, s));
+        if (got.size !== pool.length) shortPools += 1;
+        for (const t of got) if (!pool.includes(t)) leaked += 1;
+        allTexts.push(...pool);
+      }
+    }
+  }
+  assert(leaked === 0, `抽样文案全部出自本股专属池（越池 ${leaked} 条）`);
+  assert(shortPools === 0, `每池 300 次抽样能抽全（抽不满的池：${shortPools} 个）`);
+  assert(allTexts.length === 320, `个股文案共 ${allTexts.length} 条`);
+  assert(
+    new Set(allTexts).size === allTexts.length,
+    `320 条个股文案全局唯一（重复 ${allTexts.length - new Set(allTexts).size} 条）`
+  );
+
+  // 端到端：强制产出消息，检查【简称】前缀与文案归属
+  const sys2 = new NewsSystem(config.stocks);
+  const stockNews = [];
+  const macroNews = [];
+  for (let i = 0; i < 400; i++) {
+    sys2.nextAt = 0;
+    const n = sys2.maybeEmit(1000000 + i * 1000, 0);
+    if (!n) continue;
+    if (n.stockId) stockNews.push(n);
+    else macroNews.push(n);
+  }
+  const byId = new Map(config.stocks.map((s) => [s.id, s]));
+  assert(stockNews.length > 100, `强制产出个股消息 (${stockNews.length} 条)`);
+  assert(macroNews.length > 50, `强制产出大盘消息 (${macroNews.length} 条)`);
+  assert(
+    stockNews.every((n) => n.text.startsWith(`【${byId.get(n.stockId).alias}】`)),
+    '个股消息带【简称】前缀'
+  );
+  assert(
+    stockNews.every((n) => {
+      const s = byId.get(n.stockId);
+      const key = n.dir > 0 ? 'positive' : 'negative';
+      return STOCK_TEMPLATES[s.name][n.scope][key].includes(n.text.replace(`【${s.alias}】`, ''));
+    }),
+    '个股消息正文出自所属股票的专属池'
+  );
+  assert(
+    new Set(stockNews.map((n) => n.stockId)).size === config.stocks.length,
+    `十只股票都被分配到过个股消息（${new Set(stockNews.map((n) => n.stockId)).size}/${config.stocks.length}）`
+  );
+
+  // 大盘消息（scope=全体，恒生科技指数口径）不带股票，作用于全部十只
+  assert(macroNews.every((n) => !n.text.includes('【')), '大盘消息不带【简称】前缀');
+  assert(
+    macroNews.every((n) => config.stocks.every((s) => NewsSystem.applies(n, s.id))),
+    '大盘消息作用于全部十只股票'
+  );
+  assert(
+    macroNews.every((n) => TEMPLATES['全体'][n.dir > 0 ? 'positive' : 'negative'].includes(n.text)),
+    '大盘消息正文出自「全体」池'
+  );
+  assert(
+    TEMPLATES['全体'].positive.length >= 20 && TEMPLATES['全体'].negative.length >= 20,
+    `大盘池已按恒生科技指数口径扩充 (利好 ${TEMPLATES['全体'].positive.length} / 利空 ${TEMPLATES['全体'].negative.length})`
+  );
+  assert(
+    new Set(TEMPLATES['全体'].positive).size === TEMPLATES['全体'].positive.length &&
+      new Set(TEMPLATES['全体'].negative).size === TEMPLATES['全体'].negative.length,
+    '大盘池内无重复文案'
+  );
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
