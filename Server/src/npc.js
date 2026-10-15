@@ -1,0 +1,527 @@
+/**
+ * NPC 系统：机构 / 游资 / 大中小散户（五类，见 config.npc.types）
+ * - 共享一个公允价值（随机游走 + 消息驱动 + 向成交价弱回归）
+ * - 每个 NPC 独立情绪（受消息影响，散户放大）
+ * - 被动双边报价维持盘口，情绪高涨时主动吃单
+ */
+const config = require('./config');
+const { logger } = require('./logger');
+const { ACTIONS } = require('./market');
+const { Account, r2 } = require('./store');
+
+function gauss() {
+  // 标准正态近似
+  let s = 0;
+  for (let i = 0; i < 6; i++) s += Math.random();
+  return (s - 3) / 1.2247;
+}
+
+function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function roundLot(q, lot) {
+  return Math.max(lot, Math.round(q / lot) * lot);
+}
+
+/** 五类 NPC 总户数 */
+function totalNpcCount(cfg = config.npc) {
+  return Object.values(cfg.types).reduce((s, t) => s + t.count, 0);
+}
+
+/** 旧档 role=retail → 现行类型；其余原样 */
+function normalizeNpcType(role, cfg = config.npc) {
+  if (role === 'retail') return cfg.legacyRetailType || 'small';
+  return role;
+}
+
+class NpcManager {
+  /**
+   * @param {import('./market').Market} market
+   * @param {import('./news').NewsSystem} news
+   * @param {import('./store').Store} [store]
+   */
+  constructor(market, news, store) {
+    this.market = market;
+    this.news = news;
+    this.store = store || null;
+    this.stock = market.stock;
+    this.npcs = [];
+    this.fairValue = market.stock.initPrice;
+    // 基本面重心（慢速随机游走的锚）与趋势阶段状态
+    this.fund = market.stock.initPrice;
+    this.regime = 0; // 1 牛 / 0 震荡 / -1 熊
+    this.regimeIn = 0; // 当前阶段剩余 tick
+    this.trendDrift = 0; // 当前阶段每 tick 相对推力（带符号）
+    this.priceTrail = []; // 最近若干 tick 的最新价，供滚动动量计算
+    // 机构情绪结构：共享情绪波 + 分歧度（0=全体一致跟情绪走，1=多空阵营贴身对打）
+    this.instMood = 0; // 共享慢波（一致时的集体多/空）
+    this.polar = 0.2; // 当前分歧度
+    this.polarTarget = 0.2; // 分歧度目标（一致/大战两态之间切换）
+    this.polarIn = 0; // 当前分歧态剩余 tick
+    this.tickCount = 0;
+  }
+
+  /** 按类型取行为档案（初始化时已挂到 n.profile） */
+  profileOf(n) {
+    return n.profile || config.npc.types[n.type] || config.npc.types.small;
+  }
+
+  /** 初始化 NPC 账户、持仓与初始报价 */
+  init(now = Date.now()) {
+    const cfg = config.npc;
+    const float = this.stock.floatShares;
+    const lot = this.stock.lotSize;
+    const preAge = config.trade.lockMs + 60000; // 初始持仓视为已解锁
+    const entries = Object.entries(cfg.types);
+
+    // 严格守恒：五类 holdRatio 合计 = 100% 流通盘。
+    // 各类按比例取整手后，余数补给最后一类（小散户），避免丢股。
+    const holdTotals = entries.map(([, t]) => Math.floor((float * t.holdRatio) / lot) * lot);
+    const holdSum = holdTotals.reduce((a, b) => a + b, 0);
+    holdTotals[holdTotals.length - 1] += float - holdSum;
+
+    const split = (total, n) => {
+      const base = Math.floor(total / n / lot) * lot;
+      const arr = Array(n).fill(base);
+      arr[n - 1] += total - base * n;
+      return arr;
+    };
+
+    let instIdx = 0;
+    for (let ti = 0; ti < entries.length; ti++) {
+      const [typeKey, t] = entries[ti];
+      const sharesArr = split(holdTotals[ti], t.count);
+      for (let i = 0; i < t.count; i++) {
+        const acc = new Account(`${t.label}${i + 1}`, true, typeKey);
+        acc.cash = t.totalCash / t.count;
+        const shares = sharesArr[i];
+        acc.initialLong = shares;
+        acc.longPos(this.stock.id).lots.push({ qty: shares, price: this.stock.initPrice, ts: now - preAge, reserved: 0 });
+        // NPC 自动出借：按类型固定比例挂入融券池（开局玩家没券，池子必须有基础券源）
+        const lendRatio = config.margin.lending ? config.margin.lending.npcLendRatio : 0;
+        if (lendRatio > 0) {
+          const lendQty = Math.floor((shares * lendRatio) / lot) * lot;
+          if (lendQty >= lot) {
+            acc.lendOffered = lendQty;
+            if (this.market) this.market.lendTotal += lendQty;
+          }
+        }
+        if (this.store) this.store.put(acc);
+        this.npcs.push({
+          acc,
+          type: typeKey,
+          profile: t,
+          initialLong: shares,
+          initialCash: acc.cash,
+          // 机构固定阵营（多头/空头各半），分歧度高时贴身对打（多空大战）
+          camp: t.useCamp ? (instIdx++ % 2 === 0 ? 1 : -1) : 0,
+          ownBias: 0,
+          ownResting: [],
+          // 大户错峰更散，小散户随机拉长，避免同拍重报价
+          requoteIn: typeKey === 'inst' ? i : Math.floor(rand(0, typeKey === 'small' ? 16 : 8)),
+        });
+      }
+    }
+  }
+
+  /** 每 tick 推进市场模拟 */
+  step(now) {
+    this.tickCount += 1;
+    this.priceTrail.push(this.market.lastPrice);
+    if (this.priceTrail.length > config.npc.momentumTicks + 10) {
+      this.priceTrail.shift();
+    }
+    this.updateFairValue(now);
+    this.recycleLiquidity();
+    this.updateMoodPolar();
+
+    for (const n of this.npcs) {
+      this.gcResting(n);
+      this.updateBias(n, now);
+      const shouldRequote = this.shouldRequote(n);
+      if (shouldRequote) this.requote(n, now);
+      // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate
+      const p = this.profileOf(n);
+      const rate = p.aggressiveRate * (p.polarOrderScale ? 1 + this.polar * 0.8 : 1);
+      if (Math.random() < rate) this.tryAggressive(n, now);
+    }
+  }
+
+  updateFairValue(now) {
+    const cfg = config.npc;
+    const init = this.stock.initPrice;
+    const last = this.market.lastPrice;
+
+    this.updateTrend();
+
+    // 重心跟随趋势慢一拍迁移（大级别的底），再以约 15 分钟时间常数回归发行价。
+    // 回归用对数空间（乘性距离对称）：涨十倍和跌到十分之一受同等强度的拉回，
+    // 不会像线性回归那样把深跌底部额外托住
+    this.fund *= 1 + this.trendDrift * cfg.fundTrendFollow;
+    this.fund *= 1 + Math.log(init / this.fund) * cfg.fundAnchor;
+    this.fund *= 1 + gauss() * cfg.fundNoiseRel;
+
+    let fv = this.fairValue;
+    fv *= 1 + this.trendDrift; // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）
+    fv *= 1 + this.news.fvDrift(now); // 消息推力（乘性）
+    fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
+    fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
+    fv += (this.fund - fv) * cfg.fvAnchor; // 向重心回归
+
+    // 软边界：触轨即终止当前阶段（不再继续同向推），下一 tick 重新抽签。
+    // 刻意不做“触轨必反转”的偏置——顶底本身不能变成可押注的信号
+    const lo = init * cfg.rangeLow;
+    const hi = init * cfg.rangeHigh;
+    if (fv < lo || fv > hi) {
+      fv = Math.min(hi, Math.max(lo, fv));
+      this.regimeIn = 0;
+    }
+    this.fund = Math.min(hi, Math.max(lo, this.fund));
+    this.fairValue = Math.max(0.05, this.market.clampPrice(fv));
+  }
+
+  /**
+   * 抽取/推进趋势阶段：
+   * - 时长指数分布（无记忆）：走了多久推不出还要走多久，拐点时刻不可预测
+   * - 方向每次重新抽签（含同向连排）：顶底常是假突破后的延续或反杀
+   * - 幅度三档混合：温和为主，偶尔极端段给出数倍级行情
+   */
+  updateTrend() {
+    const t = config.npc.trend;
+    if (this.regimeIn <= 0) {
+      const u = Math.max(1e-9, Math.random());
+      let n = Math.round(-t.phaseMeanTicks * Math.log(u)); // 指数分布
+      if (n < t.phaseMinTicks) n = t.phaseMinTicks;
+      if (n > t.phaseMaxTicks) n = t.phaseMaxTicks;
+      this.regimeIn = n;
+
+      if (Math.random() < t.flatWeight) {
+        this.regime = 0;
+        this.trendDrift = 0;
+      } else {
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        this.regime = dir;
+        const r = Math.random();
+        const w = t.weights;
+        const band = r < w[0] ? 0 : r < w[0] + w[1] ? 1 : 2;
+        this.trendDrift = dir * rand(t.bands[band][0], t.bands[band][1]);
+      }
+    }
+    this.regimeIn -= 1;
+  }
+
+  /**
+   * 机构情绪结构推进：
+   * - instMood 共享慢波：分歧度低时全体机构同向（情绪一致，趋势合力更猛）
+   * - polar 分歧度在"一致（~0.15）"与"多空大战（~0.85）"两态间切换
+   *   （时长无记忆，与趋势阶段同理——大战何时来/何时散无法预判）
+   */
+  updateMoodPolar() {
+    this.instMood += gauss() * 0.02 - this.instMood * 0.01;
+    this.instMood = Math.max(-1, Math.min(1, this.instMood));
+    if (this.polarIn <= 0) {
+      this.polarTarget = Math.random() < 0.5 ? rand(0, 0.2) : rand(0.7, 1);
+      const u = Math.max(1e-9, Math.random());
+      let n = Math.round(-300 * Math.log(u)); // 指数分布，均值 ~300 tick
+      if (n < 80) n = 80;
+      if (n > 1500) n = 1500;
+      this.polarIn = n;
+    }
+    this.polarIn -= 1;
+    this.polar += (this.polarTarget - this.polar) * 0.03;
+  }
+
+  updateBias(n, now) {
+    const p = this.profileOf(n);
+    const scope = p.newsScope || (n.type === 'inst' ? '机构' : '散户');
+    let s = this.news.sentiment(scope, now);
+    s *= p.sentimentScale != null ? p.sentimentScale : n.type === 'retail' ? 1.2 : 0.8;
+    // 机构：一致成分（共享情绪波）与分歧成分（阵营对抗）此消彼长
+    if (p.useCamp) {
+      s += this.instMood * (1 - this.polar) * 1.1;
+      s += (n.camp || 0) * this.polar * 0.7;
+    }
+    // 游资/散户追涨杀跌：最近一个窗口的涨跌幅（窗口动量）。横盘时归零，
+    // 情绪重新只由消息与随机噪声主导——顶部/底部才不会出现“全员死多/死空”的钉死
+    if (p.momentum && this.priceTrail.length > config.npc.momentumTicks) {
+      const ref =
+        this.priceTrail[this.priceTrail.length - 1 - config.npc.momentumTicks];
+      if (ref > 0) {
+        const mom = (this.market.lastPrice - ref) / ref;
+        const cl = config.npc.momentumClamp;
+        const gain = config.npc.momentumGain * (p.momentumGainMul || 1);
+        s += Math.max(-cl, Math.min(cl, mom * gain));
+      }
+    }
+    n.ownBias += gauss() * 0.06;
+    n.ownBias *= 0.95; // 缓慢回归
+    n.sentiment = Math.max(-1, Math.min(1, s + n.ownBias));
+  }
+
+  gcResting(n) {
+    n.ownResting = n.ownResting.filter((o) => o.status === 'live');
+  }
+
+  /**
+   * 流动性回收：NPC 全池现金被空头保证金吸干（开空时现金的一半进保证金）
+   * 后，盘面没人买得动 → 双向死锁。低于地板时每 tick 向地板回补一小段，
+   * 只"补到地板"不无限注水；日志每个枯竭周期记一次
+   */
+  recycleLiquidity() {
+    const cfg = config.npc;
+    if (!cfg.liquidityFloor) return;
+    let cash = 0;
+    for (const n of this.npcs) cash += n.acc.cash;
+    if (cash >= cfg.liquidityFloor) {
+      this._dryLogged = false;
+      return;
+    }
+    if (!this._dryLogged) {
+      this._dryLogged = true;
+      logger.info(`[我是股神] NPC 池现金枯竭（${r2(cash)} < ${cfg.liquidityFloor}），开始向地板回补`);
+    }
+    const need = (cfg.liquidityFloor - cash) * cfg.liquidityRefill;
+    const per = need / this.npcs.length;
+    for (const n of this.npcs) n.acc.cash = r2(n.acc.cash + per);
+    // 现金变化影响挂单冻结口径，存档器需要知道这些账户变了
+    for (const n of this.npcs) this.market.notifyChange(n.acc);
+  }
+
+  shouldRequote(n) {
+    if (n.ownResting.length === 0) return true;
+    if (n.requoteIn > 0) {
+      n.requoteIn -= 1;
+      return false;
+    }
+    // 随机 + 目标价偏离触发重报价
+    if (Math.random() < 0.25) {
+      n.requoteIn = Math.floor(rand(config.npc.minRequoteTicks, config.npc.minRequoteTicks + 5));
+      return true;
+    }
+    return false;
+  }
+
+  /** 撤旧挂单并按公允价值+情绪挂双边报价 */
+  requote(n, now) {
+    for (const o of n.ownResting) {
+      if (o.status === 'live') this.market.cancel(n.acc, o.id, now);
+    }
+    n.ownResting = [];
+
+    const p = this.profileOf(n);
+    // 有券可借就能开空（不必等裸空后门）；place 里会再查 lendAvailable
+    const canShort =
+      !!p.canShort &&
+      (!!config.margin.allowNakedShort ||
+        (config.margin.lending && config.margin.lending.enabled && this.market.lendAvailable() > 0));
+    const fv = this.fairValue;
+    const sentiment = n.sentiment || 0;
+    // 报价中枢 = 最新价与公允价值的混合：贴住最新价保证报价可成交（不撞价格笼子），
+    // 同时保留对公允价值的领先量——公允价值领先时主动吃单会触发，价格被一段段拉过去
+    const cfg = config.npc;
+    const lastPx = this.market.lastPrice;
+    const base = cfg.quoteLastWeight * lastPx + (1 - cfg.quoteLastWeight) * fv;
+    // 情绪直接平移报价中枢，再硬夹到最新价 ±quoteCushion（小于价格笼子 5%）：
+    // 公允价值无论滑多远，盘口都留在可成交区间，成交不会被笼子切断
+    let center = base * (1 + sentiment * (p.centerShift != null ? p.centerShift : 0.006));
+    const cush = cfg.quoteCushion;
+    center = Math.min(lastPx * (1 + cush), Math.max(lastPx * (1 - cush), center));
+    // 点差按价格比例缩放（价位高点差大、价位低点差小），下限 0.02 防止取整后买一=卖一
+    const spreadRange = p.spread || [0.001, 0.003];
+    const spread = Math.max(0.02, base * rand(spreadRange[0], spreadRange[1]));
+    const bidPx = this.market.clampPrice(center - spread / 2);
+    const askPx = this.market.clampPrice(center + spread / 2);
+    const lot = this.stock.lotSize;
+    const rq = p.requoteQty || [100, 800];
+
+    // 买盘：有空头在手优先用现金+保证金回补（BUY_CLOSE），否则才开多。
+    // 全池现金常被保证金吸干，回补是买盘的主要资金来源。
+    // 分歧度高时机构双边挂单也加大（多空大战的“工事”更深）
+    const reScale = p.polarOrderScale ? 1 + this.polar * 0.6 : 1;
+    if (bidPx > 0.01) {
+      let qty = roundLot(rand(rq[0], rq[1]) * reScale, lot);
+      const coverable = n.acc.coverableShort(this.stock.id);
+      if (coverable >= lot) {
+        qty = Math.min(qty, coverable, this.closeCapacity(n, bidPx, qty));
+        qty = Math.floor(qty / lot) * lot;
+        if (qty >= lot) {
+          const r = this.market.place(n.acc, {
+            action: ACTIONS.BUY_CLOSE,
+            qty,
+            price: bidPx,
+            now,
+            noCooldown: true,
+          });
+          if (r.ok) n.ownResting.push(r.order);
+        }
+      } else if (this.longCapacity(n) >= lot) {
+        qty = Math.min(qty, this.longCapacity(n));
+        qty = Math.min(qty, this.cashCapacity(n, bidPx));
+        qty = Math.floor(qty / lot) * lot;
+        if (qty >= lot) {
+          const r = this.market.place(n.acc, {
+            action: ACTIONS.BUY_OPEN,
+            qty,
+            price: bidPx,
+            now,
+            noCooldown: true,
+          });
+          if (r.ok) n.ownResting.push(r.order);
+        }
+      }
+    }
+
+    // 卖盘：优先卖出持仓（扣掉已挂借融券的）；机构/游资在持仓不足时可开空
+    const sellable = n.acc.freeSellableLong(this.stock.id, now);
+    let askQty = roundLot(rand(rq[0], rq[1]), lot);
+    if (sellable >= Math.min(askQty, lot)) {
+      askQty = Math.min(askQty, sellable);
+      if (askQty >= 100) {
+        const r = this.market.place(n.acc, {
+          action: ACTIONS.SELL_CLOSE,
+          qty: askQty,
+          price: askPx,
+          now,
+          noCooldown: true,
+        });
+        if (r.ok) n.ownResting.push(r.order);
+      }
+    } else if (canShort && sentiment < (p.openShortSentiment != null ? p.openShortSentiment : -9) && askQty >= lot) {
+      // 机构/游资情绪偏空时主动开空补充卖盘
+      const r = this.market.place(n.acc, {
+        action: ACTIONS.SELL_OPEN,
+        qty: askQty,
+        price: askPx,
+        now,
+        noCooldown: true,
+      });
+      if (r.ok) n.ownResting.push(r.order);
+    }
+  }
+
+  /**
+   * 主动吃单，三条独立触发（缺一都会造成单边死锁）：
+   * - 动量：情绪同向且对手价在公允价值之内
+   * - 情绪：|s| 够大直接吃，不看价格（消息行情 / 杀跌的来源）
+   * - 价值：对手价偏离公允价值 0.5% 以上（贴着公允价值的均值回归盘，
+   *   保证 fv 与最新价脱节时永远有人把价格拉回来）
+   */
+  tryAggressive(n, now) {
+    const p = this.profileOf(n);
+    const canShort =
+      !!p.canShort &&
+      (!!config.margin.allowNakedShort ||
+        (config.margin.lending && config.margin.lending.enabled && this.market.lendAvailable() > 0));
+    const s = n.sentiment || 0;
+    const lot = this.stock.lotSize;
+    const book = this.market.book;
+    const fv = this.fairValue;
+    const aq = p.aggressiveQty || [100, 500];
+
+    if (book.asks.length > 0) {
+      const ask = book.asks[0];
+      const wantBuy = (s > 0.35 && fv >= ask.price) || s > 0.65 || fv >= ask.price * 1.005;
+      // 已有回补单在挂时不再下买：回补保证金在成交时才释放（place 不冻结），
+      // 同一 tick 双重回补会超出保证金总额
+      const hasCover = n.ownResting.some(
+        (o) => o.status === 'live' && o.action === ACTIONS.BUY_CLOSE
+      );
+      if (wantBuy && !hasCover) {
+        const coverable = n.acc.coverableShort(this.stock.id);
+        const isCover = coverable >= lot;
+        // 分歧度越高机构出手越重（多空大战放量），一致期回归常规规模
+        const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
+        let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+        if (isCover) {
+          qty = Math.min(qty, coverable, this.closeCapacity(n, ask.price, qty));
+        } else {
+          qty = Math.min(qty, this.longCapacity(n));
+          qty = Math.min(qty, this.cashCapacity(n, ask.price));
+        }
+        qty = Math.floor(qty / lot) * lot;
+        if (qty >= lot) {
+          this.market.place(n.acc, {
+            action: isCover ? ACTIONS.BUY_CLOSE : ACTIONS.BUY_OPEN,
+            qty,
+            price: this.market.clampPrice(ask.price + 0.01),
+            now,
+            noCooldown: true,
+          });
+        }
+      }
+    }
+
+    if (book.bids.length > 0) {
+      const bid = book.bids[0];
+      if ((s < -0.35 && fv <= bid.price) || s < -0.65 || fv <= bid.price * 0.995) {
+        const sellable = n.acc.freeSellableLong(this.stock.id, now);
+        const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
+        if (sellable >= 100) {
+          let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+          qty = Math.min(qty, sellable);
+          this.market.place(n.acc, {
+            action: ACTIONS.SELL_CLOSE,
+            qty,
+            price: this.market.clampPrice(bid.price - 0.01),
+            now,
+            noCooldown: true,
+          });
+        } else if (canShort) {
+          let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+          this.market.place(n.acc, {
+            action: ACTIONS.SELL_OPEN,
+            qty,
+            price: this.market.clampPrice(bid.price - 0.01),
+            now,
+            noCooldown: true,
+          });
+        }
+      }
+    }
+  }
+
+  /** 还能买入多少股（持仓上限 + 可用资金） */
+  longCapacity(n) {
+    const cfg = config.npc;
+    const maxLong =
+      Math.floor((n.initialLong * cfg.longCapMult) / this.stock.lotSize) * this.stock.lotSize;
+    return Math.max(0, maxLong - n.acc.longQty(this.stock.id));
+  }
+
+  cashCapacity(n, price) {
+    const room = n.acc.cash; // 挂单冻结已从 cash 扣除
+    return Math.floor(room / (price * (1 + config.trade.feeRate)));
+  }
+
+  /**
+   * 平空还能买多少股。口径必须与 place 的预检一致（FIFO 预览将释放的保证金，
+   * 不是账户总保证金），并迭代收敛到同一固定点——否则按总保证金算出的量
+   * 会被"平空需支付买入款"拒绝。目标量本身作为上限
+   */
+  closeCapacity(n, price, qty) {
+    const P = price * (1 + config.trade.feeRate);
+    const afford = (q) =>
+      Math.min(qty, Math.floor((n.acc.cash + n.acc.previewShortMargin(this.stock.id, q)) / P));
+    let cap = afford(qty);
+    for (let i = 0; i < 3; i++) {
+      const next = afford(cap);
+      if (next >= cap) break;
+      cap = next;
+    }
+    return cap;
+  }
+
+  /** 汇总 NPC 持仓/资金（调试与状态页用） */
+  summary() {
+    let long = 0;
+    let cash = 0;
+    for (const n of this.npcs) {
+      long += n.acc.longQty(this.stock.id);
+      cash += n.acc.cash;
+    }
+    return { long, cash: r2(cash) };
+  }
+}
+
+module.exports = { NpcManager, totalNpcCount, normalizeNpcType };

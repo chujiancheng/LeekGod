@@ -1,0 +1,18 @@
+# 依赖
+node_modules/
+
+# 运行时产物
+Server/server.log
+Server/server.pid
+Server/__pycache__/
+__pycache__/
+*.pyc
+
+# 数据存档（本地对局数据，不入库）
+Server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 工具缓存
+.playwright-cli/

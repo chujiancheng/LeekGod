@@ -1,0 +1,15 @@
+{
+  "name": "gushen-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "我是股神 - 游戏服务端",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test/market.test.js && node test/game.test.js && node test/persist.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "log4js": "^6.9.1"
+  }
+}

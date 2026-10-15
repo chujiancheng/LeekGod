@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>我是股神 · 股票模拟交易</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- 登录 -->
+  <div id="loginOverlay" class="overlay">
+    <div class="login-card">
+      <div class="login-logo">我是股神</div>
+      <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
+      <input id="loginName" type="text" maxlength="16" placeholder="输入账号名即可进入（无需密码）" autocomplete="off">
+      <button id="loginBtn">进入市场</button>
+      <div class="login-hint">初始资金 10 万 · 手续费万1 · T+2分钟锁仓 · 做空保证金 50%</div>
+      <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息</div>
+      <div class="login-hint">再次输入同一个账号名，就会回到原来的账户</div>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="view-nav" id="viewNav">
+        <button class="nav-btn active" data-view="home">主页</button>
+        <button class="nav-btn" data-view="trade">交易</button>
+      </div>
+      <div class="stock-id">
+        <span class="stock-name" id="stockName">--</span>
+        <span class="stock-code" id="stockCode">--</span>
+      </div>
+      <div class="price-block">
+        <span class="big-price" id="lastPrice">--</span>
+        <span class="price-change" id="priceChange">--</span>
+      </div>
+      <div class="stat-group">
+        <div class="stat"><label>今开</label><span id="stOpen">--</span></div>
+        <div class="stat"><label>最高</label><span id="stHigh">--</span></div>
+        <div class="stat"><label>最低</label><span id="stLow">--</span></div>
+        <div class="stat"><label>昨收</label><span id="stPrev">--</span></div>
+        <div class="stat"><label>成交量</label><span id="stVol">--</span></div>
+        <div class="stat"><label>成交额</label><span id="stAmount">--</span></div>
+        <div class="stat" id="bandStat" hidden><label>涨跌停</label><span id="stBand">--</span></div>
+      </div>
+      <div class="top-right">
+        <span class="conn-dot" id="connDot" title="连接状态"></span>
+        <span class="online" id="onlineCount">在线 --</span>
+        <span class="clock" id="clock">--:--:--</span>
+        <button class="ghost-btn" id="switchBtn" title="切换账号">换号</button>
+      </div>
+    </header>
+
+    <!-- 停牌横幅：由服务端 halt 状态驱动，两个视图共用 -->
+    <div class="halt-banner" id="haltBanner" hidden>
+      <span class="halt-tag">停牌</span>
+      <span class="halt-text" id="haltText">暂停交易</span>
+      <span class="halt-left" id="haltLeft"></span>
+    </div>
+
+    <!-- 视图一：交易大厅（登录后的落地页） -->
+    <div class="view home-view" id="homeView">
+      <section class="panel hero-panel">
+        <div class="hero-left">
+          <div class="hero-greet">你好，<span id="homeName">--</span></div>
+          <div class="hero-sub" id="homeSub">正在连接行情…</div>
+          <div class="hero-actions">
+            <button class="primary-btn" id="goTradeBtn">进入交易</button>
+            <button class="ghost-btn big" id="goPositionBtn">查看持仓</button>
+            <button class="ghost-btn big deposit-btn" id="addCashBtn" hidden>加钱</button>
+          </div>
+        </div>
+        <div class="hero-market">
+          <div class="market-head">市场概览</div>
+          <div class="market-stats" id="homeMarketStats"></div>
+          <div class="market-sub" id="homeMarketSub"></div>
+        </div>
+      </section>
+
+      <div class="home-grid">
+        <section class="panel home-card span-2">
+          <div class="panel-title">
+            <span>行情列表</span>
+            <span class="panel-sub" id="homeQuoteSub"></span>
+          </div>
+          <div class="card-scroll">
+            <table class="grid-table quote-table">
+              <thead>
+                <tr>
+                  <th>代码</th><th>名称</th><th>走势</th><th>现价</th>
+                  <th>涨跌</th><th>涨跌幅</th><th>成交量</th><th>成交额</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="homeQuoteBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel home-card">
+          <div class="panel-title"><span>我的资产</span></div>
+          <div class="asset-grid" id="homeAssets"></div>
+        </section>
+
+        <section class="panel home-card span-2">
+          <div class="panel-title"><span>我的持仓</span><span class="panel-sub" id="homePosSub"></span></div>
+          <div class="card-scroll">
+            <table class="grid-table">
+              <thead>
+                <tr>
+                  <th>股票</th><th>方向</th><th>数量</th><th>可平</th><th>均价</th>
+                  <th>现价</th><th>市值</th><th>盈亏</th><th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="homePosBody"><tr><td colspan="9" class="empty">暂无持仓</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel home-card">
+          <div class="panel-title"><span>收益排行</span><span class="panel-sub" id="homeRankSub"></span></div>
+          <div class="card-scroll">
+            <table class="grid-table">
+              <thead><tr><th>#</th><th>玩家</th><th>总权益</th></tr></thead>
+              <tbody id="homeRankBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel home-card span-3">
+          <div class="panel-title"><span>最新消息</span><span class="panel-sub" id="homeNewsSub"></span></div>
+          <ul class="news-list home-news wide" id="homeNews"><li class="empty">暂无消息</li></ul>
+        </section>
+      </div>
+    </div>
+
+    <!-- 视图二：交易终端 -->
+    <div class="view trade-view" id="tradeView" hidden>
+      <!-- 主区：分时 + 右栏 -->
+      <main class="main">
+        <section class="panel chart-panel">
+          <div class="panel-title">
+            <span>分时走势</span>
+            <span class="panel-sub" id="chartSub">均价与价格 · 成交量 · MACD(12,26,9)</span>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="chart"></canvas>
+            <div class="chart-tip" id="chartTip" hidden></div>
+          </div>
+        </section>
+
+        <aside class="right-col">
+          <section class="panel depth-panel">
+            <div class="panel-title"><span>五档盘口</span></div>
+            <table class="depth-table">
+              <tbody id="asksBody"></tbody>
+              <tbody class="depth-mid">
+                <tr><td colspan="3" class="mid-cell"><span id="depthLast">--</span><span id="depthChange">--</span></td></tr>
+              </tbody>
+              <tbody id="bidsBody"></tbody>
+            </table>
+          </section>
+
+          <section class="panel tape-panel">
+            <div class="panel-title"><span>逐笔成交</span></div>
+            <div class="tape-head"><span>时间</span><span>价格</span><span>成交量</span><span>方向</span></div>
+            <div class="tape" id="tape"></div>
+          </section>
+        </aside>
+      </main>
+
+      <!-- 下单面板 -->
+      <aside class="panel order-panel">
+        <div class="panel-title"><span>下单</span><span class="panel-sub" id="cooldownText"></span></div>
+
+        <div class="action-grid">
+          <button class="act-btn buy" data-action="buy_open">买入开多</button>
+          <button class="act-btn sell" data-action="sell_close">卖出平多</button>
+          <button class="act-btn sell short" data-action="sell_open">卖出开空</button>
+          <button class="act-btn buy cover" data-action="buy_close">买入平空</button>
+        </div>
+
+        <div class="field">
+          <label>价格</label>
+          <div class="price-input-row">
+            <button class="step-btn" id="pxDown">−</button>
+            <input id="priceInput" type="number" step="0.01" min="0.01">
+            <button class="step-btn" id="pxUp">＋</button>
+            <button class="mini-btn" id="pxAtMarket" title="按对手价填入">对手价</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>数量（股）</label>
+          <div class="qty-input-row">
+            <input id="qtyInput" type="number" step="100" min="100" value="100">
+            <span class="lot-hint" id="lotHint">= 1手</span>
+          </div>
+          <div class="quick-row">
+            <button class="mini-btn" data-frac="0.25">1/4</button>
+            <button class="mini-btn" data-frac="0.5">1/2</button>
+            <button class="mini-btn" data-frac="1">全仓</button>
+          </div>
+        </div>
+
+        <div class="estimates" id="estimates">
+          <div><label>预计金额</label><span id="estAmount">--</span></div>
+          <div><label>预计手续费</label><span id="estFee">--</span></div>
+          <div><label>可交易</label><span id="estMax">--</span></div>
+        </div>
+
+        <button class="submit-btn" id="submitBtn">提交委托</button>
+        <div class="funds-line" id="fundsLine">--</div>
+        <div class="risk-line" id="riskLine"></div>
+      </aside>
+
+      <!-- 底部标签 -->
+      <section class="bottom">
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-tab="position">持仓</button>
+          <button class="tab" data-tab="orders">委托<span class="badge" id="badgeOrders" hidden>0</span></button>
+          <button class="tab" data-tab="trades">成交</button>
+          <button class="tab" data-tab="news">消息<span class="badge gold" id="badgeNews" hidden>0</span></button>
+          <button class="tab" data-tab="holders">股东</button>
+          <button class="tab" data-tab="lending">融券</button>
+          <button class="tab" data-tab="rank">排行</button>
+          <button class="tab" data-tab="auto">自动<span class="badge" id="badgeAuto" hidden>0</span></button>
+        </div>
+        <div class="tab-panels" id="tabPanels">
+          <div class="tab-panel active" data-panel="position">
+            <div class="assets-row" id="assetsRow"></div>
+            <table class="grid-table">
+              <thead><tr><th>持仓</th><th>数量</th><th>可卖</th><th>成本/开仓价</th><th>现价</th><th>市值/市值</th><th>盈亏</th><th>状态</th></tr></thead>
+              <tbody id="posBody"><tr><td colspan="8" class="empty">暂无持仓</td></tr></tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="orders">
+            <table class="grid-table">
+              <thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>已成交</th><th>状态</th><th></th></tr></thead>
+              <tbody id="ordersBody"><tr><td colspan="7" class="empty">暂无委托</td></tr></tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="trades">
+            <table class="grid-table">
+              <thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th></tr></thead>
+              <tbody id="tradesBody"><tr><td colspan="5" class="empty">暂无成交</td></tr></tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="news">
+            <ul class="news-list" id="newsList"><li class="empty">暂无消息</li></ul>
+          </div>
+          <div class="tab-panel" data-panel="holders">
+            <div class="assets-row" id="holdersMeta"></div>
+            <table class="grid-table">
+              <thead><tr><th>#</th><th>股东名称</th><th>类型</th><th>持股数</th><th>占流通盘</th><th>较开服变动</th></tr></thead>
+              <tbody id="holdersBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="lending">
+            <div class="assets-row" id="lendingMeta"></div>
+            <div class="lending-grid">
+              <div class="lending-chart-wrap">
+                <div class="panel-title"><span>空头仓位变化</span><span class="panel-sub" id="shortHistSub">每 5 分钟采样</span></div>
+                <canvas id="shortHistChart" width="640" height="160"></canvas>
+              </div>
+              <div class="lending-actions">
+                <div class="panel-title"><span>我的出借</span><span class="panel-sub" id="myLendSub"></span></div>
+                <div class="field">
+                  <label>挂借数量（股）· 从可卖持仓划入，按日息生息</label>
+                  <div class="qty-input-row">
+                    <input id="lendQtyInput" type="number" step="100" min="100" value="100">
+                    <span class="lot-hint" id="lendLotHint"></span>
+                  </div>
+                  <div class="quick-row">
+                    <button class="mini-btn" id="lendAllBtn">全部可挂借</button>
+                    <button class="mini-btn" id="lendHalfBtn">一半</button>
+                    <button class="mini-btn" id="unlendAllBtn">全部撤回</button>
+                  </div>
+                </div>
+                <div class="lending-btn-row">
+                  <button class="primary-btn lending-btn" id="lendBtn">挂借生息</button>
+                  <button class="ghost-btn big lending-btn" id="unlendBtn">撤回挂借</button>
+                </div>
+                <div class="lending-mine" id="lendingMine"></div>
+              </div>
+            </div>
+          </div>
+          <div class="tab-panel" data-panel="rank">
+            <table class="grid-table">
+              <thead><tr><th>#</th><th>玩家</th><th>总权益</th></tr></thead>
+              <tbody id="rankBody"></tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="auto">
+            <div class="auto-toolbar">
+              <button class="mini-btn" id="autoNewBtn">＋ 新建策略</button>
+              <span class="panel-sub" id="autoSub"></span>
+            </div>
+            <table class="grid-table">
+              <thead><tr><th>类型</th><th>参数</th><th>状态</th><th>最近动作</th><th></th></tr></thead>
+              <tbody id="autoBody"><tr><td colspan="5" class="empty">暂无自动化策略，点右上「新建策略」创建</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 加钱弹窗 -->
+  <div id="depositOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card">
+      <div class="deposit-title">加钱</div>
+      <div class="login-sub">单账户终身累计最多加 <b id="depMax">--</b></div>
+      <div class="deposit-quota" id="depQuota">--</div>
+      <div class="quick-row" id="depPresets"></div>
+      <input id="depAmount" type="number" min="1" step="1" placeholder="输入加钱金额（元）" autocomplete="off">
+      <button id="depConfirmBtn">确认加钱</button>
+      <button class="deposit-cancel" id="depCancelBtn">取消</button>
+    </div>
+  </div>
+
+  <!-- 自动化策略新建弹窗 -->
+  <div id="autoOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card auto-card">
+      <div class="deposit-title">新建自动化策略</div>
+      <div class="auto-type-row" id="autoTypeRow">
+        <button class="auto-type-btn active" data-type="tps">止盈止损</button>
+        <button class="auto-type-btn" data-type="grid">网格</button>
+        <button class="auto-type-btn" data-type="ma">双均线</button>
+        <button class="auto-type-btn" data-type="dca">定投</button>
+      </div>
+      <div class="auto-fields" id="autoFields"></div>
+      <button id="autoConfirmBtn">创建策略</button>
+      <button class="deposit-cancel" id="autoCancelBtn">取消</button>
+    </div>
+  </div>
+
+  <div id="toastWrap" class="toast-wrap"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
