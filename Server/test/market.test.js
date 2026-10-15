@@ -36,6 +36,16 @@ function fresh() {
   return { m, A, N };
 }
 
+/**
+ * 额外垫单账户。同股多空互斥之后一个账户在同一只股票上只能站一边，
+ * 所以一个用例里既要买盘又要卖盘时必须换账户垫——这里是标准做法。
+ */
+function pad(name) {
+  const acc = new Account(name, true);
+  acc.cash = 100000000;
+  return acc;
+}
+
 // ---- 1. 限价撮合 ----
 console.log('\n[1] 限价撮合与资金结算');
 {
@@ -154,8 +164,9 @@ console.log('\n[7] 平空实现盈亏');
   const { m, A, N } = fresh();
   m.place(N, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20.0, now: 1000, noCooldown: true });
   m.place(A, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20.0, now: 1000 });
-  // 价格跌到 19：NPC 挂卖单，玩家买入平空
-  m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 19.0, now: 2000, noCooldown: true });
+  // 价格跌到 19：换一个还没建过仓的垫单账户挂卖单，玩家买入平空
+  // （N 这时已持多头，再卖开会被同股多空互斥拦掉）
+  m.place(pad('垫单2'), { action: ACTIONS.SELL_OPEN, qty: 1000, price: 19.0, now: 2000, noCooldown: true });
   const r = m.place(A, { action: ACTIONS.BUY_CLOSE, qty: 1000, price: 19.0, now: 3001 });
   assert(r.ok && r.order.filled === 1000, '买入平空成交');
   assert(A.shortQty('600001') === 0, '空头持仓归零');
@@ -227,7 +238,8 @@ console.log('\n[11] 持仓被消耗后的残留挂单不得凭空产生现金');
   assert(A.longQty('600001') === 0, '持仓已归零（挂单成为残留单）');
 
   const cashBefore = A.cash;
-  const r = m.place(N, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 30, now: t + 1000, noCooldown: true });
+  // N 前面卖出开空留下了 1000 股空头，这里改用买入平空做对手（再买开会撞互斥规则）
+  const r = m.place(N, { action: ACTIONS.BUY_CLOSE, qty: 1000, price: 30, now: t + 1000, noCooldown: true });
   const delta = A.cash - cashBefore;
   assert(Math.abs(A.cash - cashBefore) < 10, `未凭空产生卖出款 (Δ=${delta.toFixed(2)}，仅退回手续费预估)`);
   assert(!m.book.orders.has(o.order.id), '残留挂单已从订单簿清理');
@@ -261,22 +273,21 @@ console.log('\n[13] 系统兜底账户不累积持仓（防内存泄漏）');
   assert(A.longQty('600001') === 0, '强卖确实执行完毕');
 }
 
-// ---- 14. 强平会先撤掉平仓挂单 ----
-console.log('\n[14] 强平前先撤掉平仓挂单（不留幽灵单）');
+// ---- 14. 强平会先撤掉在途委托 ----
+console.log('\n[14] 强平前先撤掉在途委托（不留幽灵单）');
 {
   const { m, A, N } = fresh();
   const t = 6 * 60 * 1000;
   // 开空预检按保证金率卡权益（10 万股名义 20 万需权益 ≥ 10 万），先给足权益
   A.cash = 300000;
-  // A 建仓 1000 股，并开空 1 万股
-  m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
-  m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 0 });
+  // A 借 N 的买单开空 1 万股（同股多空互斥下 A 只能站空头一侧）
   m.place(N, { action: ACTIONS.BUY_OPEN, qty: 10000, price: 20, now: 0, noCooldown: true });
-  const short = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 10000, price: 20, now: 3000 });
-  assert(short.ok && A.shortQty('600001') === 10000, 'A 开空 1 万股');
+  const short = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 10000, price: 20, now: 0 });
+  assert(short.ok && A.shortQty(stock.id) === 10000, 'A 开空 1 万股');
 
-  const o = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: 1000, price: 29, now: t });
-  assert(o.ok && A.sellableLong('600001', t) === 0, '卖平多挂单占满预留');
+  // 再挂一张在途委托（加空），强平必须连它一起撤掉
+  const o = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 29, now: t });
+  assert(o.ok && o.order.status === 'live', '加空单挂在簿上');
   assert(A.orders.size === 1, 'A 有 1 张在挂委托');
 
   // 制造爆仓（模拟巨亏：现金被击穿）
@@ -285,39 +296,42 @@ console.log('\n[14] 强平前先撤掉平仓挂单（不留幽灵单）');
   assert(liquidated, '触发强平');
   assert(A.orders.size === 0, `强平后 A 无遗留挂单 (剩 ${A.orders.size})`);
   assert(!m.book.orders.has(o.order.id), '该挂单已从订单簿移除');
-  assert(A.longQty('600001') === 0, '强平已卖出多头');
+  assert(A.shortQty(stock.id) === 0, '强平已平掉全部空头');
 }
 
 // ---- 15. 权益恒等式 ----
 console.log('\n[15] 权益恒等式：总权益 = 初始资金 + 已实现盈亏 + 浮动盈亏');
 {
   const { m, A, N } = fresh();
-  const sumCost = (map) => {
-    const p = map.get('600001');
+  const sideCost = (acc, map) => {
+    const p = map.get(stock.id);
     return p ? p.lots.reduce((s, l) => s + l.qty * l.price, 0) : 0;
   };
-  const identity = () => {
+  const identity = (acc) => {
     const last = m.lastPrice;
-    const floatPnl = A.longValue('600001', last) - sumCost(A.longs)
-      + sumCost(A.shorts) - A.shortMV('600001', last);
-    return { eq: A.equity(() => last), expect: config.account.initialCash + A.realizedPnL + floatPnl };
+    const floatPnl = acc.longValue(stock.id, last) - sideCost(acc, acc.longs)
+      + sideCost(acc, acc.shorts) - acc.shortMV(stock.id, last);
+    return { eq: acc.equity(() => last), expect: config.account.initialCash + acc.realizedPnL + floatPnl };
   };
 
   m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
   m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 0 });
   assert(Math.abs(A.realizedPnL + 2) < 0.01, `开多手续费计入已实现盈亏 (${A.realizedPnL.toFixed(2)})`);
-  let r = identity();
+  let r = identity(A);
   assert(Math.abs(r.eq - r.expect) < 0.01, `开多后恒等 (eq=${r.eq.toFixed(2)} expect=${r.expect.toFixed(2)})`);
 
-  m.place(N, { action: ACTIONS.BUY_OPEN, qty: 2000, price: 20, now: 0, noCooldown: true });
-  m.place(A, { action: ACTIONS.SELL_OPEN, qty: 2000, price: 20, now: 3001 });
-  r = identity();
+  // 开空/平空换一个只做空的账户：同股多空互斥下 A 已持多头，不能再卖开
+  const S = pad('空头S');
+  S.cash = config.account.initialCash; // 恒等式按初始资金口径，垫单账户的巨额本金不适用
+  m.place(pad('垫单3'), { action: ACTIONS.BUY_OPEN, qty: 2000, price: 20, now: 0, noCooldown: true });
+  m.place(S, { action: ACTIONS.SELL_OPEN, qty: 2000, price: 20, now: 0 });
+  r = identity(S);
   assert(Math.abs(r.eq - r.expect) < 0.01, `开空后恒等 (eq=${r.eq.toFixed(2)} expect=${r.expect.toFixed(2)})`);
 
-  m.place(N, { action: ACTIONS.SELL_OPEN, qty: 2000, price: 21, now: 0, noCooldown: true });
-  const rc = m.place(A, { action: ACTIONS.BUY_CLOSE, qty: 2000, price: 21, now: 6002 });
+  m.place(pad('垫单4'), { action: ACTIONS.SELL_OPEN, qty: 2000, price: 21, now: 0, noCooldown: true });
+  const rc = m.place(S, { action: ACTIONS.BUY_CLOSE, qty: 2000, price: 21, now: 3001 });
   assert(rc.ok && rc.order.filled === 2000, '买入平空成交');
-  r = identity();
+  r = identity(S);
   assert(Math.abs(r.eq - r.expect) < 0.01, `平空后恒等 (eq=${r.eq.toFixed(2)} expect=${r.expect.toFixed(2)})`);
 }
 
@@ -540,27 +554,31 @@ console.log('\n[23] 强平卖多头豁免锁仓但不碰挂借');
   config.margin.lending.enabled = true;
   const { m } = fresh();
   const L = new Account('出借人');
-  const buyer = new Account('买方');
-  buyer.cash = 1e8;
-  m.accountsProvider = () => [L, buyer];
+  m.accountsProvider = () => [L];
   L.cash = 0;
-  L.longPos('600001').lots.push({ qty: 1000, price: 20, ts: -1e9, reserved: 0 });
+  m.lastPrice = 20;
+  L.longPos(stock.id).lots.push({ qty: 1000, price: 20, ts: -1e9, reserved: 0 });
 
   assert(m.lendShares(L, 1000, 0).ok, '全部持仓挂借');
-  const open = m.place(L, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
-  assert(open.ok, '借券开空 1000 股');
-  const hit = m.place(buyer, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 1000, noCooldown: true });
-  assert(hit.order.filled === 1000, '开空成交');
+
+  // 「挂借中的多头 + 空头」在互斥规则下已经不可能由 place 建出来（卖开会撞多头持仓），
+  // 只能来自旧档残留。这里直接构造该状态——本节验的是强平不碰挂借中券这条底线。
+  // 现金/保证金按正常路径的口径摆：开空 1000 股卖出款 20000 − 50% 保证金 − 手续费。
+  L.shorts.set(stock.id, { lots: [{ qty: 1000, price: 20, margin: 10000, reserved: 0 }] });
+  L.shortMargin = 10000;
+  L.cash = 9998;
+  m.lendBorrowed = 1000;
+  m.shortInterest = 1000;
 
   m.lastPrice = 80; // 空头深水：cash+保证金不足以买回 → 旧逻辑会强卖多头补现金
   const liq = m.maybeLiquidate(L, 2000);
   const events = (L.liquidations && L.liquidations[0] && L.liquidations[0].events) || [];
   assert(liq, '触发强平');
   assert(events.every((e) => e.type !== 'force_sell_long'), '没有强卖多头事件（可卖量被挂借挡掉）');
-  assert(L.longQty('600001') === 1000, `挂借中的 1000 股多头未被强平卖出 (剩 ${L.longQty('600001')})`);
-  assert(L.ledgerOf(STOCK.id).lendOffered === 1000, '挂借登记保持 1000');
-  assert(L.shortQty('600001') < 1000 && L.shortQty('600001') > 0, `剩余空头 ${L.shortQty('600001')} 股（能负担多少平多少）`);
-  assert(m.lendBorrowed === L.shortQty('600001'), '借出量与剩余空头一致');
+  assert(L.longQty(stock.id) === 1000, `挂借中的 1000 股多头未被强平卖出 (剩 ${L.longQty(stock.id)})`);
+  assert(L.ledgerOf(stock.id).lendOffered === 1000, '挂借登记保持 1000');
+  assert(L.shortQty(stock.id) < 1000 && L.shortQty(stock.id) > 0, `剩余空头 ${L.shortQty(stock.id)} 股（能负担多少平多少）`);
+  assert(m.lendBorrowed === L.shortQty(stock.id), '借出量与剩余空头一致');
   config.margin.allowNakedShort = true;
 }
 
@@ -833,6 +851,68 @@ console.log('\n[32] 融资批次本金与未还利息');
   assert(Math.abs(A.financePrincipal('600001') - 5000) < 0.01, `本金按比例减半 (${A.financePrincipal('600001').toFixed(2)})`);
   const unpaidAfter = A.financeDebt('600001') - A.financePrincipal('600001');
   assert(Math.abs(unpaidAfter - unpaid / 2) < 0.02, `未还利息同步减半 (${unpaidAfter.toFixed(2)})`);
+}
+
+// ---- 33. 同股多空互斥（港交所口径） ----
+console.log('\n[33] 同一账户同一只股票只能持有一个方向（含在途委托）');
+{
+  const { m, A } = fresh();
+  const lot = stock.lotSize;
+  const lock = () => A.sideLock(stock.id);
+  assert(!lock().long && !lock().short, '空仓时两端都未占用');
+
+  // (1) 空仓：买开挂入（未成交，留在簿上）
+  const b1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 19, now: 0 });
+  assert(b1.ok && b1.order.filled === 0, '空仓时买开挂入');
+  // (2) 在途的买开委托也算占住多头方向——否则两张反向单先后成交就多空并存了
+  assert(lock().long && !lock().short, '在途买开单已占住多头方向');
+  const s1 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: lot, price: 21, now: 3001, noCooldown: true });
+  assert(!s1.ok && /多头/.test(s1.error), `在途买开单挡住卖开（${s1.error}）`);
+
+  // (3) 撤单解锁 → 卖开与垫单成交，账户真正持空
+  m.cancel(A, b1.order.id, 5000);
+  assert(!lock().long, '撤单后多头方向解锁');
+  m.place(pad('垫单甲'), { action: ACTIONS.BUY_OPEN, qty: lot, price: 21, now: 5000, noCooldown: true });
+  const s2 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: lot, price: 21, now: 7000, noCooldown: true });
+  assert(s2.ok && s2.order.filled === lot && A.shortQty(stock.id) === lot, '撤单后卖开成交，账户持空');
+
+  // (4) 持空时：买开被拒，买入平空照常放行
+  const b2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: 10000, noCooldown: true });
+  assert(!b2.ok && /空头/.test(b2.error), `持空时买开被拒（${b2.error}）`);
+  m.place(pad('垫单乙'), { action: ACTIONS.SELL_OPEN, qty: lot, price: 21, now: 11000, noCooldown: true });
+  const c1 = m.place(A, { action: ACTIONS.BUY_CLOSE, qty: lot, price: 21, now: 13000, noCooldown: true });
+  assert(c1.ok && c1.order.filled === lot && A.shortQty(stock.id) === 0, '买入平空照常放行，空头归零');
+
+  // (5) 平空后方向重新解锁
+  const b4 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 21, now: 16000, noCooldown: true });
+  assert(b4.ok, `平空后买开放行${b4.ok ? '' : ': ' + b4.error}`);
+}
+
+// ---- 34. 旧档残留的多空并存：只许平、不许再开 ----
+console.log('\n[34] 旧档多空并存：只许平仓，不再新增任何一侧');
+{
+  const { m, A, N } = fresh();
+  const lot = stock.lotSize;
+  // 互斥规则之后 place 建不出这种状态，只能直接构造（模拟旧存档）
+  A.longPos(stock.id).lots.push({ qty: lot, price: 19, ts: -1e9, reserved: 0 });
+  A.shorts.set(stock.id, { lots: [{ qty: lot, price: 21, margin: 21000, reserved: 0 }] });
+  A.shortMargin = 21000;
+  const lock = A.sideLock(stock.id);
+  assert(lock.long && lock.short, '两端都被占用');
+
+  const bu = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: 0 });
+  assert(!bu.ok && /空头/.test(bu.error), `加多被拒（${bu.error}）`);
+  const so = m.place(A, { action: ACTIONS.SELL_OPEN, qty: lot, price: 21, now: 3001, noCooldown: true });
+  assert(!so.ok && /多头/.test(so.error), `加空被拒（${so.error}）`);
+
+  // 平仓两端都放行：无论先平哪一侧，平到只剩单方向就自然收敛
+  m.place(N, { action: ACTIONS.BUY_OPEN, qty: lot, price: 21, now: 0, noCooldown: true });
+  const sc = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 21, now: 6002, noCooldown: true });
+  assert(sc.ok && sc.order.filled === lot, `卖出平多放行${sc.ok ? '' : ': ' + sc.error}`);
+  assert(A.longQty(stock.id) === 0 && A.shortQty(stock.id) === lot, '平多后只剩空头（收敛到单方向）');
+  assert(!A.sideLock(stock.id).long, '多头方向已释放');
+  const ru = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 21, now: 9003, noCooldown: true });
+  assert(!ru.ok && /空头/.test(ru.error), '仍持空时买开依旧被拒');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

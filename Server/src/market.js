@@ -467,6 +467,19 @@ class Market {
       return { ok: false, error: `价格超出涨跌停范围（${b.down} ~ ${b.up}）` };
     }
 
+    // 同股多空互斥（港交所口径）：同一账户在同一只股票上只能持有一个方向。
+    // 占用判定含在途开仓委托，所以想换向必须先撤单、把另一侧真正平掉。
+    // 平仓（sell_close / buy_close）与同向加仓不受限，由下面的券源/保证金闸门管。
+    if (isOpen) {
+      const lock = account.sideLock(this.stock.id);
+      if (action === ACTIONS.BUY_OPEN && lock.short) {
+        return { ok: false, error: '该股已有空头持仓（或卖出开空委托在途），需先买入平空才能买入开多' };
+      }
+      if (action === ACTIONS.SELL_OPEN && lock.long) {
+        return { ok: false, error: '该股已有多头持仓（或买入开多委托在途），需先卖出平多才能卖出开空' };
+      }
+    }
+
     // 下单冷却（NPC 不受限）
     if (!account.isNPC && !opts.noCooldown && account.lastOrderAt != null) {
       const wait = config.trade.cooldownMs - (now - account.lastOrderAt);

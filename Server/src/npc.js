@@ -110,8 +110,15 @@ class NpcManager {
         const shares = sharesArr[i];
         acc.initialLong = shares;
         acc.longPos(this.stock.id).lots.push({ qty: shares, price: this.stock.initPrice, ts: now - preAge, reserved: 0 });
-        // NPC 自动出借：按类型固定比例挂入融券池（开局玩家没券，池子必须有基础券源）
-        const lendRatio = config.margin.lending ? config.margin.lending.npcLendRatio : 0;
+        // NPC 自动出借：按类型固定比例挂入融券池（开局玩家没券，池子必须有基础券源）。
+        // 做空类（机构/游资）不出借：同股多空互斥下它们要靠卖光库存翻成净空，
+        // 而挂借中的券卖不掉（freeSellableLong 扣掉 lendOffered），留着挂借就永远翻不了空。
+        // 池子的基础券源由不做空的被动持有者（大户/中户/散户，合计 60% 流通盘）承担。
+        const lendRatio = t.canShort
+          ? 0
+          : config.margin.lending
+            ? config.margin.lending.npcLendRatio
+            : 0;
         if (lendRatio > 0) {
           const lendQty = Math.floor((shares * lendRatio) / lot) * lot;
           if (lendQty >= lot) {
@@ -130,6 +137,8 @@ class NpcManager {
           camp: t.useCamp ? (instIdx++ % 2 === 0 ? 1 : -1) : 0,
           ownBias: 0,
           ownResting: [],
+          // 报价阵营：同股多空互斥下每张单只能落在一侧，空头阵营要先派发库存再翻净空
+          wantShort: false,
           // 大户错峰更散，小散户随机拉长，避免同拍重报价
           requoteIn: typeKey === 'inst' ? i : Math.floor(rand(0, typeKey === 'small' ? 16 : 8)),
         });
@@ -151,6 +160,8 @@ class NpcManager {
     for (const n of this.npcs) {
       this.gcResting(n);
       this.updateBias(n, now);
+      this.updateSide(n);
+      this.syncLend(n);
       const shouldRequote = this.shouldRequote(n);
       if (shouldRequote) this.requote(n, now);
       // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate
@@ -273,12 +284,17 @@ class NpcManager {
       s -= Math.max(-0.8, Math.min(0.8, heat)) * p.heatFade;
     }
 
-    // 库存软目标：超配倾向派发、低配倾向收集
+    // 库存软目标：超配倾向派发、低配倾向收集。
+    // 做空类（机构/游资）**只惩罚超配**：同股多空互斥下它们要靠卖光库存翻成净空，
+    // 低配时再叠一层买回倾向，库存永远降不到 0、净空也就永远建不起来。
+    // 低位吸筹交给基本面锚（机构的 fundWeight）与公开消息对倒承担。
+    // 被动持有者不做空，保留双向软目标：恐慌卖光后还会收集回来，盘口不会只剩单边。
     if (p.inventorySkew) {
       const target = n.initialLong || 0;
       if (target > 0) {
         const dev = (n.acc.longQty(this.stock.id) - target) / target;
-        s -= Math.max(-1, Math.min(1, dev)) * p.inventorySkew;
+        const d = p.canShort ? Math.max(0, dev) : dev;
+        s -= Math.max(-1, Math.min(1, d)) * p.inventorySkew;
       }
     }
 
@@ -297,6 +313,46 @@ class NpcManager {
     n.ownBias += gauss() * 0.06;
     n.ownBias *= 0.95; // 缓慢回归
     n.sentiment = Math.max(-1, Math.min(1, s + n.ownBias));
+  }
+
+  /**
+   * 本 tick 的报价阵营（同股多空互斥：每张单只能落在一侧）。
+   * 机构/游资在情绪够低时切到**空头阵营**：先停挂买盘、把库存往外派发，
+   * 库存清干净后变成净空（卖开补卖盘、买盘只回补）；情绪回到阈值以上切回多头阵营。
+   * 少了这一步就永远开不出空——只要还押着库存就进不了开空分支，而没有阵营切换
+   * 也没有任何力量把库存推到 0（实测 600 tick 空头存量恒为 0）。
+   * wantShort 带滞回，避免情绪贴着阈值抖动导致买卖盘反复翻面。
+   * 不做空的类型（大户/中户/散户）永远是多头阵营。
+   * @returns {boolean} 是否处于空头阵营
+   */
+  updateSide(n) {
+    const p = this.profileOf(n);
+    if (!p.canShort) {
+      n.wantShort = false;
+      return false;
+    }
+    const th = p.openShortSentiment != null ? p.openShortSentiment : -9;
+    const s = n.sentiment || 0;
+    if (!n.wantShort && s < th) n.wantShort = true;
+    else if (n.wantShort && s > th + 0.08) n.wantShort = false;
+    return n.wantShort;
+  }
+
+  /**
+   * 做空类（机构/游资）撤清挂借：同股多空互斥下翻空的前提是库存卖到 0 股，
+   * 而挂借中的券卖不掉（freeSellableLong 扣掉 lendOffered）。新局 init 就不给它们挂借，
+   * 旧档里已经挂出去的在跑起来后逐步撤回——已被借走的部分受券源锁保护
+   * （lendRemovableQty），只能等对方回补解锁后再撤，所以先问可撤量，
+   * 不足一手就直接返回，避免每 tick 空转把账户标脏。
+   */
+  syncLend(n) {
+    if (!this.profileOf(n).canShort) return;
+    const led = n.acc.ledgerOf(this.stock.id);
+    if (!led.lendOffered) return;
+    const lot = this.stock.lotSize;
+    const qty = Math.floor(this.market.lendRemovableQty(n.acc) / lot) * lot;
+    if (qty < lot) return;
+    this.market.unlendShares(n.acc, qty, Date.now());
   }
 
   /**
@@ -396,11 +452,15 @@ class NpcManager {
       Math.min(0.5, sentiment * (p.quoteTilt != null ? p.quoteTilt : 0.3))
     );
 
-    // 买盘：有空头在手优先用现金+保证金回补（BUY_CLOSE），否则才开多。
+    // 买盘：空头阵营下一律不挂买开——挂买盘等于自己把派发出去的货接回来，
+    // 库存就永远降不到 0、净空也就建不起来（实测残留挂单能把库存重新顶回 30 万股）。
+    // 手上有空头时照常挂，但那一侧只能是回补（BUY_CLOSE）。
     // 全池现金常被保证金吸干，回补是买盘的主要资金来源。
     // 分歧度高时机构双边挂单也加大（多空大战的“工事”更深）
     const reScale = p.polarOrderScale ? 1 + this.polar * 0.6 : 1;
-    if (bidPx > 0.01) {
+    const wantShort = n.wantShort === true;
+    const shortQty = n.acc.shortQty(this.stock.id);
+    if ((!wantShort || shortQty > 0) && bidPx > 0.01) {
       let qty = roundLot(rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt), lot);
       const coverable = n.acc.coverableShort(this.stock.id);
       if (coverable >= lot) {
@@ -416,7 +476,8 @@ class NpcManager {
           });
           if (r.ok) n.ownResting.push(r.order);
         }
-      } else if (this.longCapacity(n) >= lot) {
+      } else if (shortQty === 0 && this.longCapacity(n) >= lot) {
+        // 开多需要一个空头都没有：有空头（含旧档残留）在手时只能先回补，不能反手开多
         qty = Math.min(qty, this.longCapacity(n));
         qty = Math.min(qty, this.cashCapacity(n, bidPx));
         qty = Math.floor(qty / lot) * lot;
@@ -427,7 +488,9 @@ class NpcManager {
       }
     }
 
-    // 卖盘：优先卖出持仓（扣掉已挂借融券的）；机构/游资在持仓不足时可开空
+    // 卖盘：优先卖出持仓（扣掉已挂借融券的）；库存清零后若在空头阵营就开空补卖盘。
+    // 只要还持有库存就不反手——挂借中的券卖不掉时先由 syncLend 把券撤回来，
+    // 库存清干净了下一轮自然翻成净空。
     const sellable = n.acc.freeSellableLong(this.stock.id, now);
     let askQty = roundLot(rand(rq[0], rq[1]) * this.qtyScale * (1 - tilt), lot);
     if (sellable >= Math.min(askQty, lot)) {
@@ -442,8 +505,8 @@ class NpcManager {
         });
         if (r.ok) n.ownResting.push(r.order);
       }
-    } else if (canShort && sentiment < (p.openShortSentiment != null ? p.openShortSentiment : -9) && askQty >= lot) {
-      // 机构/游资情绪偏空时主动开空补充卖盘
+    } else if (wantShort && n.acc.longQty(this.stock.id) === 0 && canShort && askQty >= lot) {
+      // 机构/游资站空头侧时主动开空补充卖盘
       const r = this.market.place(n.acc, {
         action: ACTIONS.SELL_OPEN,
         qty: askQty,
@@ -486,22 +549,29 @@ class NpcManager {
       if (wantBuy && !hasCover) {
         const coverable = n.acc.coverableShort(this.stock.id);
         const isCover = coverable >= lot;
-        // 分歧度越高机构出手越重（多空大战放量），一致期回归常规规模
-        const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
-        let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
-        if (isCover) {
-          qty = Math.min(qty, coverable, this.closeCapacity(n, ask.price, qty));
-        } else {
-          qty = Math.min(qty, this.longCapacity(n));
-          qty = Math.min(qty, this.cashCapacity(n, ask.price));
-        }
-        qty = Math.floor(qty / lot) * lot;
-        if (qty >= lot) {
-          const price = this.market.clampPrice(ask.price + 0.01);
+        // 同股多空互斥：有空头在手（含本 tick 刚挂出的买开）就只回补，不再开多。
+        // 空头阵营里也一律不开多——那一侧正在往下派发，自己接自己砸出来的货，
+        // 库存永远降不到 0、净空也就永远建不起来（实测会被自己的价值抄底买回 3 成）。
+        const canOpenLong =
+          isCover || (!n.wantShort && !n.acc.sideLock(this.stock.id).short);
+        if (canOpenLong) {
+          // 分歧度越高机构出手越重（多空大战放量），一致期回归常规规模
+          const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
+          let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
           if (isCover) {
-            this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true });
+            qty = Math.min(qty, coverable, this.closeCapacity(n, ask.price, qty));
           } else {
-            this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
+            qty = Math.min(qty, this.longCapacity(n));
+            qty = Math.min(qty, this.cashCapacity(n, ask.price));
+          }
+          qty = Math.floor(qty / lot) * lot;
+          if (qty >= lot) {
+            const price = this.market.clampPrice(ask.price + 0.01);
+            if (isCover) {
+              this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true });
+            } else {
+              this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
+            }
           }
         }
       }
@@ -522,7 +592,8 @@ class NpcManager {
             now,
             noCooldown: true,
           });
-        } else if (canShort) {
+        } else if (canShort && !n.acc.sideLock(this.stock.id).long) {
+          // 开空同样要求多头端是空的（一手都不剩、也没有在途买开/买平之外的多头占用）
           let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
           this.market.place(n.acc, {
             action: ACTIONS.SELL_OPEN,

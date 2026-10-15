@@ -93,12 +93,15 @@ const r2res = P(g1).place(acc1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: re
 assert(r2res.ok, `远离盘口的买单被接受${r2res.ok ? '' : ': ' + r2res.error}`);
 const restingId = r2res.ok ? r2res.order.id : '';
 
-// 开空：吃对手盘成交，验证保证金与空头批次
+// 开空：换一个只做空的玩家账户成交（测试玩家已持多头，再卖开会撞同股多空互斥）
+const loginS = g1.login('空头玩家');
+assert(loginS.ok, '第二个玩家登录成功');
+const accS = g1.store.get('空头玩家');
 const sellPrice = P(g1).roundPrice(P(g1).lastPrice * 0.8);
-const r3 = P(g1).place(acc1, { action: ACTIONS.SELL_OPEN, qty: 1000, price: sellPrice, now: Date.now(), noCooldown: true });
+const r3 = P(g1).place(accS, { action: ACTIONS.SELL_OPEN, qty: 1000, price: sellPrice, now: Date.now(), noCooldown: true });
 assert(r3.ok, `开空委托被接受${r3.ok ? '' : ': ' + r3.error}`);
 for (let i = 0; i < 5; i++) g1.tick();
-assert(acc1.shortQty(STOCK.id) > 0, `成交后持有空头 ${acc1.shortQty(STOCK.id)} 股`);
+assert(accS.shortQty(STOCK.id) > 0, `成交后持有空头 ${accS.shortQty(STOCK.id)} 股`);
 assert(acc1.orders.has(restingId), '活动委托仍在账户挂单表里');
 
 // 融资负债随多头批次落盘：手动挂负债并标脏，重启后必须原样恢复
@@ -125,11 +128,12 @@ const before = {
   shortMargin: acc1.shortMargin,
   realizedPnL: acc1.realizedPnL,
   deposited: acc1.deposited,
+  shortAcc: { cash: accS.cash, orderFrozen: accS.orderFrozen, shortMargin: accS.shortMargin, realizedPnL: accS.realizedPnL },
   financeInterestAccrued: acc1.ledgerOf(STOCK.id).financeInterestAccrued,
   lendInterestPaid: acc1.ledgerOf(STOCK.id).lendInterestPaid,
   lendInterestDebt: acc1.ledgerOf(STOCK.id).lendInterestDebt,
   longQty: acc1.longQty(STOCK.id),
-  shortQty: acc1.shortQty(STOCK.id),
+  shortQty: accS.shortQty(STOCK.id),
   lots: acc1.longPos(STOCK.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0, principal: l.principal || 0 })),
   tradeCount: acc1.tradeHistory.length,
   pricePoints: P(g1).priceHistory.length,
@@ -157,7 +161,9 @@ g2.start();
 g2.stop();
 
 const acc2 = g2.store.get('测试玩家');
+const accS2 = g2.store.get('空头玩家');
 assert(!!acc2, '玩家账户被恢复');
+assert(!!accS2, '做空玩家账户被恢复');
 assert(!!g2.store.get(`${STOCK.alias}·机构1`) && !!g2.store.get(`${STOCK.alias}·散户220`), 'NPC 账户被恢复');
 const expectSlots = Object.values(config.npc.types).reduce((s, t) => s + t.count, 0);
 assert(N(g2).npcs.length === expectSlots, `NPC 报价对象重建 ${N(g2).npcs.length} / 期望 ${expectSlots}`);
@@ -165,6 +171,9 @@ assert(N(g2).npcs.length === expectSlots, `NPC 报价对象重建 ${N(g2).npcs.l
 assert(acc2.cash === before.cash, `现金一致 ${acc2.cash}`);
 assert(acc2.orderFrozen === before.orderFrozen, `挂单冻结一致 ${acc2.orderFrozen}`);
 assert(acc2.shortMargin === before.shortMargin, `空头保证金一致 ${acc2.shortMargin}`);
+assert(accS2.cash === before.shortAcc.cash, `做空账户现金一致 ${accS2.cash}`);
+assert(accS2.shortMargin === before.shortAcc.shortMargin, `做空账户保证金一致 ${accS2.shortMargin}`);
+assert(accS2.realizedPnL === before.shortAcc.realizedPnL, `做空账户已实现盈亏一致 ${accS2.realizedPnL}`);
 assert(acc2.realizedPnL === before.realizedPnL, `已实现盈亏一致 ${acc2.realizedPnL}`);
 assert(acc2.deposited === before.deposited, `终身累计加钱一致 ${acc2.deposited}`);
 assert(acc2.initialLong === acc1.initialLong, '初始持股标记一致');
@@ -174,12 +183,12 @@ assert(acc2.ledgerOf(STOCK.id).lendInterestDebt === before.lendInterestDebt, `�
 
 console.log('\n[4] 持仓批次（含锁仓时间与预留）完整恢复');
 assert(acc2.longQty(STOCK.id) === before.longQty, `多头数量一致 ${acc2.longQty(STOCK.id)}`);
-assert(acc2.shortQty(STOCK.id) === before.shortQty, `空头数量一致 ${acc2.shortQty(STOCK.id)}`);
+assert(accS2.shortQty(STOCK.id) === before.shortQty, `空头数量一致 ${accS2.shortQty(STOCK.id)}`);
 const lots2 = acc2.longPos(STOCK.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0, principal: l.principal || 0 }));
 assert(JSON.stringify(lots2) === JSON.stringify(before.lots), `多头批次逐笔一致（${lots2.length} 批，含 ts/reserved/debt/principal）`);
 assert(lots2.some((l) => l.debt === 1234.56 && l.principal === 1000), '融资负债与本金（1234.56 / 1000）原样恢复');
 assert(lots2.some((l) => l.debt === 1234.56), '融资负债 1234.56 原样恢复');
-assert(acc2.shortPos(STOCK.id).lots.every((l) => l.margin > 0), '空头批次带保证金');
+assert(accS2.shortPos(STOCK.id).lots.every((l) => l.margin > 0), '空头批次带保证金');
 
 console.log('\n[5] 活动委托回填订单簿');
 assert(acc2.orders.has(restingId), '未成交委托回到账户挂单表');

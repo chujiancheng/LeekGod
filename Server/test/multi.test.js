@@ -13,6 +13,7 @@ const config = require('../src/config');
 
 const STOCK_A = config.stocks[0];
 const STOCK_B = config.stocks[1];
+const STOCK_C = config.stocks[2];
 const ALL_IDS = config.stocks.map((s) => s.id);
 // 指数也用同一套 market_state/prices 落盘，读取时同样要把它列进标的清单
 const ALL_MARKET_IDS = [...ALL_IDS, config.index.code];
@@ -45,6 +46,17 @@ function fresh(ticks = 12) {
 
 const mkt = (g, s) => g.markets.get(s.id);
 const npc = (g, s) => g.npcs.get(s.id);
+
+/** 全场「同一账户同一只股票同时持有多头与空头」的违规 (账户,股票) 对数 */
+const dualSidePairs = (game) => {
+  let n = 0;
+  for (const acc of game.store.all()) {
+    for (const [sid] of acc.longs) {
+      if (acc.longQty(sid) > 0 && acc.shortQty(sid) > 0) n += 1;
+    }
+  }
+  return n;
+};
 
 console.log('\n[1] 十只股票 + 大盘指数就位，每只自成一套市场');
 {
@@ -515,26 +527,37 @@ console.log('\n[10] 强平撤单按委托所属股票路由：不留幽灵单、
   const acc = g.store.get('跨股强平');
   const mA = mkt(g, STOCK_A);
   const mB = mkt(g, STOCK_B);
+  const mC = mkt(g, STOCK_C);
 
-  // A 股挂两张不会成交的远价单：买开（占冻结）、卖开（占 A 池券源）
+  // A 股挂两张不会成交的远价卖开单（占 A 池券源）；C 股挂一张远价买开单（占冻结）。
+  // 同股多空互斥之后同一个账户不能再在同一只股票上买卖两头，所以把买开挪到 C 股——
+  // 对「撤单要按委托自身股票路由」这个被测点反而是更强的用例（要撤两个别的簿上的单）。
   acc.lastOrderAt = null;
-  const buyA = g.placeOrder(tk, {
-    stockId: STOCK_A.id,
+  const buyC = g.placeOrder(tk, {
+    stockId: STOCK_C.id,
     action: ACTIONS.BUY_OPEN,
     qty: 100,
-    price: mA.roundPrice(mA.lastPrice * 0.9),
+    price: mC.roundPrice(mC.lastPrice * 0.9),
   });
   acc.lastOrderAt = null;
-  const shortA = g.placeOrder(tk, {
+  const shortA1 = g.placeOrder(tk, {
     stockId: STOCK_A.id,
     action: ACTIONS.SELL_OPEN,
     qty: 100,
     price: mA.roundPrice(mA.lastPrice * 1.1),
   });
-  assert(buyA.ok && buyA.order.filled === 0, 'A 股远价买单挂出且未成交');
-  assert(shortA.ok && shortA.order.filled === 0, 'A 股远价开空单挂出且未成交');
+  acc.lastOrderAt = null;
+  const shortA2 = g.placeOrder(tk, {
+    stockId: STOCK_A.id,
+    action: ACTIONS.SELL_OPEN,
+    qty: 100,
+    price: mA.roundPrice(mA.lastPrice * 1.2),
+  });
+  assert(buyC.ok && buyC.order.filled === 0, 'C 股远价买单挂出且未成交');
+  assert(shortA1.ok && shortA1.order.filled === 0, 'A 股远价开空单 1 挂出且未成交');
+  assert(shortA2.ok && shortA2.order.filled === 0, 'A 股远价开空单 2 挂出且未成交');
   const aReserved0 = mA.lendReserved;
-  assert(aReserved0 >= 100, `A 池券源占用已计入（${aReserved0}）`);
+  assert(aReserved0 >= 200, `A 池券源占用已计入（${aReserved0}）`);
 
   // 券源占用恒等式：池子记的占用 = 本簿里活着的开空单剩余量合计
   const reservedInBook = (m) =>
@@ -543,23 +566,26 @@ console.log('\n[10] 强平撤单按委托所属股票路由：不留幽灵单、
       .reduce((a, o) => a + (o.qty - o.filled), 0);
   assert(mA.lendReserved === reservedInBook(mA), '强平前 A 池占用与簿内活单自洽');
 
-  // 在 B 股造一个巨额空头敞口 → 触发 B 市场强平，此时账户的挂单在 A 股簿上
+  // 在 B 股造一个巨额空头敞口 → 触发 B 市场强平，此时账户的挂单在 A/C 股簿上
   acc.shortPos(STOCK_B.id).lots.push({ qty: 2000000, price: STOCK_B.initPrice, margin: 0, reserved: 0 });
   mB.shortInterest += 2000000;
   assert(mB.maybeLiquidate(acc, Date.now()), 'B 市场触发强平');
 
-  // 1) A 股的两张挂单必须真的从 A 簿里撤掉（不能只删账户挂单表、把单留在别人簿里）
-  for (const id of [buyA.order.id, shortA.order.id]) {
-    const inBook =
-      mA.book.orders.has(id) ||
-      mA.book.bids.some((o) => o.id === id) ||
-      mA.book.asks.some((o) => o.id === id);
-    assert(!inBook, `A 股挂单 ${id} 已从 A 订单簿移除（不留幽灵单）`);
-    assert(!acc.orders.has(id), `A 股挂单 ${id} 已从账户挂单表移除`);
+  // 1) A/C 股的挂单必须真的从各自的簿里撤掉（不能只删账户挂单表、把单留在别人簿里）
+  const inAnyBook = (id) =>
+    [mA, mB, mC].some(
+      (m) =>
+        m.book.orders.has(id) ||
+        m.book.bids.some((o) => o.id === id) ||
+        m.book.asks.some((o) => o.id === id)
+    );
+  for (const id of [buyC.order.id, shortA1.order.id, shortA2.order.id]) {
+    assert(!inAnyBook(id), `挂单 ${id} 已从订单簿移除（不留幽灵单）`);
+    assert(!acc.orders.has(id), `挂单 ${id} 已从账户挂单表移除`);
   }
   // 2) 撤单释放的券源记回 A 自己的池子（不能窜到触发强平的 B 池上）
   assert(mA.lendReserved === reservedInBook(mA), `A 池占用与簿内活单仍自洽（${mA.lendReserved}）`);
-  assert(mA.lendReserved <= aReserved0 - 100, `A 池那 100 股占用已释放（${aReserved0} → ${mA.lendReserved}）`);
+  assert(mA.lendReserved <= aReserved0 - 200, `A 池那 200 股占用已释放（${aReserved0} → ${mA.lendReserved}）`);
 }
 
 console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
@@ -707,6 +733,54 @@ console.log('\n[12] NPC 批次合并：账实等价，玩家账户不受影响')
   const slack = STOCK_A.floatShares + 300;
   assert(total <= slack, `大米多头合计 ${total} 未超过上限 ${slack}`);
   assert(total > STOCK_A.floatShares * 0.99, `大米多头合计 ${total} 仍是流通盘量级`);
+}
+
+console.log('\n[13] 同股多空互斥：NPC 单向化，且仍能翻成净空');
+{
+  const g = fresh(5);
+  const sid = STOCK_A.id;
+  const man = npc(g, STOCK_A);
+  const inst = man.npcs.find((n) => n.type === 'inst');
+  const l0 = inst.acc.longQty(sid);
+  assert(!!inst && l0 > 0, `机构开局持有多头库存 ${l0}`);
+
+  // 钉死极度看空（updateBias 每 tick 会把 sentiment 重算成 clamp(基础情绪 + ownBias)，
+  // 基础情绪里含阵营项、能到 +0.7，所以压到 -3 才能保证 clamp 后恒为 -1）。
+  // 机构应当切到空头阵营，并且只往外派发库存、不再挂买开接自己的货
+  let dualSeen = 0;
+  let bidWhileDumping = 0;
+  for (let i = 0; i < 80; i++) {
+    inst.ownBias = -3;
+    g.tick();
+    dualSeen += dualSidePairs(g);
+    if (inst.acc.sideLock(sid).long && inst.ownResting.some((o) => o.status === 'live' && o.action === 'BUY_OPEN')) {
+      bidWhileDumping += 1;
+    }
+  }
+  const l1 = inst.acc.longQty(sid);
+  assert(inst.wantShort === true, '看空的机构切到了空头阵营');
+  assert(l1 < l0, `空头阵营持续派发库存（${l0} → ${l1}）`);
+  assert(bidWhileDumping === 0, `派发期间不再新挂买开（${bidWhileDumping} 次）`);
+  assert(dualSeen === 0, `过程中没有任何账户在同一只股票上两端同时持仓（违规 ${dualSeen}）`);
+
+  // 库存清零就该翻成净空。这里直接结清库存并撤掉在途挂单（模拟"派发干净"的时点）：
+  // 完整派发要等市场承接，耗时从几十到上千 tick 不等（取决于行情），放进回归基线要变随机红。
+  inst.acc.consumeLong(sid, inst.acc.longQty(sid));
+  for (const o of [...inst.acc.orders.values()]) man.market.cancel(inst.acc, o.id, Date.now());
+  assert(inst.acc.longQty(sid) === 0, '库存已结清');
+  for (let i = 0; i < 80 && inst.acc.shortQty(sid) === 0; i++) {
+    inst.ownBias = -3;
+    g.tick();
+  }
+  assert(inst.acc.shortQty(sid) > 0, `库存清空后翻成净空 ${inst.acc.shortQty(sid)} 股`);
+
+  // 反向：情绪回暖后必须先把空头平掉，才谈得上回到多头侧
+  for (let i = 0; i < 200 && inst.acc.shortQty(sid) > 0; i++) {
+    inst.ownBias = 3;
+    g.tick();
+  }
+  assert(inst.acc.shortQty(sid) === 0, `情绪回暖后空头被回补（剩 ${inst.acc.shortQty(sid)}）`);
+  assert(dualSidePairs(g) === 0, '回补过程也没留下两头持仓');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

@@ -106,6 +106,25 @@ class Account {
     return p ? p.lots.reduce((s, l) => s + l.qty, 0) : 0;
   }
 
+  /**
+   * 同股多空互斥（港交所口径）：同一账户在同一只股票上只能持有一个方向。
+   * 判定同时看**已成持仓**与**在途开仓委托**——只看持仓会漏掉「两张反向开仓单
+   * 同时在途、先后成交后多空并存」的窗口。
+   * 返回的两端表示该方向已被占用：占用端禁止再开仓，但平仓与同向加仓照常。
+   * 动作字符串与 market.ACTIONS 一致（store 不能 require market，会成环）。
+   * @returns {{long: boolean, short: boolean}}
+   */
+  sideLock(stockId) {
+    let long = this.longQty(stockId) > 0;
+    let short = this.shortQty(stockId) > 0;
+    for (const o of this.orders.values()) {
+      if (o.status !== 'live' || o.stockId !== stockId) continue;
+      if (o.action === 'buy_open') long = true;
+      else if (o.action === 'sell_open') short = true;
+    }
+    return { long, short };
+  }
+
   shortQty(stockId) {
     const p = this.shorts.get(stockId);
     return p ? p.lots.reduce((s, l) => s + l.qty, 0) : 0;

@@ -350,6 +350,13 @@ input { font: inherit; color: inherit; }
 }
 .mini-btn:hover { color: var(--ink); border-color: var(--blue); }
 
+/* 同股多空互斥的方向锁提示（同一只股票只能持有一个方向） */
+.dir-lock {
+  margin: 6px 12px 0; padding: 6px 9px;
+  background: rgba(240, 185, 11, .08); border: 1px solid rgba(240, 185, 11, .3);
+  border-radius: 8px; font-size: 12px; line-height: 1.45; color: var(--muted);
+}
+
 /* 融资买入开关（仅买入开多时出现） */
 .finance-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

@@ -136,6 +136,29 @@
   /** 当前股票的持仓切片 */
   const curPosition = () => positionOf((curMarket() || {}).stockId);
 
+  /**
+   * 同股多空互斥（港交所口径）：同一账户在同一只股票上只能持有一个方向。
+   * 判定口径与服务端 place() 完全一致——已成持仓与**在途开仓委托**都算占用该方向；
+   * 占用端禁的是反向开仓，平仓与同向加仓不受影响。
+   */
+  function directionLock() {
+    const m = curMarket();
+    const lock = { long: false, short: false };
+    if (!m || m.isIndex) return lock;
+    const pos = positionOf(m.stockId);
+    if (pos) {
+      if (pos.long.qty > 0) lock.long = true;
+      if (pos.short.qty > 0) lock.short = true;
+    }
+    const orders = (state.account && state.account.orders) || [];
+    for (const o of orders) {
+      if (o.stockId !== m.stockId || o.status !== 'live') continue;
+      if (o.action === 'buy_open') lock.long = true;
+      else if (o.action === 'sell_open') lock.short = true;
+    }
+    return lock;
+  }
+
   /** 某只股票的分时序列 */
   function histOf(stockId) {
     return histories.get(stockId) || [];
@@ -1997,12 +2020,16 @@
   function maxQtyForAction(frac) {
     const a = state.account;
     const lot = state.rules.lotSize;
+    const lock = directionLock();
     // 平仓方向要求已有持仓；开仓方向只看资金/保证金/券源，没有持仓也应有额度
     const needPos = selectedAction === 'sell_close' || selectedAction === 'buy_close';
     const pos = curPosition();
     const price = parseFloat($('priceInput').value) || counterPrice();
     if (!a || price <= 0) return 0;
     if (needPos && !pos) return 0;
+    // 反向开仓被方向锁挡住：这里也归零，"全部"按钮不会填出一个必被拒的数量
+    if (selectedAction === 'buy_open' && lock.short) return 0;
+    if (selectedAction === 'sell_open' && lock.long) return 0;
     let max = 0;
     switch (selectedAction) {
       case 'buy_open': {
@@ -2054,6 +2081,23 @@
     return Math.max(0, max);
   }
 
+  /**
+   * 方向锁提示：同一只股票只能持有一个方向。两侧都有（旧档残留）时只剩平仓可走。
+   */
+  function renderDirectionLock(lock) {
+    const el = $('dirLock');
+    let text = '';
+    if (lock.long && lock.short) {
+      text = '本股多空两侧都有持仓：只能平仓，平到只剩一侧才能再开仓';
+    } else if (lock.short) {
+      text = '本股已持空头：可加空或买入平空；要买入开多需先把空头全部平掉';
+    } else if (lock.long) {
+      text = '本股已持多头：可加多或卖出平多；要卖出开空需先把多头全部卖出';
+    }
+    el.hidden = !text;
+    el.textContent = text;
+  }
+
   function renderOrderPanel() {
     const m = curMarket();
     const isIndex = !!(m && m.isIndex);
@@ -2063,6 +2107,8 @@
     const a = state.account;
     const halted = !!(state.halt && state.halt.halted);
     const pos = curPosition();
+    const lock = directionLock();
+    renderDirectionLock(lock);
     if (a && m) {
       // 指数不可交易：四个方向按钮全部禁用
       const L = m.lending;
@@ -2072,9 +2118,9 @@
       const dis = isIndex
         ? { buy_open: true, sell_close: true, sell_open: true, buy_close: true }
         : {
-            buy_open: halted,
+            buy_open: halted || lock.short,
             sell_close: halted || !pos || pos.long.sellable <= 0,
-            sell_open: halted || noBorrow,
+            sell_open: halted || noBorrow || lock.long,
             buy_close: halted || !pos || pos.short.coverable <= 0,
           };
       document.querySelectorAll('.act-btn').forEach((btn) => {
@@ -2084,6 +2130,10 @@
         else if (halted) btn.title = '已停牌，暂停下单';
         else if (btn.dataset.action === 'sell_open' && noBorrow) {
           btn.title = !L || !L.enabled ? '融券做空未开放' : '可借券源不足，请先在融券页挂借';
+        } else if (btn.dataset.action === 'buy_open' && lock.short) {
+          btn.title = '该股已持空头（或有卖出开空委托在途），需先买入平空才能买入开多';
+        } else if (btn.dataset.action === 'sell_open' && lock.long) {
+          btn.title = '该股已持多头（或有买入开多委托在途），需先卖出平多才能卖出开空';
         } else btn.title = d ? '无可操作持仓' : '';
       });
     }
@@ -2245,15 +2295,21 @@
 
   function renderCooldown() {
     const left = cooldownMsLeft();
-    // 停牌一并在这里处理：tickUI 每 200ms 会重写 submitBtn.disabled，
+    // 停牌与方向锁一并在这里处理：tickUI 每 200ms 会重写 submitBtn.disabled，
     // 只在 renderOrderPanel 里禁用会被它覆盖回可点
     const halted = !!(state.halt && state.halt.halted);
+    const lock = directionLock();
+    const locked =
+      (selectedAction === 'buy_open' && lock.short) ||
+      (selectedAction === 'sell_open' && lock.long);
     $('cooldownText').textContent = halted
       ? '已停牌'
-      : left > 0
-        ? `冷却 ${(left / 1000).toFixed(1)}s`
-        : '';
-    $('submitBtn').disabled = halted || left > 0 || !!(curMarket() || {}).isIndex;
+      : locked
+        ? '本股方向已锁'
+        : left > 0
+          ? `冷却 ${(left / 1000).toFixed(1)}s`
+          : '';
+    $('submitBtn').disabled = halted || left > 0 || locked || !!(curMarket() || {}).isIndex;
   }
 
   // ---------- 停牌 ----------
