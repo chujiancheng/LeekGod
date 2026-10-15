@@ -354,13 +354,19 @@ console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空
   assert(sb.retail > 0 && sb.all > 0, `散户盘/全体情绪为正 (retail=${sb.retail.toFixed(2)}, all=${sb.all.toFixed(2)})`);
   assert(sb.inst < 0, `机构专属情绪为负 (inst=${sb.inst.toFixed(2)})`);
 
-  // 屏蔽阵营/库存/过热噪声，单独看消息对倒方向
+  // 屏蔽阵营/库存/过热/力量天平/战术意图/浮盈亏噪声，单独看消息对倒方向
   const savedMood = N(g).instMood;
   const savedPolar = N(g).polar;
   const savedHeat = p.heatFade;
   const savedInv = p.inventorySkew;
+  const savedForce = N(g).force;
+  const savedIntent = N(g).intent.mode;
+  const savedPnlFeel = config.npc.pnlFeel.enabled;
   N(g).instMood = 0;
   N(g).polar = 0;
+  N(g).force = 0;
+  N(g).intent.mode = 'none';
+  config.npc.pnlFeel.enabled = false;
   p.heatFade = 0;
   p.inventorySkew = 0;
 
@@ -404,6 +410,9 @@ console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空
   g.news.active = [];
   N(g).instMood = savedMood;
   N(g).polar = savedPolar;
+  N(g).force = savedForce;
+  N(g).intent.mode = savedIntent;
+  config.npc.pnlFeel.enabled = savedPnlFeel;
   p.heatFade = savedHeat;
   p.inventorySkew = savedInv;
 }

@@ -774,13 +774,176 @@ console.log('\n[13] 同股多空互斥：NPC 单向化，且仍能翻成净空')
   }
   assert(inst.acc.shortQty(sid) > 0, `库存清空后翻成净空 ${inst.acc.shortQty(sid)} 股`);
 
-  // 反向：情绪回暖后必须先把空头平掉，才谈得上回到多头侧
-  for (let i = 0; i < 200 && inst.acc.shortQty(sid) > 0; i++) {
+  // 反向：情绪回暖后必须先把空头平掉，才谈得上回到多头侧。
+  // 预算 400 tick：回补要靠"有人把货卖给它的挂单"或它自己去吃卖盘，行情不给面子时
+  // 200 tick 会偶发收尾未完（改动前的 10 局探针里就出现过 1 次余 21800 股）
+  for (let i = 0; i < 400 && inst.acc.shortQty(sid) > 0; i++) {
     inst.ownBias = 3;
     g.tick();
   }
   assert(inst.acc.shortQty(sid) === 0, `情绪回暖后空头被回补（剩 ${inst.acc.shortQty(sid)}）`);
   assert(dualSidePairs(g) === 0, '回补过程也没留下两头持仓');
+}
+
+console.log('\n[14] NPC 战术意图（挤兑空头 / 压盘吸筹 / 抬价派发）与多空力量天平');
+{
+  const g = fresh(6);
+  const sid = STOCK_A.id;
+  const man = npc(g, STOCK_A);
+  const mk = mkt(g, STOCK_A);
+  const cfg = config.npc.intent;
+  const inst = man.npcs.find((n) => n.type === 'inst');
+  const small = man.npcs.find((n) => n.type === 'small');
+  const now = Date.now();
+  const float = STOCK_A.floatShares;
+
+  // ---- 力量天平三态（算出来的，不是随机贴标签）----
+  const savedForce = man.force;
+  man.force = 0.5;
+  assert(man.forceLabel() === '多头占优', `天平 +0.5 → 多头占优（${man.forceLabel()}）`);
+  man.force = 0;
+  assert(man.forceLabel() === '多空均衡', `天平 0 → 多空均衡（${man.forceLabel()}）`);
+  man.force = -0.5;
+  assert(man.forceLabel() === '空头占优', `天平 -0.5 → 空头占优（${man.forceLabel()}）`);
+  man.force = savedForce;
+
+  // ---- 挤兑空头的四个前提缺一不可 ----
+  const savedLend = { t: mk.lendTotal, b: mk.lendBorrowed, r: mk.lendReserved, si: mk.shortInterest };
+  const setup = (force, util, shortRatio) => {
+    man.intent.mode = 'none';
+    man.regime = 1;
+    man.force = force;
+    mk.lendTotal = 1000000;
+    mk.lendBorrowed = Math.round(1000000 * util);
+    mk.lendReserved = 0;
+    mk.shortInterest = Math.round(float * shortRatio);
+    return man.pickIntent();
+  };
+  const c1 = setup(0.5, 0.9, 0.08);
+  assert(c1 && c1.mode === 'squeeze', `空头重仓 + 券源借空 + 天平偏多 → 选中挤兑（${c1 && c1.mode}）`);
+  const c2 = setup(0.5, 0.1, 0.08);
+  assert(!c2 || c2.mode !== 'squeeze', '券源宽松时不挤兑（没有"借不到券"的燃料）');
+  const c3 = setup(0.5, 0.9, 0.001);
+  assert(!c3 || c3.mode !== 'squeeze', '空头存量极低时不挤兑');
+  const c4 = setup(-0.6, 0.9, 0.08);
+  assert(!c4 || c4.mode !== 'squeeze', '天平偏空时不挤兑（没有实力往上打）');
+
+  // ---- 随机门 → 进入（带随机时长与力度）----
+  const savedWarm = cfg.warmupTicks;
+  cfg.warmupTicks = 0;
+  man.intentCool.squeeze = 0;
+  for (let i = 0; i < 5000 && man.intent.mode === 'none'; i++) {
+    man.tickCount = 200;
+    man.force = 0.5;
+    man.regime = 1;
+    setup(0.5, 0.9, 0.08);
+    man.updateIntent();
+  }
+  assert(man.intent.mode === 'squeeze', `条件持续满足时最终进入挤兑意图（${man.intent.mode}）`);
+  assert(
+    man.intent.left > 0 &&
+      man.intent.power >= cfg.squeeze.power[0] &&
+      man.intent.power <= cfg.squeeze.power[1],
+    `进入时带随机时长与力度（${man.intent.left} tick / ${man.intent.power.toFixed(2)}）`
+  );
+
+  // ---- 入场即违背保险丝的意图不启动（否则会"进入→下一 tick 退出"空转）----
+  {
+    const savedFund = man.fund;
+    man.intent.mode = 'none';
+    man.fund = STOCK_A.initPrice * (1 + cfg.distribute.capLevel + 0.5); // 位置越过 capLevel
+    const started = man.beginIntent('distribute');
+    assert(!started && man.intent.mode === 'none', '位置已越过 capLevel 时不启动派发（不空转）');
+    assert(man.intentCool.distribute > 0, '这种"生下来就死"的尝试也记冷静期');
+    man.fund = savedFund;
+  }
+  man.intent.mode = 'squeeze';
+  man.intent.left = 400;
+  man.intent.age = 10;
+
+  // ---- 参与裁剪：只有能做空的聪明钱参与，散户不参与 ----
+  assert(man.intentFor(inst) === cfg.squeeze, '多头阵营的机构参与挤兑');
+  assert(man.intentFor(small) === null, '散户不执行战术意图');
+  const ie = man.intentEffects(inst);
+  assert(ie.suppressSell === true && man.suppressHeat(inst) === true, '挤兑期机构不挂卖、也不因"贵了"而派发');
+  assert(man.intentBias(inst) > 0.5, `挤兑期机构情绪被加上强买入偏置（${man.intentBias(inst).toFixed(2)}）`);
+
+  // ---- 挤兑期机构真的不下卖单（对照：同一账户、同一盘口，清掉意图就会卖）----
+  // 用 place 探针直接看"有没有尝试下卖单"：只看动作本身，
+  // 不依赖盘口当时挂没挂得住、成交与否（那会让断言随 NPC 报价随机红）
+  const tried = [];
+  const origPlace = mk.place.bind(mk);
+  mk.place = (acc, opts) => {
+    if (acc === inst.acc) tried.push(opts.action);
+    return origPlace(acc, opts);
+  };
+  // 本节验的是**意图闸门**，先把"盘口太薄就不砸"的地板关掉，
+  // 免得断言随"此刻最优买一深不深"随机红（那条约束在下面单独验）
+  const savedFloor = cfg.thinBookFloor;
+  cfg.thinBookFloor = 0;
+  // 撤掉该机构手上的历史挂单：把被自己挂单预留（reserved）的库存放出来，"可卖"才不为 0
+  for (const o of [...inst.acc.orders.values()]) mk.cancel(inst.acc, o.id, now);
+  inst.wantShort = false;
+  inst.sentiment = -1; // 极度看空：正常路径下必然砸向买盘
+  const sells = () => tried.filter((a) => a === ACTIONS.SELL_CLOSE || a === ACTIONS.SELL_OPEN);
+  man.tryAggressive(inst, now);
+  assert(sells().length === 0, `挤兑期机构即使极度看空也不砸盘（尝试卖出 ${sells().length} 次）`);
+  const savedMode = man.intent.mode;
+  man.intent.mode = 'none';
+  tried.length = 0;
+  man.tryAggressive(inst, now);
+  assert(sells().length > 0, '清掉意图后同一账户立刻恢复砸盘（证明上面是意图挡住的）');
+  man.intent.mode = savedMode;
+  mk.place = origPlace;
+  for (const o of [...inst.acc.orders.values()]) mk.cancel(inst.acc, o.id, now);
+
+  // 薄盘收手：地板抬到远超任何挂单量时，卖单一次也不尝试
+  cfg.thinBookFloor = 1e9;
+  man.intent.mode = 'none';
+  tried.length = 0;
+  man.tryAggressive(inst, now);
+  assert(sells().length === 0, '买盘薄于地板时主动卖单收手（不把最后一档承接力扫光）');
+  cfg.thinBookFloor = savedFloor;
+  man.intent.mode = savedMode; // 后面还要验保险丝与冷却，得回到"正在挤兑"的状态
+
+  // ---- 保险丝：目的达成 / 判断失效都能自己退出 ----
+  man.intent.ref = mk.lastPrice / 2; // 相对触发价已涨 100%，远超 maxGain
+  assert(man.intentDone(), '涨幅超过 maxGain 自动收手（不让一次挤兑无限推）');
+  man.intent.ref = mk.lastPrice;
+  man.intent.shortRef = Math.round(float * 0.08);
+  mk.shortInterest = 0;
+  assert(man.intentDone(), '空头被挤干净（目的达成）自动收手');
+  const coolBefore = man.intentCool.squeeze;
+  man.endIntent();
+  assert(man.intent.mode === 'none', '收手后意图清空');
+  assert(man.intentCool.squeeze > coolBefore, `收手后进入冷却（${man.intentCool.squeeze} tick）`);
+
+  // ---- 另两种意图的裁剪方向相反 ----
+  man.intent.mode = 'distribute';
+  const ieD = man.intentEffects(inst);
+  assert(ieD.suppressOpenBuy && !ieD.suppressSell, '派发期不开多、但照常卖');
+  man.intent.mode = 'accumulate';
+  const ieA = man.intentEffects(inst);
+  assert(ieA.suppressAggroBuy && ieA.pressDown > 0, '吸筹期不扫单、并把报价中枢往下压（压盘）');
+  const savedLure = man.intent.lure;
+  man.intent.lure = 0; // 跳过"诱"阶段，主段才收筹码
+  assert(man.collecting(inst), '吸筹主段允许机构低配收集（临时解除只惩罚超配）');
+  man.intent.lure = savedLure;
+  man.intent.mode = 'none';
+
+  // ---- 全程不得违反同股多空互斥（意图期间机构大批买卖也不许两头持仓）----
+  cfg.warmupTicks = 0;
+  mk.lendTotal = savedLend.t;
+  mk.lendBorrowed = savedLend.b;
+  mk.lendReserved = savedLend.r;
+  mk.shortInterest = savedLend.si;
+  let dual = 0;
+  for (let i = 0; i < 60; i++) {
+    g.tick();
+    dual += dualSidePairs(g);
+  }
+  assert(dual === 0, `意图运行期间零"同股两头持仓"违规（违规 ${dual}）`);
+  cfg.warmupTicks = savedWarm;
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
