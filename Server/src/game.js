@@ -16,6 +16,12 @@ const NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
 
+// 股东快照：每个账户保留最近若干次自己的操作快照（内存环形缓冲，重启清空）。
+// 快照给「较上次操作」的变动列和股东占比走势图提供基线与历史点。
+const HOLDER_SNAPSHOT_LIMIT = 30;
+// 每份快照记多少名股东：覆盖当前前十并留余量，否则刚被挤出前十的股东算不出变动
+const HOLDER_SNAPSHOT_ROWS = 30;
+
 class Game {
   /**
    * @param {{persist?: import('./persist').Persister|null}} [opts]
@@ -38,6 +44,7 @@ class Game {
     this.lastNews = null;
     this.sessions = new Map(); // 登录令牌 -> 账号名
     this._stats = null; // 排行榜 / 前十大股东缓存，每 tick 刷新一次
+    this._holderSnapshots = new Map(); // 账号名 -> 操作时刻的股东快照数组（环形缓冲）
   }
 
   start() {
@@ -97,6 +104,8 @@ class Game {
       acc.lendOffered = row.lend_offered || 0;
       acc.lendInterestEarned = row.lend_interest_earned || 0;
       acc.lendInterestDebt = row.lend_interest_debt || 0;
+      acc.lendInterestPaid = row.lend_interest_paid || 0;
+      acc.financeInterestAccrued = row.finance_interest_accrued || 0;
       this.store.put(acc);
       byName.set(acc.name, acc);
     }
@@ -110,6 +119,7 @@ class Game {
       if (row.side === 'long') {
         lot.ts = row.ts;
         lot.debt = row.debt || 0;
+        lot.principal = row.principal || 0;
       } else {
         lot.margin = row.margin;
       }
@@ -329,6 +339,8 @@ class Game {
     this.sessions.set(t, acc.name);
     this.persist?.addSession(t, acc.name);
     this.trimSessions(acc.name);
+    // 登录即留一份基线快照：不动手也能看到「较上次操作」的变动
+    this.snapshotHolders(acc, 'login');
     if (!existing) this.refreshStats();
     return { ok: true, name: acc.name, token: t };
   }
@@ -367,7 +379,10 @@ class Game {
       finance: body.finance === true, // 融资买入开关（仅 buy_open 生效）
       now: Date.now(),
     });
-    if (res.ok) this.broadcast();
+    if (res.ok) {
+      this.snapshotHolders(acc, 'order');
+      this.broadcast();
+    }
     return res.ok
       ? { ok: true, order: this.serializeOrder(res.order, Date.now()), cooldownLeft: this.cooldownLeft(acc, Date.now()) }
       : res;
@@ -377,7 +392,10 @@ class Game {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
     const res = this.market.cancel(acc, orderId, Date.now());
-    if (res.ok) this.broadcast();
+    if (res.ok) {
+      this.snapshotHolders(acc, 'cancel');
+      this.broadcast();
+    }
     return res.ok ? { ok: true, order: this.serializeOrder(res.order, Date.now()) } : res;
   }
 
@@ -402,6 +420,7 @@ class Game {
     if (r.ok) {
       logger.info(`[我是股神] 账户 ${acc.name} 挂借 ${r.qty} 股（累计 ${r.lendOffered}，可借 ${r.available}）`);
       this.persist?.touch(acc);
+      this.snapshotHolders(acc, 'lend');
       this.broadcast();
     }
     return r;
@@ -416,6 +435,7 @@ class Game {
     if (r.ok) {
       logger.info(`[我是股神] 账户 ${acc.name} 撤借 ${r.qty} 股（剩余 ${r.lendOffered}，可借 ${r.available}）`);
       this.persist?.touch(acc);
+      this.snapshotHolders(acc, 'unlend');
       this.broadcast();
     }
     return r;
@@ -522,6 +542,8 @@ class Game {
     const market = opts.market || this.market.snapshot();
     if (!this._stats) this.refreshStats();
     const stats = this._stats;
+    const snapList = acc ? this._holderSnapshots.get(acc.name) || [] : [];
+    const lastSnap = snapList.length ? snapList[snapList.length - 1] : null;
     const base = {
       serverTime: now,
       startedAt: this.startedAt,
@@ -568,7 +590,11 @@ class Game {
       },
       players: stats.players,
       online: this.store.playerCount,
-      topHolders: stats.topHolders,
+      topHolders: this.serializeTopHolders(stats.topHolders, acc),
+      // 「较上次操作」的基线时刻：没有快照（未登录）时为 null
+      holderSnapshot: lastSnap
+        ? { t: lastSnap.t, action: lastSnap.action, count: snapList.length, limit: HOLDER_SNAPSHOT_LIMIT }
+        : null,
       halt: this.market.haltInfo(now),
     };
     if (opts.withHistory) base.priceHistory = this.market.priceHistory;
@@ -670,6 +696,8 @@ class Game {
       orderFrozen: r2(acc.orderFrozen),
       shortMargin: r2(acc.shortMargin),
       financeDebt: r2(financeDebtOfLots), // 融资负债（本金 + 已摊利息）
+      financePrincipal: r2(acc.financePrincipal(sid)), // 其中还没还的借入本金（负债 − 本金 = 未还利息）
+      financeInterest: r2(acc.financeInterestAccrued || 0), // 累计已计利息（含已随平仓还掉的部分，展示用）
       equity,
       realizedPnL: r2(acc.realizedPnL),
       deposited: r2(acc.deposited || 0), // 终身累计加钱额
@@ -732,6 +760,7 @@ class Game {
       freeToLend: Math.max(0, Math.floor(free / this.stock.lotSize) * this.stock.lotSize),
       interestEarned: r2(acc.lendInterestEarned || 0),
       interestDebt: r2(acc.lendInterestDebt || 0),
+      interestPaid: r2(acc.lendInterestPaid || 0),
     };
   }
 
@@ -753,7 +782,7 @@ class Game {
 
   /**
    * 前十大股东：按当前持股排序（含 NPC 与玩家）
-   * change = 当前持股 - 开服/建仓持股
+   * change/changePct = 当前持股与占比 − 开服/建仓时的持股与占比
    */
   computeTopHolders(limit = 10) {
     const sid = this.stock.id;
@@ -764,16 +793,97 @@ class Game {
       const qty = acc.longQty(sid);
       if (qty <= 0) continue;
       const role = acc.isNPC ? acc.role || 'npc' : 'player';
+      const base = acc.initialLong || 0;
       rows.push({
         name: acc.name,
         role, // inst / hot / big / mid / small / player
         qty,
         pct: r2((qty / total) * 100),
-        change: qty - (acc.initialLong || 0),
+        change: qty - base,
+        changePct: r2(((qty - base) / total) * 100),
       });
     }
     rows.sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
     return rows.slice(0, limit);
+  }
+
+  // ---------- 股东快照（内存环形缓冲，重启清空） ----------
+
+  /**
+   * 给某账户记一份「操作时刻」的股东快照。
+   * 存的是当时按持股排序的前 N 名（含占比），既用来算「较上次操作」的变动，
+   * 也用来画某个股东的占比走势。只走内存，不入库、重启清空。
+   */
+  snapshotHolders(acc, action) {
+    if (!acc) return null;
+    const rows = this.computeTopHolders(HOLDER_SNAPSHOT_ROWS).map((r) => ({
+      name: r.name,
+      qty: r.qty,
+      pct: r.pct,
+    }));
+    const snap = { t: Date.now(), tick: this.tickCount, action, rows };
+    // 快照是不可变的，索引直接挂上去（不可枚举，不进 JSON）：
+    // 每 tick 每条 SSE 连接都要查一次，别再重复建 Map
+    const byName = new Map();
+    for (const r of rows) byName.set(r.name, r);
+    Object.defineProperty(snap, 'byName', { value: byName });
+    let list = this._holderSnapshots.get(acc.name);
+    if (!list) {
+      list = [];
+      this._holderSnapshots.set(acc.name, list);
+    }
+    list.push(snap);
+    if (list.length > HOLDER_SNAPSHOT_LIMIT) list.splice(0, list.length - HOLDER_SNAPSHOT_LIMIT);
+    return snap;
+  }
+
+  /** 某账户最近一次股东快照（没有则 null） */
+  lastHolderSnapshot(name) {
+    const list = this._holderSnapshots.get(name);
+    return list && list.length ? list[list.length - 1] : null;
+  }
+
+  /**
+   * 股东占比走势：本账户快照序列里每个股东在各次操作时的持股与占比。
+   * 客户端拿到后按点击的股东名自己抽曲线，省得每点一行都来回请求。
+   */
+  holderHistoryFor(token) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    const list = this._holderSnapshots.get(acc.name) || [];
+    return {
+      ok: true,
+      account: acc.name,
+      limit: HOLDER_SNAPSHOT_LIMIT,
+      snapshots: list.map((s) => ({ t: s.t, tick: s.tick, action: s.action, rows: s.rows })),
+    };
+  }
+
+  /**
+   * 前十大股东 + 两层变动：
+   * - change / changePct：相对开服建仓
+   * - prevQty / prevPct / dQty / dPct：相对本账户最近一次操作快照。
+   *   没有快照（还没登录过）或该股东当时未进快照前 N 名时，这四个字段为 null，
+   *   客户端据此显示「--」或「新进」，不做「上次持股按 0 算」的臆测
+   */
+  serializeTopHolders(rows, acc) {
+    const snap = acc ? this.lastHolderSnapshot(acc.name) : null;
+    const prev = snap ? snap.byName : null;
+    return rows.map((h) => {
+      const p = prev ? prev.get(h.name) || null : null;
+      return {
+        name: h.name,
+        role: h.role,
+        qty: h.qty,
+        pct: h.pct,
+        change: h.change,
+        changePct: h.changePct,
+        prevQty: p ? p.qty : null,
+        prevPct: p ? p.pct : null,
+        dQty: p ? h.qty - p.qty : null,
+        dPct: p ? r2(h.pct - p.pct) : null,
+      };
+    });
   }
 
   /** 股东合计（校验流通盘用） */

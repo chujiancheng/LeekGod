@@ -23,7 +23,7 @@ server.listen(config.port, '0.0.0.0', () => {
   logger.info(`[我是股神] 服务已启动: http://127.0.0.1:${config.port}`);
   logger.info(
     `规则: 初始资金 ${config.account.initialCash} | 手续费 ${config.trade.feeRate} | ` +
-      `锁仓 ${config.trade.lockMs / 60000} 分钟 | 冷却 ${config.trade.cooldownMs / 1000} 秒 | ` +
+      `锁仓 ${config.trade.lockMs / 1000} 秒 | 冷却 ${config.trade.cooldownMs / 1000} 秒 | ` +
       `保证金 ${config.margin.ratio * 100}% / 维持 ${config.margin.maintenance * 100}%`
   );
 });

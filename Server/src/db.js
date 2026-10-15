@@ -34,11 +34,17 @@ CREATE TABLE IF NOT EXISTS accounts (
   -- 融券池挂借量 + 出借累计利息（旧档缺列时迁移补上）
   lend_offered          INTEGER NOT NULL DEFAULT 0,
   lend_interest_earned  REAL NOT NULL DEFAULT 0,
-  lend_interest_debt    REAL NOT NULL DEFAULT 0
+  lend_interest_debt    REAL NOT NULL DEFAULT 0,
+  -- 利息累计（展示用，旧档缺列时迁移补上）：
+  -- lend_interest_paid 做空方累计已付的融券利息；finance_interest_accrued 融资累计已计利息
+  lend_interest_paid        REAL NOT NULL DEFAULT 0,
+  finance_interest_accrued  REAL NOT NULL DEFAULT 0
 );
 
 -- 持仓批次：FIFO 顺序靠 seq，T+锁仓靠 ts（空头批次没有 ts，也无锁仓概念）
--- margin = 空头保证金；debt = 多头融资负债（旧档缺列时由 openDatabase 迁移补上）
+-- margin = 空头保证金；debt = 多头融资负债（本金 + 已摊利息）
+-- principal = 该批次借入本金（含开仓手续费），开仓时一次性写入、只随平仓按比例减少；
+--   debt − principal 就是这批还没还的已计利息。旧档缺列时由 openDatabase 迁移补上（按账户已计利息占比回填）
 CREATE TABLE IF NOT EXISTS lots (
   account  TEXT NOT NULL,
   stock_id TEXT NOT NULL,
@@ -50,6 +56,7 @@ CREATE TABLE IF NOT EXISTS lots (
   reserved INTEGER NOT NULL DEFAULT 0,
   margin   REAL NOT NULL DEFAULT 0,
   debt     REAL NOT NULL DEFAULT 0,
+  principal REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (account, stock_id, side, seq)
 );
 
@@ -132,6 +139,32 @@ CREATE TABLE IF NOT EXISTS auto_strategies (
 CREATE INDEX IF NOT EXISTS idx_auto_account ON auto_strategies(account);
 `;
 
+/**
+ * 旧档回填融资批次本金（只在补 principal 列时跑一次）。
+ * 旧档没记批次本金，只能用近似：利息是按各批次负债占比摊进来的，
+ * 所以按同一比例从批次负债里剔掉该账户的累计已计利息，剩下的算本金。
+ * 一律记 0 会让旧持仓显示成"本金 0、全是利息"，差得比这远得多。
+ */
+function backfillLotPrincipal(db) {
+  const lots = db.prepare("SELECT account, stock_id, seq, debt FROM lots WHERE side = 'long' AND debt > 0").all();
+  if (!lots.length) return;
+
+  const debtOf = new Map();
+  for (const l of lots) debtOf.set(l.account, (debtOf.get(l.account) || 0) + l.debt);
+  const accruedSt = db.prepare('SELECT finance_interest_accrued FROM accounts WHERE name = ?');
+  const setSt = db.prepare(
+    "UPDATE lots SET principal = ? WHERE account = ? AND stock_id = ? AND side = 'long' AND seq = ?"
+  );
+
+  for (const l of lots) {
+    const row = accruedSt.get(l.account);
+    const accrued = row ? row.finance_interest_accrued || 0 : 0;
+    const total = debtOf.get(l.account) || 0;
+    const ratio = total > 0 ? Math.max(0, 1 - accrued / total) : 1;
+    setSt.run(Math.round(l.debt * ratio * 100) / 100, l.account, l.stock_id, l.seq);
+  }
+}
+
 /** 打开（必要时创建）数据库并保证表结构就绪 */
 function openDatabase(file) {
   const dir = path.dirname(path.resolve(file));
@@ -153,9 +186,17 @@ function openDatabase(file) {
     db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_earned REAL NOT NULL DEFAULT 0');
     db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_debt REAL NOT NULL DEFAULT 0');
   }
+  if (!accCols.includes('lend_interest_paid')) {
+    db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_paid REAL NOT NULL DEFAULT 0');
+    db.exec('ALTER TABLE accounts ADD COLUMN finance_interest_accrued REAL NOT NULL DEFAULT 0');
+  }
   const lotCols = db.pragma('table_info(lots)').map((c) => c.name);
   if (!lotCols.includes('debt')) {
     db.exec('ALTER TABLE lots ADD COLUMN debt REAL NOT NULL DEFAULT 0');
+  }
+  if (!lotCols.includes('principal')) {
+    db.exec('ALTER TABLE lots ADD COLUMN principal REAL NOT NULL DEFAULT 0');
+    backfillLotPrincipal(db);
   }
 
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();

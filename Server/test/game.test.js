@@ -260,6 +260,13 @@ console.log('\n[11] 加钱：终身上限可配置');
   const dep = config.account.deposit;
   assert(dep.maxLifetime === 100000000, `终身上限默认 1 亿（可配置，当前 ${dep.maxLifetime}）`);
 
+  // 线上开关当前是关的（暂时屏蔽加钱按钮），本节验证加钱逻辑本身，测完还原
+  const enabledBefore = dep.enabled;
+  assert(!enabledBefore, '加钱开关默认关闭（当前临时屏蔽）');
+  assert(!g.deposit(token, 5000).ok, '开关关闭时加钱被拒');
+  assert(g.stateFor(token).rules.deposit.enabled === false, '快照下发开关关闭，前端据此隐藏按钮');
+  dep.enabled = true;
+
   const acc = g.store.get('测试玩家');
   const cashBefore = acc.cash;
   const d1 = g.deposit(token, 5000);
@@ -289,6 +296,137 @@ console.log('\n[11] 加钱：终身上限可配置');
   const st = g.stateFor(token);
   assert(st.rules.deposit && st.rules.deposit.maxLifetime === dep.maxLifetime, '规则快照下发终身上限');
   assert(typeof st.account.deposited === 'number', '账户快照包含累计加钱额');
+  assert(st.rules.deposit.enabled === true, '开关打开时快照同步下发');
+  dep.enabled = enabledBefore;
+}
+
+console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空吸筹）');
+{
+  const now = Date.now();
+  const inst = g.npc.npcs.find((x) => x.type === 'inst');
+  assert(!!inst, '找到机构 NPC');
+  const p = g.npc.profileOf(inst);
+  assert(p.publicNewsFade != null, '机构启用公开消息对倒');
+  assert(p.fundWeight != null, '机构定价锚以基本面为主');
+  assert(p.inventorySkew != null && p.heatFade != null, '机构带库存/过热回归');
+
+  // 消息系统能按 scope 分解，机构才看得见散户盘
+  g.news.active = [
+    { id: 'TX1', dir: 1, scope: '散户', power: 0.8, until: now + 60000 },
+    { id: 'TX2', dir: 1, scope: '全体', power: 0.5, until: now + 60000 },
+    { id: 'TX3', dir: -1, scope: '机构', power: 0.4, until: now + 60000 },
+  ];
+  const sb = g.news.sentimentByScope(now);
+  assert(sb.retail > 0 && sb.all > 0, `散户盘/全体情绪为正 (retail=${sb.retail.toFixed(2)}, all=${sb.all.toFixed(2)})`);
+  assert(sb.inst < 0, `机构专属情绪为负 (inst=${sb.inst.toFixed(2)})`);
+
+  // 屏蔽阵营/库存/过热噪声，单独看消息对倒方向
+  const savedMood = g.npc.instMood;
+  const savedPolar = g.npc.polar;
+  const savedHeat = p.heatFade;
+  const savedInv = p.inventorySkew;
+  g.npc.instMood = 0;
+  g.npc.polar = 0;
+  p.heatFade = 0;
+  p.inventorySkew = 0;
+
+  inst.ownBias = 0;
+  g.npc.updateBias(inst, now);
+  assert(inst.sentiment < 0, `公开利好 → 机构情绪偏空/出货 (${inst.sentiment.toFixed(3)})`);
+
+  g.news.active = [
+    { id: 'TX4', dir: -1, scope: '散户', power: 0.8, until: now + 60000 },
+    { id: 'TX5', dir: -1, scope: '全体', power: 0.5, until: now + 60000 },
+  ];
+  inst.ownBias = 0;
+  g.npc.updateBias(inst, now);
+  assert(inst.sentiment > 0, `公开利空 → 机构情绪偏多/吸筹 (${inst.sentiment.toFixed(3)})`);
+
+  // 散户仍跟消息同向（追涨杀跌）
+  const small = g.npc.npcs.find((x) => x.type === 'small');
+  const ps = g.npc.profileOf(small);
+  assert(ps.publicNewsFade == null, '散户不走对倒路径');
+  const savedMom = ps.momentum;
+  ps.momentum = false;
+  g.news.active = [{ id: 'TX6', dir: 1, scope: '散户', power: 0.8, until: now + 60000 }];
+  small.ownBias = 0;
+  g.npc.updateBias(small, now);
+  assert(small.sentiment > 0, `公开利好 → 散户情绪偏多/追涨 (${small.sentiment.toFixed(3)})`);
+  ps.momentum = savedMom;
+
+  // 机构定价锚：不跟消息推高的公允，贴基本面重心
+  const savedFv = g.npc.fairValue;
+  const savedFund = g.npc.fund;
+  g.npc.fairValue = g.market.lastPrice * 1.5;
+  g.npc.fund = g.market.lastPrice;
+  const anchor = g.npc.valueOf(p);
+  assert(anchor < g.npc.fairValue, `机构锚 < 消息推高的公允 (${anchor.toFixed(2)} < ${g.npc.fairValue.toFixed(2)})`);
+  assert(Math.abs(anchor - g.npc.fund) < Math.abs(anchor - g.npc.fairValue), '机构锚更接近基本面重心');
+  const retailV = g.npc.valueOf(ps);
+  assert(retailV === g.npc.fairValue, '散户定价仍直接用短端公允');
+  g.npc.fairValue = savedFv;
+  g.npc.fund = savedFund;
+
+  g.news.active = [];
+  g.npc.instMood = savedMood;
+  g.npc.polar = savedPolar;
+  p.heatFade = savedHeat;
+  p.inventorySkew = savedInv;
+}
+
+console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动');
+{
+  const lr = g.login('股东测试');
+  assert(lr.ok, '登录成功');
+  const tk = lr.token;
+
+  const base = g.lastHolderSnapshot('股东测试');
+  assert(!!base && base.action === 'login', '登录即留一份基线快照');
+  assert(base.rows.length === 30, `单份快照保留 30 名股东 (实际 ${base.rows.length})`);
+  assert(JSON.stringify(base).indexOf('byName') === -1, '内部索引不进序列化结果');
+
+  const st0 = g.stateFor(tk);
+  assert(!!st0.holderSnapshot && st0.holderSnapshot.count === 1, '状态快照带基线时刻与快照数');
+  assert(st0.holderSnapshot.limit === 30, '快照上限随状态下发（客户端显示用）');
+  assert(st0.topHolders.every((h) => h.prevPct != null && h.prevQty != null), '基线内的前十名都能对上前值');
+  assert(st0.topHolders.every((h) => h.dQty === 0 && h.dPct === 0), '刚登录时与基线零变动');
+  assert(g.stateFor('bogus-token').holderSnapshot === null, '未登录时不下发快照基线');
+
+  // 开服变动要给出占比口径，不能只有股数
+  const float = g.stock.floatShares;
+  assert(
+    st0.topHolders.every((h) => Math.abs(h.changePct - (h.change / float) * 100) < 0.02),
+    'changePct 与 change 自洽（百分点）'
+  );
+
+  // 下单会记一份新快照；此后 NPC 继续交易，变动就体现在「较上次操作」上
+  const beforeCount = g.holderHistoryFor(tk).snapshots.length;
+  const or = g.placeOrder(tk, { action: ACTIONS.BUY_OPEN, qty: 100, price: g.market.lastPrice });
+  assert(or.ok, `下单成功 (${or.error || 'ok'})`);
+  const hist = g.holderHistoryFor(tk);
+  assert(hist.ok && hist.snapshots.length === beforeCount + 1, `下单追加一次快照 (${hist.snapshots.length})`);
+  assert(hist.snapshots[hist.snapshots.length - 1].action === 'order', '新快照标记为下单');
+
+  for (let i = 0; i < 60; i++) g.tick();
+  const st1 = g.stateFor(tk);
+  const moved = st1.topHolders.filter((h) => h.dQty !== 0).length;
+  assert(moved >= 1, `较上次操作有持股变动 (${moved} 位)`);
+  assert(
+    st1.topHolders.every((h) => h.dQty === null || h.qty - h.prevQty === h.dQty),
+    'dQty 与 qty−prevQty 自洽'
+  );
+  assert(
+    st1.topHolders.every(
+      (h) => h.dQty === null || Math.abs(h.dPct - (h.pct - h.prevPct)) < 0.02
+    ),
+    'dPct 与 pct−prevPct 自洽'
+  );
+
+  // 环形缓冲：超出上限只留最近 N 次
+  const acc = g.store.get('股东测试');
+  for (let i = 0; i < 40; i++) g.snapshotHolders(acc, 'order');
+  assert(g.holderHistoryFor(tk).snapshots.length === 30, '快照环形缓冲封顶 30');
+  assert(!g.holderHistoryFor('bogus-token').ok, '无有效令牌不返回股东历史');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

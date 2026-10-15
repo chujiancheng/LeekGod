@@ -39,20 +39,21 @@ class Persister {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
           (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
-           lend_offered, lend_interest_earned, lend_interest_debt)
+           lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid, finance_interest_accrued)
         VALUES
           (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
-           @lend_offered, @lend_interest_earned, @lend_interest_debt)
+           @lend_offered, @lend_interest_earned, @lend_interest_debt, @lend_interest_paid, @finance_interest_accrued)
         ON CONFLICT(name) DO UPDATE SET
           is_npc = @is_npc, role = @role, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
           initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
-          lend_offered = @lend_offered, lend_interest_earned = @lend_interest_earned, lend_interest_debt = @lend_interest_debt
+          lend_offered = @lend_offered, lend_interest_earned = @lend_interest_earned, lend_interest_debt = @lend_interest_debt,
+          lend_interest_paid = @lend_interest_paid, finance_interest_accrued = @finance_interest_accrued
       `),
       delLots: db.prepare('DELETE FROM lots WHERE account = ?'),
       insLot: db.prepare(`
-        INSERT INTO lots (account, stock_id, side, seq, qty, price, ts, reserved, margin, debt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO lots (account, stock_id, side, seq, qty, price, ts, reserved, margin, debt, principal)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       insOrder: db.prepare(`
         INSERT INTO orders (id, account, stock_id, seq, action, side, price, qty, filled, frozen, ts, status)
@@ -302,19 +303,27 @@ class Persister {
       lend_offered: acc.lendOffered || 0,
       lend_interest_earned: acc.lendInterestEarned || 0,
       lend_interest_debt: acc.lendInterestDebt || 0,
+      lend_interest_paid: acc.lendInterestPaid || 0,
+      finance_interest_accrued: acc.financeInterestAccrued || 0,
     });
 
     this.st.delLots.run(acc.name);
     for (const [stockId, pos] of acc.longs) {
       for (let i = 0; i < pos.lots.length; i++) {
         const lot = pos.lots[i];
-        this.st.insLot.run(acc.name, stockId, 'long', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, 0, lot.debt || 0);
+        this.st.insLot.run(
+          acc.name, stockId, 'long', i, lot.qty, lot.price, lot.ts ?? null,
+          isNpc ? 0 : lot.reserved || 0, 0, lot.debt || 0, lot.principal || 0
+        );
       }
     }
     for (const [stockId, pos] of acc.shorts) {
       for (let i = 0; i < pos.lots.length; i++) {
         const lot = pos.lots[i];
-        this.st.insLot.run(acc.name, stockId, 'short', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, lot.margin, 0);
+        this.st.insLot.run(
+          acc.name, stockId, 'short', i, lot.qty, lot.price, lot.ts ?? null,
+          isNpc ? 0 : lot.reserved || 0, lot.margin, 0, 0
+        );
       }
     }
   }

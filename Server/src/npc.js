@@ -1,8 +1,8 @@
 /**
  * NPC 系统：机构 / 游资 / 大中小散户（五类，见 config.npc.types）
  * - 共享一个公允价值（随机游走 + 消息驱动 + 向成交价弱回归）
- * - 每个 NPC 独立情绪（受消息影响，散户放大）
- * - 被动双边报价维持盘口，情绪高涨时主动吃单
+ * - 每个 NPC 独立情绪：散户跟消息追涨杀跌，机构对倒公开消息（利好出货/利空吸筹）
+ * - 被动双边报价维持盘口，情绪高涨时主动吃单；挂单深度随情绪倾斜
  */
 const config = require('./config');
 const { logger } = require('./logger');
@@ -234,14 +234,42 @@ class NpcManager {
 
   updateBias(n, now) {
     const p = this.profileOf(n);
-    const scope = p.newsScope || (n.type === 'inst' ? '机构' : '散户');
-    let s = this.news.sentiment(scope, now);
-    s *= p.sentimentScale != null ? p.sentimentScale : n.type === 'retail' ? 1.2 : 0.8;
+    let s = 0;
+
+    if (p.publicNewsFade != null) {
+      // 聪明钱：看见公开消息（全体+散户盘）但对倒——利好出货、利空吸筹；
+      // 机构专属消息仍小幅同向（知情盘）
+      const sb = this.news.sentimentByScope(now);
+      const publicS = Math.max(-1, Math.min(1, sb.all + sb.retail));
+      s -= publicS * p.publicNewsFade;
+      s += sb.inst * (p.instNewsFollow != null ? p.instNewsFollow : 0.35);
+    } else {
+      const scope = p.newsScope || (n.type === 'inst' ? '机构' : '散户');
+      s = this.news.sentiment(scope, now);
+      s *= p.sentimentScale != null ? p.sentimentScale : n.type === 'retail' ? 1.2 : 0.8;
+    }
+
     // 机构：一致成分（共享情绪波）与分歧成分（阵营对抗）此消彼长
     if (p.useCamp) {
       s += this.instMood * (1 - this.polar) * 1.1;
       s += (n.camp || 0) * this.polar * 0.7;
     }
+
+    // 过热/超跌：价格偏离基本面重心时回归（机构重，大户/游资轻度）
+    if (p.heatFade) {
+      const heat = this.fund > 0 ? this.market.lastPrice / this.fund - 1 : 0;
+      s -= Math.max(-0.8, Math.min(0.8, heat)) * p.heatFade;
+    }
+
+    // 库存软目标：超配倾向派发、低配倾向收集
+    if (p.inventorySkew) {
+      const target = n.initialLong || 0;
+      if (target > 0) {
+        const dev = (n.acc.longQty(this.stock.id) - target) / target;
+        s -= Math.max(-1, Math.min(1, dev)) * p.inventorySkew;
+      }
+    }
+
     // 游资/散户追涨杀跌：最近一个窗口的涨跌幅（窗口动量）。横盘时归零，
     // 情绪重新只由消息与随机噪声主导——顶部/底部才不会出现“全员死多/死空”的钉死
     if (p.momentum && this.priceTrail.length > config.npc.momentumTicks) {
@@ -257,6 +285,17 @@ class NpcManager {
     n.ownBias += gauss() * 0.06;
     n.ownBias *= 0.95; // 缓慢回归
     n.sentiment = Math.max(-1, Math.min(1, s + n.ownBias));
+  }
+
+  /**
+   * 定价锚：机构以基本面重心为主——消息/趋势推高的短端公允不作数，
+   * 才能在散户追利好时看见「贵了」去出货、恐慌杀跌时看见「便宜了」去吸筹。
+   * 其余类型直接用短端公允价值。
+   */
+  valueOf(p) {
+    const w = p.fundWeight;
+    if (w == null) return this.fairValue;
+    return this.fund * w + this.fairValue * (1 - w);
   }
 
   gcResting(n) {
@@ -315,13 +354,14 @@ class NpcManager {
       !!p.canShort &&
       (!!config.margin.allowNakedShort ||
         (config.margin.lending && config.margin.lending.enabled && this.market.lendAvailable() > 0));
-    const fv = this.fairValue;
+    const fv = this.valueOf(p);
     const sentiment = n.sentiment || 0;
-    // 报价中枢 = 最新价与公允价值的混合：贴住最新价保证报价可成交（不撞价格笼子），
-    // 同时保留对公允价值的领先量——公允价值领先时主动吃单会触发，价格被一段段拉过去
+    // 报价中枢 = 最新价与定价锚的混合：贴住最新价保证报价可成交（不撞价格笼子），
+    // 同时保留对公允/基本面的领先量——锚领先时主动吃单会触发，价格被一段段拉过去
     const cfg = config.npc;
     const lastPx = this.market.lastPrice;
-    const base = cfg.quoteLastWeight * lastPx + (1 - cfg.quoteLastWeight) * fv;
+    const qlw = p.quoteLastWeight != null ? p.quoteLastWeight : cfg.quoteLastWeight;
+    const base = qlw * lastPx + (1 - qlw) * fv;
     // 情绪直接平移报价中枢，再硬夹到最新价 ±quoteCushion（小于价格笼子 5%）：
     // 公允价值无论滑多远，盘口都留在可成交区间，成交不会被笼子切断
     let center = base * (1 + sentiment * (p.centerShift != null ? p.centerShift : 0.006));
@@ -334,13 +374,18 @@ class NpcManager {
     const askPx = this.market.clampPrice(center + spread / 2);
     const lot = this.stock.lotSize;
     const rq = p.requoteQty || [100, 800];
+    // 挂单量按情绪倾斜：偏多加深买盘、偏空加深卖盘（出货/吸筹直接写在盘口）
+    const tilt = Math.max(
+      -0.5,
+      Math.min(0.5, sentiment * (p.quoteTilt != null ? p.quoteTilt : 0.3))
+    );
 
     // 买盘：有空头在手优先用现金+保证金回补（BUY_CLOSE），否则才开多。
     // 全池现金常被保证金吸干，回补是买盘的主要资金来源。
     // 分歧度高时机构双边挂单也加大（多空大战的“工事”更深）
     const reScale = p.polarOrderScale ? 1 + this.polar * 0.6 : 1;
     if (bidPx > 0.01) {
-      let qty = roundLot(rand(rq[0], rq[1]) * reScale, lot);
+      let qty = roundLot(rand(rq[0], rq[1]) * reScale * (1 + tilt), lot);
       const coverable = n.acc.coverableShort(this.stock.id);
       if (coverable >= lot) {
         qty = Math.min(qty, coverable, this.closeCapacity(n, bidPx, qty));
@@ -368,7 +413,7 @@ class NpcManager {
 
     // 卖盘：优先卖出持仓（扣掉已挂借融券的）；机构/游资在持仓不足时可开空
     const sellable = n.acc.freeSellableLong(this.stock.id, now);
-    let askQty = roundLot(rand(rq[0], rq[1]), lot);
+    let askQty = roundLot(rand(rq[0], rq[1]) * (1 - tilt), lot);
     if (sellable >= Math.min(askQty, lot)) {
       askQty = Math.min(askQty, sellable);
       if (askQty >= 100) {
@@ -396,10 +441,10 @@ class NpcManager {
 
   /**
    * 主动吃单，三条独立触发（缺一都会造成单边死锁）：
-   * - 动量：情绪同向且对手价在公允价值之内
-   * - 情绪：|s| 够大直接吃，不看价格（消息行情 / 杀跌的来源）
-   * - 价值：对手价偏离公允价值 0.5% 以上（贴着公允价值的均值回归盘，
-   *   保证 fv 与最新价脱节时永远有人把价格拉回来）
+   * - 动量：情绪同向且对手价在定价锚之内
+   * - 情绪：|s| 够大直接吃，不看价格（消息行情 / 杀跌的来源；机构对倒后也是出货/吸筹的来源）
+   * - 价值：对手价偏离定价锚 valueHitEdge 以上（贴着估值的均值回归盘，
+   *   保证锚与最新价脱节时永远有人把价格拉回来）
    */
   tryAggressive(n, now) {
     const p = this.profileOf(n);
@@ -410,12 +455,13 @@ class NpcManager {
     const s = n.sentiment || 0;
     const lot = this.stock.lotSize;
     const book = this.market.book;
-    const fv = this.fairValue;
+    const fv = this.valueOf(p);
+    const edge = p.valueHitEdge != null ? p.valueHitEdge : 0.005;
     const aq = p.aggressiveQty || [100, 500];
 
     if (book.asks.length > 0) {
       const ask = book.asks[0];
-      const wantBuy = (s > 0.35 && fv >= ask.price) || s > 0.65 || fv >= ask.price * 1.005;
+      const wantBuy = (s > 0.35 && fv >= ask.price) || s > 0.65 || fv >= ask.price * (1 + edge);
       // 已有回补单在挂时不再下买：回补保证金在成交时才释放（place 不冻结），
       // 同一 tick 双重回补会超出保证金总额
       const hasCover = n.ownResting.some(
@@ -447,7 +493,7 @@ class NpcManager {
 
     if (book.bids.length > 0) {
       const bid = book.bids[0];
-      if ((s < -0.35 && fv <= bid.price) || s < -0.65 || fv <= bid.price * 0.995) {
+      if ((s < -0.35 && fv <= bid.price) || s < -0.65 || fv <= bid.price * (1 - edge)) {
         const sellable = n.acc.freeSellableLong(this.stock.id, now);
         const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
         if (sellable >= 100) {

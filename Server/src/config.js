@@ -39,14 +39,15 @@ module.exports = {
 
   // 账户
   account: {
-    initialCash: 100000, // 初始资金 10 万
+    initialCash: 1000000, // 初始资金 100 万
     maxAccounts: 5000, // 本局玩家账号上限（防止无限注册耗尽内存）
 
     // 主页「加钱」：玩家给自己账户加钱，按账户累计封顶（终身只能加满 maxLifetime）。
     // 累计数随账户落盘，重启 / 多标签页都算同一个账户；enabled=false 时接口返回未开放。
     // 单次不限额，可以一次性把剩余额度全部加满。
+    // enabled=false：接口返回未开放，主页「加钱」按钮跟着隐藏（暂时屏蔽，改回 true 即恢复）
     deposit: {
-      enabled: true,
+      enabled: false,
       maxLifetime: 100000000, // 单账户终身上限（元，默认 1 个亿）
       minPerTime: 1, // 单次加钱下限（元）
       presets: [100000, 1000000, 10000000], // 主页弹窗快捷金额（元）
@@ -57,7 +58,7 @@ module.exports = {
   trade: {
     feeRate: 0.0001, // 手续费 万分之一
     cooldownMs: 2000, // 同一玩家两次下单最小间隔
-    lockMs: 2 * 60 * 1000, // 买入锁仓时间（T+2分钟）
+    lockMs: 10 * 1000, // 买入锁仓时间（T+10秒）
     maxDeviation: 0.5, // 玩家委托价相对最新价的最大偏离（送错价格保护）
     // 价格笼子：单笔成交价相对上一笔成交价的最大偏离。
     // 成交价取被动方挂单价，所以脱离盘口的挂单一旦被吃，就能把最新价一把拉走，
@@ -76,6 +77,7 @@ module.exports = {
       order: { limit: 60, windowMs: 60000 },
       deposit: { limit: 10, windowMs: 60000 },
       state: { limit: 240, windowMs: 60000 },
+      holders: { limit: 60, windowMs: 60000 }, // 股东占比走势（点击前十名时按需拉取）
       admin: { limit: 10, windowMs: 60000 },
     },
     // SSE 长连接上限
@@ -153,6 +155,16 @@ module.exports = {
         holdRatio: 0.32,
         totalCash: 220000000,
         newsScope: '机构',
+        // 聪明钱：不跟公开消息追涨杀跌，而是对倒——散户追利好时出货、恐慌时吸筹。
+        // 机构专属消息仍小幅同向（知情盘）；定价锚在基本面重心，不跟消息推高的公允。
+        publicNewsFade: 0.85, // 公开消息（全体+散户盘）反向强度
+        instNewsFollow: 0.35, // 机构专属消息同向跟随
+        heatFade: 0.9, // 相对基本面重心的过热/超跌 → 情绪回归
+        inventorySkew: 0.55, // 持仓偏离建仓量的软目标倾斜（超配派发、低配收集）
+        fundWeight: 0.7, // 定价/价值判断里基本面重心的权重（其余是短端公允）
+        quoteLastWeight: 0.25, // 报价贴最新价的权重（低于全局，更看估值）
+        valueHitEdge: 0.003, // 价值吃单阈值（比全局 0.5% 更敏感）
+        quoteTilt: 0.45, // 挂单量按情绪倾斜（出货/吸筹反映在盘口深度）
         sentimentScale: 0.8,
         canShort: true,
         useCamp: true, // 固定多空阵营，分歧度高时贴身对打
@@ -183,6 +195,8 @@ module.exports = {
         aggressiveRate: 0.35,
         polarOrderScale: false,
         openShortSentiment: -0.12,
+        quoteTilt: 0.35,
+        heatFade: 0.25, // 轻度过热回避，避免全池在顶上对倒
       },
       big: {
         label: '大户',
@@ -202,6 +216,8 @@ module.exports = {
         aggressiveRate: 0.14,
         polarOrderScale: false,
         openShortSentiment: -9,
+        quoteTilt: 0.3,
+        heatFade: 0.2, // 轻度：跟消息但不无限追顶
       },
       mid: {
         label: '中户',
@@ -221,6 +237,7 @@ module.exports = {
         aggressiveRate: 0.12,
         polarOrderScale: false,
         openShortSentiment: -9,
+        quoteTilt: 0.25,
       },
       small: {
         label: '散户',
@@ -240,6 +257,7 @@ module.exports = {
         aggressiveRate: 0.1,
         polarOrderScale: false,
         openShortSentiment: -9,
+        quoteTilt: 0.2,
       },
     },
     // 旧档兼容：role=retail 按小散户恢复（新开局不再产生该 role）

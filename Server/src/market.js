@@ -262,6 +262,7 @@ class Market {
       }
       if (rest > 0.005) acc.lendInterestDebt = r2((acc.lendInterestDebt || 0) + rest);
       if (pay > 0) {
+        acc.lendInterestPaid = r2((acc.lendInterestPaid || 0) + pay);
         collected += pay;
         payers.push({ acc, pay });
       }
@@ -317,6 +318,8 @@ class Market {
         pay += fromMargin;
       }
       if (pay <= 0) continue;
+      // 补缴的钱同样是实付利息：累计已付 = 当场扣缴 + 事后补缴，与欠息一起构成累计产生额
+      acc.lendInterestPaid = r2((acc.lendInterestPaid || 0) + pay);
       const left = r2(owed - pay);
       acc.lendInterestDebt = left > 0.005 ? left : 0;
       collected += pay;
@@ -366,6 +369,7 @@ class Market {
         }
       }
       acc.realizedPnL = r2(acc.realizedPnL - add);
+      acc.financeInterestAccrued = r2((acc.financeInterestAccrued || 0) + add);
       this.notifyChange(acc);
     }
   }
@@ -466,7 +470,7 @@ class Market {
         const sellable = account.freeSellableLong(this.stock.id, now);
         if (sellable < qty) {
           const locked = account.longQty(this.stock.id) - sellable;
-          precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${config.trade.lockMs / 60000} 分钟锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
+          precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${config.trade.lockMs / 1000} 秒锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
           return { ok: false, error: precheck };
         }
         // 融资负债预检：深跌破位时卖出款可能盖不住将偿还的负债，此时要求现金补差。
@@ -764,13 +768,16 @@ class Market {
       const cashFee = fin ? 0 : fee;
       acc.cash = r2(acc.cash + rel - selfPay - cashFee);
       if (!isGhost) {
-        // 新买入批次：以本次成交时间起算锁仓；融资单带负债（借入本金 + 开仓手续费，利息按 tick 摊入）
+        // 新买入批次：以本次成交时间起算锁仓；融资单带负债（借入本金 + 开仓手续费，利息按 tick 摊入）。
+        // principal 是其中借来的本金部分（固定不动），debt 随利息复利上浮，两者之差就是这批已计利息。
+        const borrow = fin ? r2(cost * (1 - finCfg.ratio) + fee) : 0;
         acc.longPos(order.stockId).lots.push({
           qty,
           price,
           ts: now,
           reserved: 0,
-          debt: fin ? r2(cost * (1 - finCfg.ratio) + fee) : 0,
+          debt: borrow,
+          principal: borrow,
         });
         // 开仓手续费也计入已实现盈亏，否则 权益 ≠ 初始资金 + 已实现盈亏 + 浮动盈亏
         acc.realizedPnL = r2(acc.realizedPnL - fee);

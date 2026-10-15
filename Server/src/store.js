@@ -19,7 +19,9 @@ class Account {
     this.lendOffered = 0; // 已挂入融券池的股数（从可卖持仓中冻结，被借走前可撤）
     this.lendInterestEarned = 0; // 出借累计利息收入（展示用）
     this.lendInterestDebt = 0; // 做空方欠息（现金+保证金都扣不动时挂账，计入权益、恢复后追缴）
-    this.longs = new Map(); // stockId -> { lots: [{qty, price, ts, reserved}] }
+    this.lendInterestPaid = 0; // 做空方累计已付融券利息（展示用；欠息另有 lendInterestDebt）
+    this.financeInterestAccrued = 0; // 融资累计已计利息（展示用；同额已摊入批次负债并扣减 realizedPnL）
+    this.longs = new Map(); // stockId -> { lots: [{qty, price, ts, reserved, debt, principal}] }
     this.shorts = new Map(); // stockId -> { lots: [{qty, price, margin, reserved}] }
     this.orders = new Map(); // 挂单中的订单 id -> order
     this.orderHistory = []; // 最近委托（含已完结）
@@ -142,6 +144,8 @@ class Account {
       const frac = take / lot.qty;
       cost += take * lot.price;
       debt += (lot.debt || 0) * frac;
+      // 本金与负债同比例减少，批次上的"未还利息 = debt − principal"才不会被平仓打乱
+      lot.principal = r2((lot.principal || 0) - (lot.principal || 0) * frac);
       lot.qty -= take;
       lot.debt = r2((lot.debt || 0) - (lot.debt || 0) * frac);
       lot.reserved = Math.max(0, lot.reserved - take);
@@ -264,6 +268,15 @@ class Account {
     if (!p) return 0;
     let d = 0;
     for (const lot of p.lots) d += lot.debt || 0;
+    return d;
+  }
+
+  /** 融资负债里还没还的借入本金（debt − principal = 这批已计但未还的利息） */
+  financePrincipal(stockId) {
+    const p = this.longs.get(stockId);
+    if (!p) return 0;
+    let d = 0;
+    for (const lot of p.lots) d += lot.principal || 0;
     return d;
   }
 

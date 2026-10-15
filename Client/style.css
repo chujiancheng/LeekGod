@@ -120,6 +120,28 @@ input { font: inherit; color: inherit; }
 .auto-evt-cell { max-width: 280px; }
 .auto-targets { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
+/* ---------- 股东占比走势弹窗 ---------- */
+.holder-card { width: 620px; }
+.holder-card canvas {
+  width: 100%; height: 220px; display: block;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.holder-actions {
+  max-height: 168px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.holder-actions .ha-row {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 6px 10px; font-size: 12px; border-bottom: 1px solid rgba(30, 38, 54, .6);
+}
+.holder-actions .ha-row:last-child { border-bottom: 0; }
+.holder-actions .ha-time { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; flex: none; width: 62px; }
+.holder-actions .ha-act { flex: none; width: 56px; color: var(--muted); font-size: 11px; }
+.holder-actions .ha-pct { flex: none; width: 66px; font-variant-numeric: tabular-nums; }
+.holder-actions .ha-delta { flex: none; width: 86px; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.holder-actions .ha-qty { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.holder-actions .ha-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 12px; }
+
 /* ---------- 布局 ---------- */
 .app {
   height: 100vh;
@@ -347,6 +369,22 @@ input { font: inherit; color: inherit; }
 .estimates div { display: flex; justify-content: space-between; }
 .estimates label { color: var(--muted); }
 .estimates span { font-variant-numeric: tabular-nums; }
+.estimates i { font-style: normal; font-size: 11px; color: var(--muted); margin-left: 4px; }
+
+/* 杠杆利息（常显：做多融资息 / 做空融券息，当前开仓方向高亮） */
+.lever-box {
+  margin: 2px 12px 0; padding: 6px 9px;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12px;
+}
+.lever-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.lever-row .lever-label { color: var(--muted); }
+.lever-row .lever-val { color: var(--ink); font-variant-numeric: tabular-nums; }
+.lever-row .lever-val i { font-style: normal; font-size: 11px; color: var(--muted); margin-left: 4px; }
+.lever-row.on .lever-label { color: var(--blue); font-weight: 600; }
+.lever-row.short.on .lever-label { color: var(--sell, #1fb978); }
+.lever-row.off .lever-val { color: var(--muted); }
 
 .submit-btn {
   margin: 8px 12px 4px; height: 40px;
@@ -420,6 +458,14 @@ input { font: inherit; color: inherit; }
 .grid-table .tag.role-retail { color: var(--muted); }
 .grid-table .tag.role-player { color: var(--blue); border-color: rgba(76, 141, 255, .45); }
 .grid-table tr.row-mine td { background: rgba(76, 141, 255, .12); }
+
+/* ---------- 股东 tab ---------- */
+.holders-table tbody tr { cursor: pointer; }
+.holders-table td.delta-cell { line-height: 1.35; white-space: nowrap; }
+.holders-table .delta-sub { display: block; font-size: 11px; opacity: .8; font-variant-numeric: tabular-nums; }
+.holders-table .delta-new { font-size: 11px; color: var(--gold); }
+.holders-hint { padding: 8px 2px 0; font-size: 11.5px; color: var(--muted); }
+
 .depth-table .lv.center { text-align: center; }
 .row-long td:first-child::before, .row-short td:first-child::before {
   content: ""; display: inline-block; width: 3px; height: 12px; margin-right: 7px;

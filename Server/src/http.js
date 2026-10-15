@@ -205,6 +205,7 @@ function createServer(game) {
     order: new RateLimiter(rl.order),
     deposit: new RateLimiter(rl.deposit),
     state: new RateLimiter(rl.state),
+    holders: new RateLimiter(rl.holders),
     admin: new RateLimiter(rl.admin),
   };
 
@@ -253,6 +254,16 @@ function createServer(game) {
           return json(res, 401, { ok: false, error: '请先登录', account: null });
         }
         return json(res, 200, game.stateFor(token, { withHistory: true }));
+      }
+
+      // ---- 股东占比走势：本账户最近若干次操作时的前十大快照（点前十名那行时按需拉） ----
+      if (p === '/api/holders/history' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        const r = game.holderHistoryFor(token);
+        return json(res, r.ok ? 200 : 401, r);
       }
 
       if (p === '/api/order' && req.method === 'POST') {

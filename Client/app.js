@@ -18,6 +18,9 @@
   let lastStateAt = 0;
   let relogging = false;
   let activeView = 'home'; // home = 交易大厅，trade = 分时交易终端
+  let holderHist = null; // 股东占比走势快照（点股东那行时按需拉取，不随每帧刷新）
+  let holderHistName = ''; // 当前弹窗看的是哪位股东
+  let holderFetching = false;
 
   const ACTION_LABEL = {
     buy_open: '买入开多',
@@ -362,6 +365,17 @@
   }
 
   // ---------- 资产 ----------
+  /** 分钟息（百分数）→ 小数费率 */
+  function minuteRateOf(kind) {
+    const r = state.rules || {};
+    if (kind === 'finance') {
+      return r.finance && r.finance.enabled ? (Number(r.finance.minuteRate) || 0) / 100 : 0;
+    }
+    // 裸空不计息，与 accrueLendingInterest 的计息口径一致
+    const L = state.market.lending;
+    return L && L.enabled && !r.allowNakedShort ? (Number(L.minuteRate) || 0) / 100 : 0;
+  }
+
   function renderAssets() {
     const a = state.account;
     if (!a) return;
@@ -374,6 +388,29 @@
       a.lending && a.lending.interestDebt > 0
         ? `<div class="item"><label title="现金与保证金都扣不动时挂账的融券利息，已从权益中扣除；现金恢复后自动补缴给出借方">做空欠息</label><span class="${cls(-1)}">${fmtMoney(a.lending.interestDebt)}</span></div>`
         : '';
+    // 融资负债拆两段：还没还的本金 / 已计但未还的利息（两者之和 = 融资负债）
+    const finPrincipal = a.financePrincipal || 0;
+    const finUnpaidInterest = Math.max(0, (a.financeDebt || 0) - finPrincipal);
+    const finPrincipalItem =
+      a.financeDebt > 0
+        ? `<div class="item"><label title="融资买入借入的本金（含开仓手续费），平仓/强平时优先从卖出款偿还">融资本金</label><span class="down">${fmtMoney(finPrincipal)}</span></div>`
+        : '';
+    const finInterestItem =
+      a.financeDebt > 0
+        ? `<div class="item"><label title="融资负债里已计但还没还的利息（= 负债 − 本金）。累计已计息 ${fmtMoney(a.financeInterest || 0)}，含平仓时已随批次还掉的部分">融资已计息</label><span class="down">${fmtMoney(finUnpaidInterest)}</span></div>`
+        : '';
+    const paidInterest = (a.lending && a.lending.interestPaid) || 0;
+    const paidInterestItem =
+      paidInterest > 0
+        ? `<div class="item"><label title="做空累计已付的融券利息（欠息部分见「做空欠息」）">做空已付息</label><span class="down">${fmtMoney(paidInterest)}</span></div>`
+        : '';
+    // 持仓利息：融资按负债基数、融券按空头市值，与服务端每 tick 的摊息口径一致
+    const perMin =
+      a.financeDebt * minuteRateOf('finance') + a.short.value * minuteRateOf('lend');
+    const perMinItem =
+      perMin > 0
+        ? `<div class="item"><label title="当前持仓每分钟要付的利息：融资负债 × 融资分钟息 + 空头市值 × 融券分钟息">持仓利息</label><span class="down">${fmtMoney(perMin)}/分</span></div>`
+        : '';
     $('assetsRow').innerHTML = `
       <div class="item"><label>总权益</label><span class="hl ${cls(a.equity - state.rules.initialCash)}">${fmtMoney(a.equity)}</span></div>
       <div class="item"><label title="现金口径，含融券卖出所得；开空后会大于总权益">可用资金</label><span>${fmtMoney(a.cash)}</span></div>
@@ -381,7 +418,11 @@
       <div class="item"><label>空头保证金</label><span>${fmtMoney(a.shortMargin)}</span></div>
       <div class="item"><label>持仓市值</label><span>${fmtMoney(a.long.value)}</span></div>
       ${debtItem}
+      ${finPrincipalItem}
+      ${finInterestItem}
       ${lendDebtItem}
+      ${paidInterestItem}
+      ${perMinItem}
       <div class="item"><label>浮动盈亏</label><span class="${cls(floatPnl)}">${(floatPnl >= 0 ? '+' : '') + fmtMoney(floatPnl)}</span></div>
       <div class="item"><label>已实现盈亏</label><span class="${cls(a.realizedPnL)}">${(a.realizedPnL >= 0 ? '+' : '') + fmtMoney(a.realizedPnL)}</span></div>
     `;
@@ -531,32 +572,256 @@
     retail: 'role-retail',
     player: 'role-player',
   };
+  const HOLDER_ACTION_LABEL = {
+    login: '登录',
+    order: '下单',
+    cancel: '撤单',
+    lend: '挂借',
+    unlend: '撤借',
+  };
+
+  /**
+   * 变动单元格：股数变化在上（精确、可核对），占比变化在下（1pp = 流通盘的 1%）。
+   * dPct/dQty 为 null 表示算不出——hasSnap=false 是还没操作过，否则是该股东当时未进前 30 名
+   */
+  function deltaCell(dQty, dPct, hasSnap) {
+    if (dPct == null || dQty == null) {
+      return hasSnap
+        ? '<span class="delta-new">新进</span>'
+        : '<span class="flat">--</span>';
+    }
+    const sign = dQty > 0 ? '+' : '';
+    return `<span class="${cls(dQty)}">${sign}${fmtQty(dQty)} 股</span><span class="delta-sub ${cls(dPct)}">${dPct > 0 ? '+' : ''}${dPct.toFixed(2)}pp</span>`;
+  }
+
   function renderHolders() {
     const rows = state.topHolders || [];
     const float = state.market.floatShares || 1;
     const sumQty = rows.reduce((s, h) => s + h.qty, 0);
     const myRow = rows.find((h) => h.name === me);
+    const snap = state.holderSnapshot || null;
     $('holdersMeta').innerHTML = `
       <div class="item"><label>流通盘</label><span>${fmtQty(float)} 股</span></div>
       <div class="item"><label>前十大合计</label><span>${((sumQty / float) * 100).toFixed(2)}%</span></div>
       <div class="item"><label>我的排名</label><span>${myRow ? '第 ' + (rows.indexOf(myRow) + 1) + ' 名' : '未进前十'}</span></div>
       <div class="item"><label>我的持股</label><span>${myRow ? fmtQty(myRow.qty) + ' 股（' + myRow.pct.toFixed(2) + '%）' : '--'}</span></div>
+      <div class="item"><label>上次操作快照</label><span>${
+        snap && snap.t
+          ? `${fmtTime(snap.t)}（${HOLDER_ACTION_LABEL[snap.action] || snap.action}）· ${snap.count}/${snap.limit} 次`
+          : '暂无，登录后自动记录'
+      }</span></div>
     `;
     $('holdersBody').innerHTML =
       rows
         .map((h, i) => {
           const mine = h.name === me;
           const roleCls = ROLE_CLS[h.role] || 'role-retail';
-          return `<tr${mine ? ' class="row-mine"' : ''}>
+          const openCell = `<span class="${cls(h.change)}">${h.change > 0 ? '+' : ''}${fmtQty(h.change)} 股</span><span class="delta-sub ${cls(h.changePct)}">${h.changePct > 0 ? '+' : ''}${h.changePct.toFixed(2)}pp</span>`;
+          return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.name)}">
             <td>${i + 1}</td>
             <td>${esc(h.name)}${mine ? '（我）' : ''}</td>
             <td><span class="tag ${roleCls}">${esc(ROLE_LABEL[h.role] || h.role)}</span></td>
             <td>${fmtQty(h.qty)}</td>
             <td>${h.pct.toFixed(2)}%</td>
-            <td class="${cls(h.change)}">${h.change > 0 ? '+' : ''}${fmtQty(h.change)}</td>
+            <td class="delta-cell">${openCell}</td>
+            <td class="delta-cell">${deltaCell(h.dQty, h.dPct, !!snap)}</td>
           </tr>`;
         })
-        .join('') || '<tr><td colspan="6" class="empty">暂无数据</td></tr>';
+        .join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+
+    // 弹窗开着时，服务端又快照了一次（我刚操作过）就顺手刷新，免得看的是旧曲线
+    if (holderHistName && !holderFetching) {
+      const mine = holderHist && holderHist.snapshots;
+      const lastT = mine && mine.length ? mine[mine.length - 1].t : 0;
+      if (snap && snap.t && snap.t !== lastT) loadHolderHistory(holderHistName);
+    }
+  }
+
+  // ---------- 股东占比走势弹窗 ----------
+  function openHolderChart(name) {
+    holderHistName = name;
+    holderHist = null;
+    $('holderTitle').textContent = name + ' · 占比走势';
+    $('holderSub').textContent = '正在读取…';
+    $('holderActions').innerHTML = '';
+    $('holderOverlay').classList.remove('hidden');
+    drawHolderHistory();
+    loadHolderHistory(name);
+  }
+
+  function closeHolderChart() {
+    $('holderOverlay').classList.add('hidden');
+    holderHistName = '';
+    holderHist = null;
+  }
+
+  function loadHolderHistory(name) {
+    holderFetching = true;
+    apiGet('/api/holders/history')
+      .then((r) => r.json())
+      .then((res) => {
+        if (!res.ok) {
+          toast(res.error || '读取股东走势失败', 'err');
+          return;
+        }
+        holderHist = res;
+        if (holderHistName === name) drawHolderHistory();
+      })
+      .catch(() => toast('网络错误', 'err'))
+      .then(() => {
+        holderFetching = false;
+      });
+  }
+
+  /** 该股东在各次操作快照里的持股与占比；不在快照里（当时未进前 30）的点记为 null */
+  function holderSeries(name) {
+    const list = (holderHist && holderHist.snapshots) || [];
+    return list.map((s) => {
+      const r = (s.rows || []).find((x) => x.name === name) || null;
+      return { t: s.t, action: s.action, qty: r ? r.qty : null, pct: r ? r.pct : null };
+    });
+  }
+
+  function drawHolderHistory() {
+    const canvas = $('holderChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const pts = holderSeries(holderHistName);
+    const known = pts.filter((p) => p.pct != null);
+
+    // 底部操作流水：时间 / 动作 / 占比 / 较上次的变动
+    $('holderActions').innerHTML =
+      pts.length === 0
+        ? '<div class="ha-empty">还没有快照，登录或下单后开始记录</div>'
+        : pts
+            .slice()
+            .reverse()
+            .map((p, i, arr) => {
+              const prev = arr[i + 1] || null;
+              const d = p.pct != null && prev && prev.pct != null ? p.pct - prev.pct : null;
+              const n = arr.length - 1 - i;
+              return `<div class="ha-row">
+                <span class="ha-time">${fmtTime(p.t)}</span>
+                <span class="ha-act">${esc(HOLDER_ACTION_LABEL[p.action] || p.action || '')}</span>
+                <span class="ha-pct">${p.pct == null ? '--' : p.pct.toFixed(2) + '%'}</span>
+                <span class="ha-delta ${d == null ? 'flat' : cls(d)}">${d == null ? '--' : (d > 0 ? '+' : '') + d.toFixed(2) + 'pp'}</span>
+                <span class="ha-qty">${p.qty == null ? '未进前 30' : fmtQty(p.qty) + ' 股'}</span>
+                <span class="ha-qty">第 ${n + 1} 次</span>
+              </div>`;
+            })
+            .join('');
+
+    $('holderSub').textContent = known.length
+      ? `最近 ${pts.length} 次操作 · 当前 ${known[known.length - 1].pct.toFixed(2)}%` +
+        (known.length < pts.length ? '（有 ' + (pts.length - known.length) + ' 次未进前 30 名）' : '')
+      : '最近 ' + pts.length + ' 次操作 · 该股东未出现在快照前 30 名内';
+
+    const pad = { l: 54, r: 14, t: 14, b: 24 };
+    const iw = W - pad.l - pad.r;
+    const ih = H - pad.t - pad.b;
+
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const y = pad.t + (ih * i) / 3;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(W - pad.r, y);
+      ctx.stroke();
+    }
+
+    if (known.length === 0) {
+      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(pts.length ? '该股东未进过快照前 30 名' : '暂无快照，登录或下单后开始记录', W / 2, H / 2);
+      return;
+    }
+
+    // 纵轴按占比定范围，单点或全平时给一点上下留白
+    let lo = Math.min(...known.map((p) => p.pct));
+    let hi = Math.max(...known.map((p) => p.pct));
+    if (hi - lo < 0.02) {
+      const mid = (hi + lo) / 2;
+      lo = Math.max(0, mid - 0.01);
+      hi = mid + 0.01;
+    }
+    const span = hi - lo;
+    const xAt = (i) => (pts.length === 1 ? pad.l + iw / 2 : pad.l + (iw * i) / (pts.length - 1));
+    const yAt = (p) => pad.t + ih - ((p - lo) / span) * ih;
+
+    // 折线：缺失点断开，不臆造连续
+    let started = false;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      if (p.pct == null) {
+        started = false;
+        return;
+      }
+      const x = xAt(i);
+      const y = yAt(p.pct);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.strokeStyle = '#5b9cff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // 数据点 + 末点标注
+    let lastIdx = -1;
+    for (let i = pts.length - 1; i >= 0; i--) {
+      if (pts[i].pct != null) {
+        lastIdx = i;
+        break;
+      }
+    }
+    pts.forEach((p, i) => {
+      if (p.pct == null) return;
+      ctx.beginPath();
+      ctx.arc(xAt(i), yAt(p.pct), i === lastIdx ? 3.2 : 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = i === lastIdx ? '#f0b429' : '#5b9cff';
+      ctx.fill();
+    });
+
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.textAlign = 'right';
+    ctx.fillText(hi.toFixed(2) + '%', pad.l - 6, pad.t + 8);
+    ctx.fillText(((hi + lo) / 2).toFixed(2) + '%', pad.l - 6, pad.t + ih / 2 + 4);
+    ctx.fillText(lo.toFixed(2) + '%', pad.l - 6, pad.t + ih);
+    ctx.textAlign = 'left';
+    ctx.fillText(fmtTime(pts[0].t), pad.l, H - 7);
+    if (pts.length > 1) {
+      ctx.textAlign = 'right';
+      ctx.fillText(fmtTime(pts[pts.length - 1].t), W - pad.r, H - 7);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f0b429';
+    const lp = pts[lastIdx];
+    ctx.fillText(
+      lp.pct.toFixed(2) + '%',
+      Math.min(xAt(lastIdx) + 6, W - pad.r - 34),
+      Math.max(pad.t + 10, yAt(lp.pct) - 6)
+    );
+  }
+
+  function bindHolders() {
+    // 表格每帧重写 innerHTML，事件挂在容器上做代理
+    $('holdersBody').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr[data-holder]');
+      if (tr) openHolderChart(tr.dataset.holder);
+    });
+    $('holderCloseBtn').addEventListener('click', closeHolderChart);
+    $('holderOverlay').addEventListener('click', (e) => {
+      if (e.target === $('holderOverlay')) closeHolderChart();
+    });
   }
 
   // ---------- 融券池 ----------
@@ -588,6 +853,7 @@
         <div class="item"><label>被借走</label><span>${fmtQty(mine.lentOut)} 股</span></div>
         <div class="item"><label>可撤回</label><span>${fmtQty(mine.removable)} 股</span></div>
         <div class="item"><label>累计利息收入</label><span class="up">+${fmtMoney(mine.interestEarned)}</span></div>
+        ${mine.interestPaid > 0 ? `<div class="item"><label>（做空已付息）</label><span class="down">${fmtMoney(mine.interestPaid)}</span></div>` : ''}
         ${mine.interestDebt > 0 ? `<div class="item"><label>（做空欠息）</label><span class="down">${fmtMoney(mine.interestDebt)}</span></div>` : ''}
       `;
       $('lendLotHint').textContent = '可挂 ' + fmtQty(mine.freeToLend);
@@ -1311,7 +1577,10 @@
       renderEstimates();
     });
     $('qtyInput').addEventListener('input', renderEstimates);
-    $('financeCheck').addEventListener('change', renderEstimates);
+    $('financeCheck').addEventListener('change', () => {
+      renderEstimates();
+      renderLeverRates();
+    });
     $('pxUp').addEventListener('click', () => stepPrice(0.01));
     $('pxDown').addEventListener('click', () => stepPrice(-0.01));
     $('pxAtMarket').addEventListener('click', () => {
@@ -1437,14 +1706,58 @@
     finRow.hidden = !finAvailable;
     if (finAvailable) {
       const times = fin.ratio > 0 ? (1 / fin.ratio).toFixed(1).replace(/\.0$/, '') : '1';
-      $('financeTag').textContent = `自备 ${Math.round(fin.ratio * 100)}% · 最高${times}倍 · 息 ${fin.minuteRate}%/分`;
+      // 利率交给下面的「杠杆利息」常显块，这里只留杠杆口径，免得两个数并排把标签挤换行
+      $('financeTag').textContent = `自备 ${Math.round(fin.ratio * 100)}% · 最高${times}倍`;
     }
     const submit = $('submitBtn');
     submit.textContent = ACTION_LABEL[selectedAction];
     submit.classList.toggle('sell-mode', selectedAction === 'sell_close' || selectedAction === 'sell_open');
     renderEstimates();
+    renderLeverRates();
     renderRisk();
     renderCooldown();
+  }
+
+  /** 分钟息（百分数，0.01 表示 0.01%/分）→ 主文与折算日息 */
+  function fmtMinuteRate(pct) {
+    const r = Number(pct) || 0;
+    return {
+      rate: `${Number(r.toFixed(3))}%/分`,
+      day: r > 0 ? `≈${Number((r * 1440).toFixed(1))}%/日` : '',
+    };
+  }
+
+  /**
+   * 杠杆利息常显：做多（融资）与做空（融券）各一行，选中方向且这笔真会借钱/借券时高亮。
+   * 融资买入不勾选只是一笔全款买单，不计息，所以高亮跟着勾选状态走。
+   */
+  function renderLeverRates() {
+    const fin = state.rules.finance;
+    const L = state.market.lending;
+
+    const longRow = $('leverRowLong');
+    const longOn = selectedAction === 'buy_open' && !!$('financeCheck').checked;
+    if (fin && fin.enabled) {
+      const f = fmtMinuteRate(fin.minuteRate);
+      $('leverValLong').innerHTML = `${f.rate}<i>${f.day}</i>`;
+      longRow.className = 'lever-row' + (longOn ? ' on' : '');
+    } else {
+      $('leverValLong').textContent = '未开放';
+      longRow.className = 'lever-row off';
+    }
+
+    const shortRow = $('leverRowShort');
+    if (!L || !L.enabled) {
+      $('leverValShort').textContent = '未开放';
+      shortRow.className = 'lever-row short off';
+    } else if (state.rules.allowNakedShort) {
+      $('leverValShort').textContent = '裸空不计息';
+      shortRow.className = 'lever-row short off';
+    } else {
+      const s = fmtMinuteRate(L.minuteRate);
+      $('leverValShort').innerHTML = `${s.rate}<i>${s.day}</i>`;
+      shortRow.className = 'lever-row short' + (selectedAction === 'sell_open' ? ' on' : '');
+    }
   }
 
   function renderEstimates() {
@@ -1463,6 +1776,21 @@
     $('estFinanceRow').hidden = !finOn;
     if (finOn) {
       $('estFinance').textContent = `${fmtMoney(price * qty * fin.ratio)} / ${fmtMoney(price * qty * (1 - fin.ratio))}`;
+    }
+
+    // 本次开杠杆的利息成本：融资按借入口径（含开仓手续费）计息，融券按借券市值计息，
+    // 都乘以当前分钟息——与服务端逐 tick 摊息的基数同一口径
+    const estInterestRow = $('estInterestRow');
+    let perMin = 0;
+    if (finOn) {
+      const finFee = price * qty * state.rules.feeRate;
+      perMin = (price * qty * (1 - fin.ratio) + finFee) * minuteRateOf('finance');
+    } else if (selectedAction === 'sell_open') {
+      perMin = price * qty * minuteRateOf('lend');
+    }
+    estInterestRow.hidden = perMin <= 0;
+    if (perMin > 0) {
+      $('estInterest').innerHTML = `${fmtMoney(perMin)}/分<i>≈${fmtMoney(perMin * 1440)}/日</i>`;
     }
 
     if (state.account) {
@@ -1916,6 +2244,7 @@
     bindTabs();
     bindOrderPanel();
     bindLending();
+    bindHolders();
     bindCrosshair();
     setInterval(tickUI, 200);
     if (me) {

@@ -61,7 +61,11 @@ const acc1 = g1.store.get('测试玩家');
 assert(!!acc1, '账户已创建');
 
 // 加钱必须随账户落盘：漏标脏就会在重启后凭空消失
+// （加钱开关当前临时关闭，本节直接调 game.deposit，先临时打开）
+const depositEnabledBefore = config.account.deposit.enabled;
+config.account.deposit.enabled = true;
 const dep1 = g1.deposit(login.token, 66666);
+config.account.deposit.enabled = depositEnabledBefore;
 assert(dep1.ok && acc1.deposited === 66666, `加钱已记账（累计 ${acc1.deposited}）`);
 
 for (let i = 0; i < 5; i++) g1.tick();
@@ -92,6 +96,10 @@ assert(acc1.orders.has(restingId), '活动委托仍在账户挂单表里');
 
 // 融资负债随多头批次落盘：手动挂负债并标脏，重启后必须原样恢复
 acc1.longPos(g1.stock.id).lots[0].debt = 1234.56;
+acc1.longPos(g1.stock.id).lots[0].principal = 1000.0;
+// 利息累计也是持久化事实（展示"已计息/已付息"用），同样靠这次标脏落盘
+acc1.financeInterestAccrued = 66.6;
+acc1.lendInterestPaid = 88.8;
 p1.touch(acc1);
 g1.tick();
 assert(acc1.financeDebt(g1.stock.id) > 0, `注入融资负债 ${acc1.financeDebt(g1.stock.id)}`);
@@ -110,9 +118,12 @@ const before = {
   shortMargin: acc1.shortMargin,
   realizedPnL: acc1.realizedPnL,
   deposited: acc1.deposited,
+  financeInterestAccrued: acc1.financeInterestAccrued,
+  lendInterestPaid: acc1.lendInterestPaid,
+  lendInterestDebt: acc1.lendInterestDebt,
   longQty: acc1.longQty(g1.stock.id),
   shortQty: acc1.shortQty(g1.stock.id),
-  lots: acc1.longPos(g1.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0 })),
+  lots: acc1.longPos(g1.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0, principal: l.principal || 0 })),
   tradeCount: acc1.tradeHistory.length,
   pricePoints: g1.market.priceHistory.length,
   tapeCount: g1.market.trades.length,
@@ -150,12 +161,16 @@ assert(acc2.shortMargin === before.shortMargin, `空头保证金一致 ${acc2.sh
 assert(acc2.realizedPnL === before.realizedPnL, `已实现盈亏一致 ${acc2.realizedPnL}`);
 assert(acc2.deposited === before.deposited, `终身累计加钱一致 ${acc2.deposited}`);
 assert(acc2.initialLong === acc1.initialLong, '初始持股标记一致');
+assert(acc2.financeInterestAccrued === before.financeInterestAccrued, `融资已计息一致 ${acc2.financeInterestAccrued}`);
+assert(acc2.lendInterestPaid === before.lendInterestPaid, `做空已付息一致 ${acc2.lendInterestPaid}`);
+assert(acc2.lendInterestDebt === before.lendInterestDebt, `做空欠息一致 ${acc2.lendInterestDebt}`);
 
 console.log('\n[4] 持仓批次（含锁仓时间与预留）完整恢复');
 assert(acc2.longQty(g2.stock.id) === before.longQty, `多头数量一致 ${acc2.longQty(g2.stock.id)}`);
 assert(acc2.shortQty(g2.stock.id) === before.shortQty, `空头数量一致 ${acc2.shortQty(g2.stock.id)}`);
-const lots2 = acc2.longPos(g2.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0 }));
-assert(JSON.stringify(lots2) === JSON.stringify(before.lots), `多头批次逐笔一致（${lots2.length} 批，含 ts/reserved/debt）`);
+const lots2 = acc2.longPos(g2.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0, principal: l.principal || 0 }));
+assert(JSON.stringify(lots2) === JSON.stringify(before.lots), `多头批次逐笔一致（${lots2.length} 批，含 ts/reserved/debt/principal）`);
+assert(lots2.some((l) => l.debt === 1234.56 && l.principal === 1000), '融资负债与本金（1234.56 / 1000）原样恢复');
 assert(lots2.some((l) => l.debt === 1234.56), '融资负债 1234.56 原样恢复');
 assert(acc2.shortPos(g2.stock.id).lots.every((l) => l.margin > 0), '空头批次带保证金');
 

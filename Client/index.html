@@ -15,7 +15,7 @@
       <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
       <input id="loginName" type="text" maxlength="16" placeholder="输入账号名即可进入（无需密码）" autocomplete="off">
       <button id="loginBtn">进入市场</button>
-      <div class="login-hint">初始资金 10 万 · 手续费万1 · T+2分钟锁仓 · 保证金 50%（多空各最高 2 倍）</div>
+      <div class="login-hint">初始资金 10 万 · 手续费万1 · T+10秒锁仓 · 保证金 50%（多空各最高 2 倍）</div>
       <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息</div>
       <div class="login-hint">再次输入同一个账号名，就会回到原来的账户</div>
     </div>
@@ -215,8 +215,20 @@
         <div class="estimates" id="estimates">
           <div><label>预计金额</label><span id="estAmount">--</span></div>
           <div><label>预计手续费</label><span id="estFee">--</span></div>
+          <div id="estInterestRow" hidden><label title="按当前数量与当前分钟息估算：这笔杠杆持仓每分钟要付的利息（融资按借入口径含手续费，融券按借券市值）">预计利息</label><span id="estInterest">--</span></div>
           <div><label>可交易</label><span id="estMax">--</span></div>
           <div id="estFinanceRow" hidden><label>自备 / 借入</label><span id="estFinance">--</span></div>
+        </div>
+
+        <div class="lever-box" id="leverBox">
+          <div class="lever-row" id="leverRowLong">
+            <span class="lever-label">做多利息 · 融资</span>
+            <span class="lever-val" id="leverValLong">--</span>
+          </div>
+          <div class="lever-row" id="leverRowShort">
+            <span class="lever-label">做空利息 · 融券</span>
+            <span class="lever-val" id="leverValShort">--</span>
+          </div>
         </div>
 
         <button class="submit-btn" id="submitBtn">提交委托</button>
@@ -261,10 +273,11 @@
           </div>
           <div class="tab-panel" data-panel="holders">
             <div class="assets-row" id="holdersMeta"></div>
-            <table class="grid-table">
-              <thead><tr><th>#</th><th>股东名称</th><th>类型</th><th>持股数</th><th>占流通盘</th><th>较开服变动</th></tr></thead>
-              <tbody id="holdersBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
+            <table class="grid-table holders-table">
+              <thead><tr><th>#</th><th>股东名称</th><th>类型</th><th>持股数</th><th>占流通盘</th><th title="相对开服建仓时的持股与占比">较开服变动</th><th title="相对我最近一次操作时的快照">较上次操作</th></tr></thead>
+              <tbody id="holdersBody"><tr><td colspan="7" class="empty">暂无数据</td></tr></tbody>
             </table>
+            <div class="holders-hint">点任意一行，看这位股东最近几次操作时的占比走势（pp = 占流通盘的百分点，1pp = 流通盘的 1%）</div>
           </div>
           <div class="tab-panel" data-panel="lending">
             <div class="assets-row" id="lendingMeta"></div>
@@ -342,6 +355,17 @@
       <div class="auto-fields" id="autoFields"></div>
       <button id="autoConfirmBtn">创建策略</button>
       <button class="deposit-cancel" id="autoCancelBtn">取消</button>
+    </div>
+  </div>
+
+  <!-- 股东占比走势弹窗 -->
+  <div id="holderOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card holder-card">
+      <div class="deposit-title" id="holderTitle">股东占比走势</div>
+      <div class="login-sub" id="holderSub">--</div>
+      <canvas id="holderChart" width="580" height="220"></canvas>
+      <div class="holder-actions" id="holderActions"></div>
+      <button class="deposit-cancel" id="holderCloseBtn">关闭</button>
     </div>
   </div>
 
