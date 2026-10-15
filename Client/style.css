@@ -598,6 +598,68 @@ input { font: inherit; color: inherit; }
 }
 .market-sub b { color: var(--ink); font-weight: 600; }
 
+/* ---------- 股票切换栏 ---------- */
+.stock-tabs {
+  display: flex; gap: 6px; flex: none;
+  overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+.stock-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  flex: none;
+  min-width: 96px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+}
+.stock-chip:hover { border-color: var(--blue); }
+.stock-chip.on { border-color: var(--blue); background: var(--panel-2); }
+.stock-chip .sc-name { color: var(--ink); font-weight: 600; font-size: 12px; }
+.stock-chip .sc-last { font-variant-numeric: tabular-nums; font-size: 12.5px; font-weight: 600; }
+.stock-chip .sc-pct { font-variant-numeric: tabular-nums; font-size: 10.5px; }
+.stock-chip.idx-chip { border-style: dashed; }
+.stock-chip.idx-chip .sc-name::after {
+  content: '指数'; margin-left: 5px;
+  font-size: 9.5px; font-weight: 400; color: var(--muted);
+}
+
+/* ---------- 大盘指数卡 ---------- */
+.index-card {
+  /* .panel 默认是列向 flex，指数卡要横向排布，必须显式改回 row */
+  display: flex; flex-direction: row; align-items: center; gap: 22px;
+  padding: 16px 20px;
+  cursor: pointer;
+  min-height: 0;
+}
+.index-card:hover { border-color: var(--blue); }
+.idx-left { flex: none; min-width: 190px; }
+.idx-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.idx-code { margin-left: 8px; font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.idx-points { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.idx-change { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.idx-spark { flex: 1; min-width: 120px; height: 46px; }
+.idx-spark svg { display: block; width: 100%; height: 46px; }
+.idx-stat { display: flex; gap: 20px; flex: none; }
+.idx-hint { flex: none; font-size: 11px; color: var(--muted); }
+
+/* 消息里的股票标签 */
+.news-list .nstock {
+  flex: none; font-size: 10.5px; color: var(--blue);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px;
+}
+.news-list .nstock.idx { color: var(--gold, #f0b429); }
+.news-filter { display: flex; gap: 6px; padding: 8px 12px 0; }
+.idx-badge {
+  margin-left: 6px; font-size: 10px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+.quote-table .idx-row td { background: rgba(91, 156, 255, .04); }
+
 /* 卡片栅格 */
 .home-grid {
   display: grid;
@@ -806,4 +868,10 @@ input { font: inherit; color: inherit; }
   .home-news { max-height: 300px; }
   .home-news.wide li { flex-wrap: wrap; }
   .home-news.wide .ntext { flex: 1 0 100%; white-space: normal; }
+
+  /* 指数卡在窄屏竖排 */
+  .index-card { flex-direction: column; align-items: stretch; gap: 10px; }
+  .idx-stat { justify-content: space-between; gap: 8px; }
+  .idx-spark { height: 38px; }
+  .idx-spark svg { height: 38px; }
 }

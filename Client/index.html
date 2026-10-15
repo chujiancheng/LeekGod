@@ -60,6 +60,9 @@
       <span class="halt-left" id="haltLeft"></span>
     </div>
 
+    <!-- 股票切换栏：交易终端顶部（顶栏下方），10 只股票 + 大盘指数 -->
+    <div class="stock-tabs" id="stockTabs"></div>
+
     <!-- 视图一：交易大厅（登录后的落地页） -->
     <div class="view home-view" id="homeView">
       <section class="panel hero-panel">
@@ -80,6 +83,9 @@
       </section>
 
       <div class="home-grid">
+        <!-- 大盘指数卡：点位 / 涨跌 / 迷你走势，点击看分时与成分股 -->
+        <section class="panel home-card span-3 index-card" id="homeIndex"></section>
+
         <section class="panel home-card span-2">
           <div class="panel-title">
             <span>行情列表</span>
@@ -258,17 +264,22 @@
           </div>
           <div class="tab-panel" data-panel="orders">
             <table class="grid-table">
-              <thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>已成交</th><th>状态</th><th></th></tr></thead>
-              <tbody id="ordersBody"><tr><td colspan="7" class="empty">暂无委托</td></tr></tbody>
+              <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>价格</th><th>数量</th><th>已成交</th><th>状态</th><th></th></tr></thead>
+              <tbody id="ordersBody"><tr><td colspan="8" class="empty">暂无委托</td></tr></tbody>
             </table>
           </div>
           <div class="tab-panel" data-panel="trades">
             <table class="grid-table">
-              <thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th></tr></thead>
-              <tbody id="tradesBody"><tr><td colspan="5" class="empty">暂无成交</td></tr></tbody>
+              <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th></tr></thead>
+              <tbody id="tradesBody"><tr><td colspan="6" class="empty">暂无成交</td></tr></tbody>
             </table>
           </div>
           <div class="tab-panel" data-panel="news">
+            <div class="news-filter" id="newsFilter">
+              <button class="mini-btn active" data-nf="all">全部</button>
+              <button class="mini-btn" data-nf="index">只看大盘</button>
+              <button class="mini-btn" data-nf="active">当前股票</button>
+            </div>
             <ul class="news-list" id="newsList"><li class="empty">暂无消息</li></ul>
           </div>
           <div class="tab-panel" data-panel="holders">
@@ -320,8 +331,8 @@
               <span class="panel-sub" id="autoSub"></span>
             </div>
             <table class="grid-table">
-              <thead><tr><th>类型</th><th>参数</th><th>状态</th><th>最近动作</th><th></th></tr></thead>
-              <tbody id="autoBody"><tr><td colspan="5" class="empty">暂无自动化策略，点右上「新建策略」创建</td></tr></tbody>
+              <thead><tr><th>股票</th><th>类型</th><th>参数</th><th>状态</th><th>最近动作</th><th></th></tr></thead>
+              <tbody id="autoBody"><tr><td colspan="6" class="empty">暂无自动化策略，点右上「新建策略」创建</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -346,6 +357,10 @@
   <div id="autoOverlay" class="overlay deposit-overlay hidden">
     <div class="login-card deposit-card auto-card">
       <div class="deposit-title">新建自动化策略</div>
+      <div class="field">
+        <label>生效股票（策略只对这一只股票下单）</label>
+        <select id="afStock"></select>
+      </div>
       <div class="auto-type-row" id="autoTypeRow">
         <button class="auto-type-btn active" data-type="tps">止盈止损</button>
         <button class="auto-type-btn" data-type="grid">网格</button>

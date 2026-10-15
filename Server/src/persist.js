@@ -38,17 +38,19 @@ class Persister {
     this.st = {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
-          (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
-           lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid, finance_interest_accrued)
+          (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited)
         VALUES
-          (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
-           @lend_offered, @lend_interest_earned, @lend_interest_debt, @lend_interest_paid, @finance_interest_accrued)
+          (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited)
         ON CONFLICT(name) DO UPDATE SET
           is_npc = @is_npc, role = @role, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
-          initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
-          lend_offered = @lend_offered, lend_interest_earned = @lend_interest_earned, lend_interest_debt = @lend_interest_debt,
-          lend_interest_paid = @lend_interest_paid, finance_interest_accrued = @finance_interest_accrued
+          initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited
+      `),
+      delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
+      insLedger: db.prepare(`
+        INSERT INTO stock_ledger
+          (account, stock_id, lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid, finance_interest_accrued)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `),
       delLots: db.prepare('DELETE FROM lots WHERE account = ?'),
       insLot: db.prepare(`
@@ -76,15 +78,18 @@ class Persister {
           volume = @volume, turnover = @turnover, short_interest = @short_interest,
           order_seq = @order_seq, trade_seq = @trade_seq, updated_at = @updated_at
       `),
-      upsertPrice: db.prepare('INSERT OR REPLACE INTO prices (t, price, vol) VALUES (?, ?, ?)'),
+      upsertPrice: db.prepare('INSERT OR REPLACE INTO prices (stock_id, t, price, vol) VALUES (?, ?, ?, ?)'),
       prunePrices: db.prepare('DELETE FROM prices WHERE t < ?'),
+      // 成交流水只保留最近 config.persistence.tradeKeepMs：读取侧（逐笔恢复、玩家成交记录）
+      // 都只看最近的若干条，NPC 之间每 tick 都在成交，不裁这张表会无限膨胀
+      pruneTrades: db.prepare('DELETE FROM trades WHERE t < ?'),
       pruneOrders: db.prepare(`
         DELETE FROM orders
          WHERE status <> 'live'
            AND id IN (
              SELECT x.id FROM orders AS x
               WHERE x.status <> 'live' AND x.account = orders.account
-              ORDER BY x.seq DESC LIMIT -1 OFFSET ?
+              ORDER BY x.ts DESC, x.id DESC LIMIT -1 OFFSET ?
            )
       `),
       insSession: db.prepare('INSERT OR REPLACE INTO sessions (token, account) VALUES (?, ?)'),
@@ -92,28 +97,31 @@ class Persister {
       setMeta: db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)'),
       getMeta: db.prepare('SELECT value FROM meta WHERE key = ?'),
       insAuto: db.prepare(`
-        INSERT INTO auto_strategies (id, account, type, enabled, done, params, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO auto_strategies (id, account, stock_id, type, enabled, done, params, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          stock_id = excluded.stock_id,
           enabled = excluded.enabled, done = excluded.done, params = excluded.params,
           state = excluded.state, updated_at = excluded.updated_at
       `),
       delAuto: db.prepare('DELETE FROM auto_strategies WHERE id = ?'),
       allAuto: db.prepare('SELECT * FROM auto_strategies'),
       allAccounts: db.prepare('SELECT * FROM accounts'),
+      allLedger: db.prepare('SELECT * FROM stock_ledger'),
       allLots: db.prepare('SELECT * FROM lots ORDER BY account, stock_id, side, seq'),
-      liveOrders: db.prepare("SELECT * FROM orders WHERE status = 'live' ORDER BY seq"),
-      orderHistory: db.prepare('SELECT * FROM orders WHERE account = ? ORDER BY seq DESC LIMIT ?'),
+      liveOrders: db.prepare("SELECT * FROM orders WHERE status = 'live' ORDER BY ts, id"),
+      // 多股票后每只股票各有自己的 seq，跨股票按时间排「最近委托」才正确
+      orderHistory: db.prepare('SELECT * FROM orders WHERE account = ? ORDER BY ts DESC, id DESC LIMIT ?'),
       tradeHistory: db.prepare(`
-        SELECT id, order_id, action, side, price, qty, trade_seq, t
+        SELECT id, order_id, action, side, price, qty, trade_seq, t, stock_id
           FROM trades WHERE account = ? ORDER BY id DESC LIMIT ?
       `),
       allSessions: db.prepare('SELECT token, account FROM sessions'),
       marketState: db.prepare('SELECT * FROM market_state WHERE stock_id = ?'),
-      recentPrices: db.prepare('SELECT t, price, vol FROM prices ORDER BY t DESC LIMIT ?'),
+      recentPrices: db.prepare('SELECT t, price, vol FROM prices WHERE stock_id = ? ORDER BY t DESC LIMIT ?'),
       recentTape: db.prepare(`
         SELECT trade_seq, t, price, qty, side FROM trades
-         WHERE role = 'taker' ORDER BY trade_seq DESC LIMIT ?
+         WHERE role = 'taker' AND stock_id = ? ORDER BY trade_seq DESC LIMIT ?
       `),
     };
 
@@ -165,54 +173,71 @@ class Persister {
     this.st.delSession.run(token);
   }
 
-  /** 新开一局：记下开局时间，行情断点由首个 tick 的 commit 写入 */
-  startRound(startedAt, stockId) {
-    this.stockId = stockId;
+  /**
+   * 新开一局：记下开局时间并清掉上一局的行情断点，行情由首个 tick 的 commit 写入。
+   * 多股票下 prices/market_state 每只股票各一行，按 stock_id 区分，不需要按股票清表。
+   */
+  startRound(startedAt) {
     this.st.setMeta.run('round_started_at', String(startedAt));
   }
 
-  /** 每 tick 一次：账户 + 委托对账 + 成交 + 行情，全部在一个事务里 */
-  commit({ now, market, pricePoint, allAccounts }) {
-    this.commitTx({ now, market, pricePoint, allAccounts });
+  /**
+   * 每 tick 一次：账户 + 委托对账 + 成交 + 行情，全部在一个事务里。
+   * @param {{now:number, markets:Array, allAccounts:Array}} ctx
+   *   markets 是「本 tick 要落盘的行情对象」列表：10 只股票的 Market + 1 个大盘指数。
+   *   指数的落盘接口与 Market 对齐（stockId/lastPrice/priceHistory…），所以这里不区分两者。
+   */
+  commit({ now, markets, allAccounts }) {
+    this.commitTx({ now, markets, allAccounts });
   }
 
-  commitInner({ now, market, pricePoint, allAccounts }) {
+  commitInner({ now, markets, allAccounts }) {
     this.tickCount += 1;
 
     for (const acc of this.dirty.values()) this.writeAccount(acc);
     this.dirty.clear();
 
-    this.writeOrders(market);
+    this.writeOrders();
     this.writeAutos();
     this.verifyLiveOrders(allAccounts);
 
     for (const r of this.pendingTrades) {
       this.st.insTrade.run(
-        r.account, r.role, r.orderId, market.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t
+        r.account, r.role, r.orderId, r.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t
       );
     }
     this.pendingTrades.length = 0;
+    // 成交流水每 tick 裁一次（带 idx_trades_t 的区间删除，稳态下删的行数≈本 tick 新写的行数）：
+    // 体量因此被压在「保留窗口 × 成交速度」，不会像 prices/orders 那样攒到几百轮再删
+    const tradeKeepMs = config.persistence.tradeKeepMs;
+    if (tradeKeepMs > 0) this.st.pruneTrades.run(now - tradeKeepMs);
 
-    this.st.upsertMarket.run({
-      stock_id: market.stockId,
-      last_price: market.lastPrice,
-      prev_close: market.prevClose,
-      open: market.open,
-      high: market.high,
-      low: market.low,
-      volume: market.volume,
-      turnover: market.turnover,
-      short_interest: market.shortInterest,
-      order_seq: market.orderSeq,
-      trade_seq: market.trades.length ? market.trades[0].seq : 0,
-      updated_at: now,
-    });
-
-    if (pricePoint) this.st.upsertPrice.run(pricePoint.t, pricePoint.price, pricePoint.vol);
-
-    // 停牌状态只在变化时写：meta 是单行覆盖，没必要每秒重写一次同样的值
-    const halt = JSON.stringify({ until: market.haltUntil || 0, reason: market.haltReason || '' });
-    if (halt !== this.lastHalt) {
+    let halt = '';
+    for (const m of markets) {
+      this.st.upsertMarket.run({
+        stock_id: m.stockId,
+        last_price: m.lastPrice,
+        prev_close: m.prevClose,
+        open: m.open,
+        high: m.high,
+        low: m.low,
+        volume: m.volume,
+        turnover: m.turnover,
+        short_interest: m.shortInterest,
+        order_seq: m.orderSeq,
+        trade_seq: m.trades.length ? m.trades[0].seq : 0,
+        updated_at: now,
+      });
+      const h = m.priceHistory;
+      if (h.length) {
+        const p = h[h.length - 1];
+        this.st.upsertPrice.run(m.stockId, p.t, p.price, p.vol);
+      }
+      // 停牌状态只在变化时写：meta 是单行覆盖，没必要每秒重写一次同样的值。
+      // 多股票是**全市场一起停**，所有市场共用一份状态，取第一只的即可（见 Game.halt）
+      if (!halt) halt = JSON.stringify({ until: m.haltUntil || 0, reason: m.haltReason || '' });
+    }
+    if (halt && halt !== this.lastHalt) {
       this.st.setMeta.run('halt', halt);
       this.lastHalt = halt;
     }
@@ -228,11 +253,12 @@ class Persister {
   /**
    * 本 tick 有状态变化的委托按终态写库。
    * pendingOrders 存的是订单对象引用，所以撮合过程中同一单被反复标记也只写一次最终状态。
+   * 股票取订单自身的 stockId（多股票下不再由「当前市场」推断）。
    */
-  writeOrders(market) {
+  writeOrders() {
     for (const o of this.pendingOrders.values()) {
       this.st.insOrder.run(
-        o.id, o.account.name, market.stockId, o.seq, o.action, o.side,
+        o.id, o.account.name, o.stockId, o.seq, o.action, o.side,
         o.price, o.qty, o.filled, o.frozen, o.ts, o.status
       );
     }
@@ -245,7 +271,7 @@ class Persister {
     this.autoRemovals.clear();
     for (const s of this.pendingAuto.values()) {
       this.st.insAuto.run(
-        s.id, s.account, s.type, s.enabled ? 1 : 0, s.done ? 1 : 0,
+        s.id, s.account, s.stockId, s.type, s.enabled ? 1 : 0, s.done ? 1 : 0,
         JSON.stringify(s.params), JSON.stringify(s.state || {}), s.createdAt, s.updatedAt
       );
     }
@@ -300,12 +326,28 @@ class Persister {
       last_order_at: acc.lastOrderAt,
       created_at: acc.createdAt,
       deposited: acc.deposited || 0,
-      lend_offered: acc.lendOffered || 0,
-      lend_interest_earned: acc.lendInterestEarned || 0,
-      lend_interest_debt: acc.lendInterestDebt || 0,
-      lend_interest_paid: acc.lendInterestPaid || 0,
-      finance_interest_accrued: acc.financeInterestAccrued || 0,
     });
+
+    // 按股票的融券/融资计息明细：整段重写（行数很少，省去逐行 diff 的复杂度）。
+    // 没有挂借也没有欠息的股票不写行，避免 NPC 的 3160 个账户各写 10 行空数据
+    this.st.delLedger.run(acc.name);
+    for (const [stockId, led] of acc.ledger) {
+      if (
+        !led.lendOffered &&
+        !led.lendInterestEarned &&
+        !led.lendInterestDebt &&
+        !led.lendInterestPaid &&
+        !led.financeInterestAccrued
+      ) {
+        continue;
+      }
+      this.st.insLedger.run(
+        acc.name, stockId,
+        led.lendOffered || 0,
+        led.lendInterestEarned || 0, led.lendInterestDebt || 0,
+        led.lendInterestPaid || 0, led.financeInterestAccrued || 0
+      );
+    }
 
     this.st.delLots.run(acc.name);
     for (const [stockId, pos] of acc.longs) {
@@ -333,36 +375,45 @@ class Persister {
   /**
    * 读回上一局存档。resumed=false 表示没有可续跑的存档（全新开局）。
    * 返回的都是库里的原始行，由 game.js 负责重建对象。
+   * @param {string[]} stockIds 本局全部标的（10 只股票 + 指数代码），逐只读行情断点与分时
    */
-  loadAll(stockId) {
-    this.stockId = stockId;
+  loadAll(stockIds) {
     const startedRow = this.st.getMeta.get('round_started_at');
     const halt = this.readHalt();
     const accounts = this.st.allAccounts.all();
+    const ledger = this.st.allLedger.all();
     const lots = this.st.allLots.all();
     const orders = this.st.liveOrders.all();
     const sessions = this.st.allSessions.all();
-    const market = this.st.marketState.get(stockId) || null;
-    // prices 按时间升序（对齐 market.priceHistory），tape 按新到旧（对齐 market.trades）
-    const prices = this.st.recentPrices.all(config.market.priceHistorySize).reverse();
-    const tape = this.st.recentTape.all(TAPE_KEEP);
     const auto = this.st.allAuto.all();
+
+    // 逐只读行情：market_state 一行 + prices 一路分时（升序，对齐 market.priceHistory）
+    // + 逐笔（新到旧，对齐 market.trades）
+    const markets = new Map();
+    for (const id of stockIds) {
+      markets.set(id, {
+        state: this.st.marketState.get(id) || null,
+        prices: this.st.recentPrices.all(id, config.market.priceHistorySize).reverse(),
+        tape: this.st.recentTape.all(id, TAPE_KEEP),
+      });
+    }
+    // 只要有任意一只存在行情断点就算续跑（本轮新增的股票可能是空的）
+    const resumed = !!startedRow && accounts.length > 0 && [...markets.values()].some((m) => !!m.state);
 
     // 回填在册活动委托集合，供 commit 时的自愈扫尾判断
     this.liveOrders.clear();
     for (const o of orders) this.liveOrders.set(o.id, o.account);
 
     return {
-      resumed: !!startedRow && accounts.length > 0 && !!market,
+      resumed,
       startedAt: startedRow ? Number(startedRow.value) : null,
       halt,
       accounts,
+      ledger,
       lots,
       orders,
       sessions,
-      market,
-      prices,
-      tape,
+      markets,
       auto,
     };
   }
@@ -392,6 +443,7 @@ class Persister {
       (r) =>
         account.orders.get(r.id) || {
           id: r.id,
+          stockId: r.stock_id,
           action: r.action,
           price: r.price,
           qty: r.qty,
@@ -407,6 +459,7 @@ class Persister {
     return this.st.tradeHistory.all(account.name, limit).map((r) => ({
       id: `T${r.trade_seq}-${r.order_id}-${r.qty}`,
       orderId: r.order_id,
+      stockId: r.stock_id,
       action: r.action,
       side: r.side,
       price: r.price,

@@ -4,6 +4,13 @@
 const { Game, ACTIONS } = require('../src/game');
 const config = require('../src/config');
 
+// ---- 多股票测试辅助：测试聚焦「大米集团」(config.stocks[0]) ----
+// P(g)/N(g)：取某局里大米集团的市场与做市引擎（多股票后 Game 持的是 Map）
+const STOCK = config.stocks[0];
+const ALL_IDS = config.stocks.map((s) => s.id);
+const P = (g) => g.markets.get(STOCK.id);
+const N = (g) => g.npcs.get(STOCK.id);
+
 let passed = 0;
 let failed = 0;
 function assert(cond, msg) {
@@ -17,12 +24,16 @@ function assert(cond, msg) {
 }
 
 const g = new Game();
-const stock = g.stock;
+const stock = STOCK;
 
-// 手动初始化（不启动 setInterval）
-g.npc.init(g.startedAt);
-g.market.priceHistory.push({ t: g.startedAt, price: g.market.lastPrice });
-g.npc.step(g.startedAt);
+// 手动初始化（不启动 setInterval）：与 Game.start 的新局路径一致，**每只股票各建一套 NPC 池**，
+// 否则其余 9 只没有账户、股东榜为空，跨股票断言就失去意义
+for (const s of config.stocks) {
+  g.npcs.get(s.id).init(g.startedAt);
+  g.markets.get(s.id).priceHistory.push({ t: g.startedAt, price: g.markets.get(s.id).lastPrice });
+}
+g.index.update(g.markets, g.startedAt);
+for (const s of config.stocks) g.npcs.get(s.id).step(g.startedAt);
 
 console.log('\n[1] 仿真 200 tick：市场活跃度');
 {
@@ -35,19 +46,19 @@ console.log('\n[1] 仿真 200 tick：市场活跃度');
     // 模拟时间流逝（让冷却/锁仓逻辑可用）
     // tick 内部使用 Date.now，这里真实执行即可
   }
-  const snap = g.market.snapshot();
+  const snap = P(g).snapshot();
   console.log(`  (last=${snap.last}, high=${snap.high}, low=${snap.low}, trades=${snap.trades.length}, news=${newsCount})`);
   assert(snap.depth.bids.length > 0, '盘口存在买盘');
   assert(snap.depth.asks.length > 0, '盘口存在卖盘');
   assert(snap.trades.length > 5, `有成交流水 (${snap.trades.length} 笔)`);
   assert(newsCount >= 1, `仿真期间产生随机消息 (${newsCount} 条)`);
-  assert(g.market.priceHistory.length >= 200, '分时序列按 tick 记录');
+  assert(P(g).priceHistory.length >= 200, '分时序列按 tick 记录');
   assert(snap.last > 0 && Number.isFinite(snap.last), '最新价有效');
 }
 
 console.log('\n[2] 盘口深度合理（五档不为空、买一<卖一）');
 {
-  const snap = g.market.snapshot();
+  const snap = P(g).snapshot();
   const bid1 = snap.depth.bids[0];
   const ask1 = snap.depth.asks[0];
   assert(bid1 && ask1 && bid1.price < ask1.price, `买一(${bid1 && bid1.price}) < 卖一(${ask1 && ask1.price})`);
@@ -67,10 +78,10 @@ let token = '';
   assert(g.accountFor(lr3.token) === g.accountFor(token), '同名两次登录指向同一账户');
   assert(g.sessions.size <= 5, `同账户令牌数受上限约束 (${g.sessions.size})`);
 
-  const snap = g.market.snapshot();
+  const snap = P(g).snapshot();
   const ask1 = snap.depth.asks[0];
   const now = Date.now();
-  const r = g.market.place(g.store.get('测试玩家'), {
+  const r = P(g).place(g.store.get('测试玩家'), {
     action: ACTIONS.BUY_OPEN,
     qty: 100,
     price: ask1.price + 0.05, // 确保吃到卖一
@@ -82,19 +93,19 @@ let token = '';
   assert(acc.cash < config.account.initialCash, '资金已扣减');
 
   // 冷却：立刻再下一单应被拒
-  const r2 = g.market.place(acc, { action: ACTIONS.BUY_OPEN, qty: 100, price: 1, now: now + 10 });
+  const r2 = P(g).place(acc, { action: ACTIONS.BUY_OPEN, qty: 100, price: 1, now: now + 10 });
   assert(!r2.ok && /频繁/.test(r2.error), '冷却限制生效');
 }
 
 console.log('\n[4] 玩家挂单进入订单簿并与 NPC 成交');
 {
   const acc = g.store.get('测试玩家');
-  const snap = g.market.snapshot();
+  const snap = P(g).snapshot();
   const bid1 = snap.depth.bids[0];
   // 挂一个高于买一的买单，等 NPC 卖单来吃（或直接与现有卖盘交叉）
   const ask1 = snap.depth.asks[0];
   const now = Date.now() + 5000;
-  const r = g.market.place(acc, {
+  const r = P(g).place(acc, {
     action: ACTIONS.BUY_OPEN,
     qty: 100,
     price: ask1.price, // 恰好吃到卖一
@@ -103,20 +114,33 @@ console.log('\n[4] 玩家挂单进入订单簿并与 NPC 成交');
   assert(r.ok, '交叉买单成交或挂单成功');
   // 仿真若干 tick 让 NPC 与玩家订单互动
   for (let i = 0; i < 30; i++) g.tick();
-  assert(g.market.snapshot().trades.length > 0, '市场持续有成交');
+  assert(P(g).snapshot().trades.length > 0, '市场持续有成交');
 }
 
 console.log('\n[5] 状态快照结构完整');
 {
   const st = g.stateFor(token);
   assert(st.account && st.account.name === '测试玩家', '包含玩家账户');
-  assert(st.market.depth && st.market.trades, '包含盘口与逐笔');
+  assert(Array.isArray(st.markets) && st.markets.length === config.stocks.length, `包含全部 ${config.stocks.length} 只股票行情`);
+  assert(st.markets.every((m) => m.depth && m.trades && m.name), '每只股票都带盘口与逐笔');
+  assert(st.index && st.index.stockId === config.index.code, '包含大盘指数');
+  assert(st.index.components.length === config.stocks.length, '指数带全部成分股');
+  assert(
+    Math.abs(st.index.components.reduce((a, c) => a + c.weight, 0) - 100) < 0.05,
+    '成分权重合计 100%'
+  );
+  assert(st.market.depth && st.market.trades, '包含盘口与逐笔（兼容字段 market）');
   assert(Array.isArray(st.news) && st.news.length >= 1, '包含消息列表');
   assert(st.rules && st.rules.feeRate === 0.0001, '包含规则配置');
+  assert(Array.isArray(st.rules.stocks) && st.rules.stocks.length === config.stocks.length, '规则里带股票清单');
   assert(Array.isArray(st.players) && st.players.some((p) => p.name === '测试玩家'), '包含玩家排行');
   assert(typeof st.cooldownLeft === 'number', '包含冷却剩余时间');
-  assert(st.account.long, '包含多头持仓结构');
-  assert(st.account.short, '包含空头持仓结构');
+  assert(Array.isArray(st.account.positions), '持仓按股票切片下发');
+  assert(
+    st.account.positions.every((p) => p.stockId && p.long && p.short && p.lending),
+    '每个持仓切片带 stockId/多空/融券视角'
+  );
+  assert(st.account.longValue >= 0 && typeof st.account.shortValue === 'number', '账户级持仓市值汇总下发');
   const st2 = g.stateFor('bogus-token');
   assert(st2.account === null, '无效令牌返回 account=null');
 }
@@ -124,9 +148,9 @@ console.log('\n[5] 状态快照结构完整');
 console.log('\n[6] 撤单 API');
 {
   const acc = g.store.get('测试玩家');
-  const snap = g.market.snapshot();
+  const snap = P(g).snapshot();
   const now = Date.now() + 20000;
-  const r = g.market.place(acc, {
+  const r = P(g).place(acc, {
     action: ACTIONS.BUY_OPEN,
     qty: 100,
     price: Math.max(0.5, snap.depth.bids.length ? snap.depth.bids[0].price - 1 : snap.last * 0.9),
@@ -143,16 +167,16 @@ console.log('\n[6] 撤单 API');
 
 console.log('\n[7] NPC 资金与持仓规模检查');
 {
-  const sum = g.npc.summary();
+  const sum = N(g).summary();
   console.log(`  (NPC 持股=${sum.long}, NPC 现金=${sum.cash})`);
   assert(sum.long > stock.floatShares * 0.3, 'NPC 仍持有大量股票（未被抽干）');
   assert(sum.cash > 0, 'NPC 现金为正');
-  const totalSlots = g.npc.npcs.length;
+  const totalSlots = N(g).npcs.length;
   const expectSlots = Object.values(config.npc.types).reduce((s, t) => s + t.count, 0);
   assert(totalSlots === expectSlots, `NPC 数量正确 (${totalSlots} / 期望 ${expectSlots})`);
 
   // 融券池：NPC 已自动挂借形成基础券源
-  const pool = g.market.lendingSnapshot();
+  const pool = P(g).lendingSnapshot();
   assert(pool.enabled, '融券池已启用');
   assert(pool.total > 0, `NPC 自动出借形成基础券源（${pool.total} 股）`);
   assert(pool.available > 0, `可借券源 > 0（${pool.available}）`);
@@ -160,33 +184,33 @@ console.log('\n[7] NPC 资金与持仓规模检查');
 
   // 清空可借额度，验证无券源时 SELL_OPEN 被拒
   const savedLend = {
-    total: g.market.lendTotal,
-    borrowed: g.market.lendBorrowed,
-    reserved: g.market.lendReserved,
+    total: P(g).lendTotal,
+    borrowed: P(g).lendBorrowed,
+    reserved: P(g).lendReserved,
   };
-  g.market.lendTotal = 0;
-  g.market.lendBorrowed = 0;
-  g.market.lendReserved = 0;
+  P(g).lendTotal = 0;
+  P(g).lendBorrowed = 0;
+  P(g).lendReserved = 0;
   const banLogin = g.login('裸空验收');
   const banAcc = g.store.get(banLogin.name);
   const { ACTIONS: MA } = require('../src/market');
-  const ban = g.market.place(banAcc, {
+  const ban = P(g).place(banAcc, {
     action: MA.SELL_OPEN,
     qty: 100,
-    price: g.market.lastPrice,
+    price: P(g).lastPrice,
     now: Date.now(),
     noCooldown: true,
   });
   assert(!ban.ok && /券源|融券/.test(ban.error), `无券源时开空被拒（${ban.ok ? '意外放行' : ban.error}）`);
 
   // 恢复池子后可借券源开空（保证金预检可能另拒，但不能是券源不足）
-  g.market.lendTotal = savedLend.total;
-  g.market.lendBorrowed = savedLend.borrowed;
-  g.market.lendReserved = savedLend.reserved;
-  const open = g.market.place(banAcc, {
+  P(g).lendTotal = savedLend.total;
+  P(g).lendBorrowed = savedLend.borrowed;
+  P(g).lendReserved = savedLend.reserved;
+  const open = P(g).place(banAcc, {
     action: MA.SELL_OPEN,
     qty: 100,
-    price: g.market.lastPrice,
+    price: P(g).lastPrice,
     now: Date.now(),
     noCooldown: true,
   });
@@ -204,7 +228,7 @@ console.log('\n[8] 强平兜底扫描不抛异常');
 
 console.log('\n[9] 前十大股东');
 {
-  const holders = g.topHolders();
+  const holders = g.topHolders(STOCK.id);
   assert(Array.isArray(holders) && holders.length === 10, `返回 10 名股东 (实际 ${holders.length})`);
   assert(holders[0].qty >= holders[9].qty, '按持股数量降序');
   assert(holders.every((h) => h.name && typeof h.qty === 'number' && typeof h.pct === 'number'), '字段完整');
@@ -218,29 +242,39 @@ console.log('\n[9] 前十大股东');
   const instInTop = holders.filter((h) => h.role === 'inst').length;
   assert(instInTop >= 4, `前十大中机构席位 ≥4（实际 ${instInTop}）`);
   // 流通盘守恒（玩家+NPC 空头不持股，总多头 = 流通盘 + 空头浮动量）
-  const sum = g.holdersSummary();
+  const sum = g.holdersSummary(STOCK.id);
   assert(sum.longTotal >= sum.float * 0.3, `持股合计合理 (${sum.longTotal})`);
-  const st = g.stateFor(token);
-  assert(Array.isArray(st.topHolders) && st.topHolders.length === 10, '状态快照包含前十大股东');
-  assert(st.topHolders[0].pct > 0, '占比字段有效');
+  // 每只股票各有自己的股东榜（账户名前缀区分，互不混入）
+  const holders2 = g.topHolders(config.stocks[1].id);
+  assert(holders2.length === 10, '第二只股票也有独立的前十大');
+  const names1 = new Set(holders.map((h) => h.name));
+  assert(
+    holders2.every((h) => !names1.has(h.name) || h.role === 'player'),
+    '不同股票的 NPC 股东不重叠'
+  );
+  // 股东榜改为按需拉取：/api/holders 对应的 holdersFor 带两层变动
+  const st = g.holdersFor(token, STOCK.id);
+  assert(st.ok && st.rows.length === 10, 'holdersFor 返回前十大');
+  assert(st.rows[0].pct > 0, '占比字段有效');
+  assert(st.holderSnapshot === null || typeof st.holderSnapshot.t === 'number', '带基线时刻');
 }
 
 console.log('\n[10] 停牌期间行情与风控冻结');
 {
   g.halt(5, '系统维护');
-  assert(g.market.isHalted(), '停牌生效');
+  assert(P(g).isHalted(), '停牌生效');
   assert(g.stateFor(token).halt.halted === true, '状态快照带停牌标记');
 
-  const priceBefore = g.market.lastPrice;
-  const volBefore = g.market.volume;
+  const priceBefore = P(g).lastPrice;
+  const volBefore = P(g).volume;
   const ticksBefore = g.tickCount;
   for (let i = 0; i < 30; i++) g.tick();
   assert(g.tickCount === ticksBefore + 30, '主循环仍在推进（只冻结行情）');
-  assert(g.market.lastPrice === priceBefore, `停牌期间价格不动 (${priceBefore})`);
-  assert(g.market.volume === volBefore, '停牌期间无成交（成交量不变）');
+  assert(P(g).lastPrice === priceBefore, `停牌期间价格不动 (${priceBefore})`);
+  assert(P(g).volume === volBefore, '停牌期间无成交（成交量不变）');
 
   const acc = g.store.get('测试玩家');
-  const r = g.market.place(acc, {
+  const r = P(g).place(acc, {
     action: ACTIONS.BUY_OPEN,
     qty: 100,
     price: priceBefore,
@@ -249,7 +283,7 @@ console.log('\n[10] 停牌期间行情与风控冻结');
   assert(!r.ok && /停牌/.test(r.error), `停牌期间下单被拒 (${r.error})`);
 
   g.resume();
-  assert(!g.market.isHalted(), '手动复牌');
+  assert(!P(g).isHalted(), '手动复牌');
   assert(g.stateFor(token).halt.halted === false, '复牌后快照标记清除');
   for (let i = 0; i < 30; i++) g.tick();
   assert(g.tickCount === ticksBefore + 60, '复牌后主循环正常');
@@ -303,9 +337,9 @@ console.log('\n[11] 加钱：终身上限可配置');
 console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空吸筹）');
 {
   const now = Date.now();
-  const inst = g.npc.npcs.find((x) => x.type === 'inst');
+  const inst = N(g).npcs.find((x) => x.type === 'inst');
   assert(!!inst, '找到机构 NPC');
-  const p = g.npc.profileOf(inst);
+  const p = N(g).profileOf(inst);
   assert(p.publicNewsFade != null, '机构启用公开消息对倒');
   assert(p.fundWeight != null, '机构定价锚以基本面为主');
   assert(p.inventorySkew != null && p.heatFade != null, '机构带库存/过热回归');
@@ -321,17 +355,17 @@ console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空
   assert(sb.inst < 0, `机构专属情绪为负 (inst=${sb.inst.toFixed(2)})`);
 
   // 屏蔽阵营/库存/过热噪声，单独看消息对倒方向
-  const savedMood = g.npc.instMood;
-  const savedPolar = g.npc.polar;
+  const savedMood = N(g).instMood;
+  const savedPolar = N(g).polar;
   const savedHeat = p.heatFade;
   const savedInv = p.inventorySkew;
-  g.npc.instMood = 0;
-  g.npc.polar = 0;
+  N(g).instMood = 0;
+  N(g).polar = 0;
   p.heatFade = 0;
   p.inventorySkew = 0;
 
   inst.ownBias = 0;
-  g.npc.updateBias(inst, now);
+  N(g).updateBias(inst, now);
   assert(inst.sentiment < 0, `公开利好 → 机构情绪偏空/出货 (${inst.sentiment.toFixed(3)})`);
 
   g.news.active = [
@@ -339,37 +373,37 @@ console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空
     { id: 'TX5', dir: -1, scope: '全体', power: 0.5, until: now + 60000 },
   ];
   inst.ownBias = 0;
-  g.npc.updateBias(inst, now);
+  N(g).updateBias(inst, now);
   assert(inst.sentiment > 0, `公开利空 → 机构情绪偏多/吸筹 (${inst.sentiment.toFixed(3)})`);
 
   // 散户仍跟消息同向（追涨杀跌）
-  const small = g.npc.npcs.find((x) => x.type === 'small');
-  const ps = g.npc.profileOf(small);
+  const small = N(g).npcs.find((x) => x.type === 'small');
+  const ps = N(g).profileOf(small);
   assert(ps.publicNewsFade == null, '散户不走对倒路径');
   const savedMom = ps.momentum;
   ps.momentum = false;
   g.news.active = [{ id: 'TX6', dir: 1, scope: '散户', power: 0.8, until: now + 60000 }];
   small.ownBias = 0;
-  g.npc.updateBias(small, now);
+  N(g).updateBias(small, now);
   assert(small.sentiment > 0, `公开利好 → 散户情绪偏多/追涨 (${small.sentiment.toFixed(3)})`);
   ps.momentum = savedMom;
 
   // 机构定价锚：不跟消息推高的公允，贴基本面重心
-  const savedFv = g.npc.fairValue;
-  const savedFund = g.npc.fund;
-  g.npc.fairValue = g.market.lastPrice * 1.5;
-  g.npc.fund = g.market.lastPrice;
-  const anchor = g.npc.valueOf(p);
-  assert(anchor < g.npc.fairValue, `机构锚 < 消息推高的公允 (${anchor.toFixed(2)} < ${g.npc.fairValue.toFixed(2)})`);
-  assert(Math.abs(anchor - g.npc.fund) < Math.abs(anchor - g.npc.fairValue), '机构锚更接近基本面重心');
-  const retailV = g.npc.valueOf(ps);
-  assert(retailV === g.npc.fairValue, '散户定价仍直接用短端公允');
-  g.npc.fairValue = savedFv;
-  g.npc.fund = savedFund;
+  const savedFv = N(g).fairValue;
+  const savedFund = N(g).fund;
+  N(g).fairValue = P(g).lastPrice * 1.5;
+  N(g).fund = P(g).lastPrice;
+  const anchor = N(g).valueOf(p);
+  assert(anchor < N(g).fairValue, `机构锚 < 消息推高的公允 (${anchor.toFixed(2)} < ${N(g).fairValue.toFixed(2)})`);
+  assert(Math.abs(anchor - N(g).fund) < Math.abs(anchor - N(g).fairValue), '机构锚更接近基本面重心');
+  const retailV = N(g).valueOf(ps);
+  assert(retailV === N(g).fairValue, '散户定价仍直接用短端公允');
+  N(g).fairValue = savedFv;
+  N(g).fund = savedFund;
 
   g.news.active = [];
-  g.npc.instMood = savedMood;
-  g.npc.polar = savedPolar;
+  N(g).instMood = savedMood;
+  N(g).polar = savedPolar;
   p.heatFade = savedHeat;
   p.inventorySkew = savedInv;
 }
@@ -380,43 +414,63 @@ console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动
   assert(lr.ok, '登录成功');
   const tk = lr.token;
 
-  const base = g.lastHolderSnapshot('股东测试');
+  const base = g.lastHolderSnapshot('股东测试', STOCK.id);
   assert(!!base && base.action === 'login', '登录即留一份基线快照');
   assert(base.rows.length === 30, `单份快照保留 30 名股东 (实际 ${base.rows.length})`);
   assert(JSON.stringify(base).indexOf('byName') === -1, '内部索引不进序列化结果');
+  // 登录时给每只股票各记一份基线，切到任意股票都有可比对的基线
+  assert(
+    config.stocks.every((s) => !!g.lastHolderSnapshot('股东测试', s.id)),
+    '每只股票都有独立基线快照'
+  );
 
-  const st0 = g.stateFor(tk);
-  assert(!!st0.holderSnapshot && st0.holderSnapshot.count === 1, '状态快照带基线时刻与快照数');
-  assert(st0.holderSnapshot.limit === 30, '快照上限随状态下发（客户端显示用）');
-  assert(st0.topHolders.every((h) => h.prevPct != null && h.prevQty != null), '基线内的前十名都能对上前值');
-  assert(st0.topHolders.every((h) => h.dQty === 0 && h.dPct === 0), '刚登录时与基线零变动');
-  assert(g.stateFor('bogus-token').holderSnapshot === null, '未登录时不下发快照基线');
+  const st0 = g.holdersFor(tk, STOCK.id);
+  assert(!!st0.holderSnapshot && st0.holderSnapshot.count === 1, '股东接口带基线时刻与快照数');
+  assert(st0.holderSnapshot.limit === 30, '快照上限随下发（客户端显示用）');
+  assert(st0.rows.every((h) => h.prevPct != null && h.prevQty != null), '基线内的前十名都能对上前值');
+  assert(st0.rows.every((h) => h.dQty === 0 && h.dPct === 0), '刚登录时与基线零变动');
+  assert(g.holdersFor('bogus-token', STOCK.id).holderSnapshot === null, '未登录时不下发快照基线');
 
   // 开服变动要给出占比口径，不能只有股数
-  const float = g.stock.floatShares;
+  const float = STOCK.floatShares;
   assert(
-    st0.topHolders.every((h) => Math.abs(h.changePct - (h.change / float) * 100) < 0.02),
+    st0.rows.every((h) => Math.abs(h.changePct - (h.change / float) * 100) < 0.02),
     'changePct 与 change 自洽（百分点）'
   );
 
   // 下单会记一份新快照；此后 NPC 继续交易，变动就体现在「较上次操作」上
-  const beforeCount = g.holderHistoryFor(tk).snapshots.length;
-  const or = g.placeOrder(tk, { action: ACTIONS.BUY_OPEN, qty: 100, price: g.market.lastPrice });
+  const beforeCount = g.holderHistoryFor(tk, STOCK.id).snapshots.length;
+  const or = g.placeOrder(tk, { action: ACTIONS.BUY_OPEN, qty: 100, price: P(g).lastPrice, stockId: STOCK.id });
   assert(or.ok, `下单成功 (${or.error || 'ok'})`);
-  const hist = g.holderHistoryFor(tk);
+  const hist = g.holderHistoryFor(tk, STOCK.id);
   assert(hist.ok && hist.snapshots.length === beforeCount + 1, `下单追加一次快照 (${hist.snapshots.length})`);
   assert(hist.snapshots[hist.snapshots.length - 1].action === 'order', '新快照标记为下单');
+  // 快照按股票分账：下的是大米集团的单，不该动到别只股票的基线
+  assert(
+    g.holderHistoryFor(tk, config.stocks[1].id).snapshots.length === 1,
+    '其它股票的基线未被这次下单污染'
+  );
 
   for (let i = 0; i < 60; i++) g.tick();
-  const st1 = g.stateFor(tk);
-  const moved = st1.topHolders.filter((h) => h.dQty !== 0).length;
-  assert(moved >= 1, `较上次操作有持股变动 (${moved} 位)`);
+  const st1 = g.holdersFor(tk, STOCK.id);
+  // 「较上次操作」要能反映基线之后的变化。用「随机 NPC 成交有没有让前十大变动」来断言会**偶发假红**
+  // （这 60 tick 里前十大正好净变动为 0 就会命中，实测约 1/10），所以直接给榜首补一笔批次
+  // 模拟他继续交易，再把两次快照对着比——变动的来源与机制无关，只关心基线有没有跟着动
+  const topRow = st1.rows[0];
+  const topAcc = g.store.get(topRow.name);
+  topAcc.longPos(STOCK.id).lots.push({ qty: 100, price: STOCK.initPrice, ts: 0, reserved: 0, debt: 0, principal: 0 });
+  g.refreshStats();
+  const st2 = g.holdersFor(tk, STOCK.id);
+  const moved = st2.rows.find((h) => h.name === topRow.name);
+  assert(moved && moved.qty === topRow.qty + 100, `榜首持股随成交变化（${topRow.qty} → ${moved && moved.qty}）`);
+  assert(moved && moved.prevQty === topRow.prevQty, '基线取的是上次操作时的快照，不随行情重算');
+  assert(moved && moved.dQty === topRow.dQty + 100, `「较上次操作」体现出这笔变动（${moved && moved.dQty} 股）`);
   assert(
-    st1.topHolders.every((h) => h.dQty === null || h.qty - h.prevQty === h.dQty),
+    st1.rows.every((h) => h.dQty === null || h.qty - h.prevQty === h.dQty),
     'dQty 与 qty−prevQty 自洽'
   );
   assert(
-    st1.topHolders.every(
+    st1.rows.every(
       (h) => h.dQty === null || Math.abs(h.dPct - (h.pct - h.prevPct)) < 0.02
     ),
     'dPct 与 pct−prevPct 自洽'
@@ -424,9 +478,9 @@ console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动
 
   // 环形缓冲：超出上限只留最近 N 次
   const acc = g.store.get('股东测试');
-  for (let i = 0; i < 40; i++) g.snapshotHolders(acc, 'order');
-  assert(g.holderHistoryFor(tk).snapshots.length === 30, '快照环形缓冲封顶 30');
-  assert(!g.holderHistoryFor('bogus-token').ok, '无有效令牌不返回股东历史');
+  for (let i = 0; i < 40; i++) g.snapshotHolders(acc, 'order', STOCK.id);
+  assert(g.holderHistoryFor(tk, STOCK.id).snapshots.length === 30, '快照环形缓冲封顶 30');
+  assert(!g.holderHistoryFor('bogus-token', STOCK.id).ok, '无有效令牌不返回股东历史');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

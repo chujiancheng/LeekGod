@@ -9,7 +9,8 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 1;
+// 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
+const SCHEMA_VERSION = 2;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -18,6 +19,8 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- 账户：玩家与 NPC 共用（NPC 的现金/持仓必须落盘，否则流通盘对不上）
+-- 多股票后这里是**账户级**口径：现金、冻结、空头保证金合计、已实现盈亏都是跨股票汇总的
+-- 一个数（玩家只有一份钱）；按股票拆分的融券/融资计息见 stock_ledger
 CREATE TABLE IF NOT EXISTS accounts (
   name          TEXT PRIMARY KEY,
   is_npc        INTEGER NOT NULL DEFAULT 0,
@@ -29,16 +32,22 @@ CREATE TABLE IF NOT EXISTS accounts (
   initial_long  INTEGER NOT NULL DEFAULT 0,
   last_order_at INTEGER,
   created_at    INTEGER NOT NULL,
-  -- 终身累计加钱额（旧档缺列时由 openDatabase 迁移补上）
-  deposited     REAL NOT NULL DEFAULT 0,
-  -- 融券池挂借量 + 出借累计利息（旧档缺列时迁移补上）
-  lend_offered          INTEGER NOT NULL DEFAULT 0,
-  lend_interest_earned  REAL NOT NULL DEFAULT 0,
-  lend_interest_debt    REAL NOT NULL DEFAULT 0,
-  -- 利息累计（展示用，旧档缺列时迁移补上）：
-  -- lend_interest_paid 做空方累计已付的融券利息；finance_interest_accrued 融资累计已计利息
+  -- 终身累计加钱额
+  deposited     REAL NOT NULL DEFAULT 0
+);
+
+-- 按股票的账户明细：融券挂借与各类利息累计（都已经是「按股票」的口径）
+-- 融券池是每只股票一套，所以挂借量/欠息必须按股票记账，否则 A 股的欠息会被拿去补 B 股的出借人。
+-- 融资计息按股票记是为了前端能按当前股票显示「融资已计息」。
+CREATE TABLE IF NOT EXISTS stock_ledger (
+  account                   TEXT NOT NULL,
+  stock_id                  TEXT NOT NULL,
+  lend_offered              INTEGER NOT NULL DEFAULT 0,
+  lend_interest_earned      REAL NOT NULL DEFAULT 0,
+  lend_interest_debt        REAL NOT NULL DEFAULT 0,
   lend_interest_paid        REAL NOT NULL DEFAULT 0,
-  finance_interest_accrued  REAL NOT NULL DEFAULT 0
+  finance_interest_accrued  REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (account, stock_id)
 );
 
 -- 持仓批次：FIFO 顺序靠 seq，T+锁仓靠 ts（空头批次没有 ts，也无锁仓概念）
@@ -94,6 +103,8 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_account ON trades(account, id);
 CREATE INDEX IF NOT EXISTS idx_trades_tape ON trades(role, trade_seq);
+-- 成交流水的保留裁剪按时间走（WHERE t < ?），需要 t 上的索引，否则每轮裁剪都全表扫
+CREATE INDEX IF NOT EXISTS idx_trades_t ON trades(t);
 
 -- 会话令牌（重启后玩家不用重新登录）
 CREATE TABLE IF NOT EXISTS sessions (
@@ -117,17 +128,22 @@ CREATE TABLE IF NOT EXISTS market_state (
   updated_at     INTEGER NOT NULL
 );
 
--- 分时序列（客户端分时图的历史）
+-- 分时序列（客户端分时图的历史）。多股票后每只股票一条独立序列，
+-- 主键 (stock_id, t)；大盘指数也按同一结构落盘（stock_id = 指数代码）。
 CREATE TABLE IF NOT EXISTS prices (
-  t     INTEGER PRIMARY KEY,
-  price REAL NOT NULL,
-  vol   INTEGER NOT NULL
+  stock_id TEXT NOT NULL,
+  t        INTEGER NOT NULL,
+  price    REAL NOT NULL,
+  vol      INTEGER NOT NULL,
+  PRIMARY KEY (stock_id, t)
 );
 
 -- 玩家自动化交易策略（动作日志只存内存，不落盘）
+-- stock_id：策略绑定在哪只股票上（网格/均线/止盈止损都只对它生效）
 CREATE TABLE IF NOT EXISTS auto_strategies (
   id         TEXT PRIMARY KEY,
   account    TEXT NOT NULL,
+  stock_id   TEXT NOT NULL,
   type       TEXT NOT NULL,
   enabled    INTEGER NOT NULL DEFAULT 1,
   done       INTEGER NOT NULL DEFAULT 0,
@@ -140,32 +156,11 @@ CREATE INDEX IF NOT EXISTS idx_auto_account ON auto_strategies(account);
 `;
 
 /**
- * 旧档回填融资批次本金（只在补 principal 列时跑一次）。
- * 旧档没记批次本金，只能用近似：利息是按各批次负债占比摊进来的，
- * 所以按同一比例从批次负债里剔掉该账户的累计已计利息，剩下的算本金。
- * 一律记 0 会让旧持仓显示成"本金 0、全是利息"，差得比这远得多。
+ * 打开（必要时创建）数据库并保证表结构就绪。
+ *
+ * 版本 2 起不再做增量列迁移：多股票把 prices 的主键、融券记账的表都换了，
+ * 这类改动无法用 ALTER 补出来，旧档只能开新局（版本不匹配时直接拒绝启动）。
  */
-function backfillLotPrincipal(db) {
-  const lots = db.prepare("SELECT account, stock_id, seq, debt FROM lots WHERE side = 'long' AND debt > 0").all();
-  if (!lots.length) return;
-
-  const debtOf = new Map();
-  for (const l of lots) debtOf.set(l.account, (debtOf.get(l.account) || 0) + l.debt);
-  const accruedSt = db.prepare('SELECT finance_interest_accrued FROM accounts WHERE name = ?');
-  const setSt = db.prepare(
-    "UPDATE lots SET principal = ? WHERE account = ? AND stock_id = ? AND side = 'long' AND seq = ?"
-  );
-
-  for (const l of lots) {
-    const row = accruedSt.get(l.account);
-    const accrued = row ? row.finance_interest_accrued || 0 : 0;
-    const total = debtOf.get(l.account) || 0;
-    const ratio = total > 0 ? Math.max(0, 1 - accrued / total) : 1;
-    setSt.run(Math.round(l.debt * ratio * 100) / 100, l.account, l.stock_id, l.seq);
-  }
-}
-
-/** 打开（必要时创建）数据库并保证表结构就绪 */
 function openDatabase(file) {
   const dir = path.dirname(path.resolve(file));
   fs.mkdirSync(dir, { recursive: true });
@@ -174,30 +169,6 @@ function openDatabase(file) {
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.exec(DDL);
-
-  // 老存档缺列：SQLite 的 ALTER 不支持 IF NOT EXISTS，先查表结构再补。
-  // 补列是纯增量迁移，schema_version 不动，旧局可以直接续跑
-  const accCols = db.pragma('table_info(accounts)').map((c) => c.name);
-  if (!accCols.includes('deposited')) {
-    db.exec('ALTER TABLE accounts ADD COLUMN deposited REAL NOT NULL DEFAULT 0');
-  }
-  if (!accCols.includes('lend_offered')) {
-    db.exec('ALTER TABLE accounts ADD COLUMN lend_offered INTEGER NOT NULL DEFAULT 0');
-    db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_earned REAL NOT NULL DEFAULT 0');
-    db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_debt REAL NOT NULL DEFAULT 0');
-  }
-  if (!accCols.includes('lend_interest_paid')) {
-    db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_paid REAL NOT NULL DEFAULT 0');
-    db.exec('ALTER TABLE accounts ADD COLUMN finance_interest_accrued REAL NOT NULL DEFAULT 0');
-  }
-  const lotCols = db.pragma('table_info(lots)').map((c) => c.name);
-  if (!lotCols.includes('debt')) {
-    db.exec('ALTER TABLE lots ADD COLUMN debt REAL NOT NULL DEFAULT 0');
-  }
-  if (!lotCols.includes('principal')) {
-    db.exec('ALTER TABLE lots ADD COLUMN principal REAL NOT NULL DEFAULT 0');
-    backfillLotPrincipal(db);
-  }
 
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
   if (!row) {

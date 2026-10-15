@@ -111,11 +111,15 @@ function pick(arr) {
 }
 
 class NewsSystem {
-  constructor() {
+  /**
+   * @param {Array<{id:string,name:string,alias:string}>} stocks 本局全部股票
+   */
+  constructor(stocks = []) {
+    this.stocks = stocks;
     this.tape = [];
     this.seq = 0;
     this.nextAt = Date.now() + this.randInterval();
-    this.active = []; // [{dir, scope, power, until}]
+    this.active = []; // [{dir, scope, power, until, stockId}]
   }
 
   randInterval() {
@@ -133,6 +137,13 @@ class NewsSystem {
 
   /**
    * 每 tick 调用，按计划产出消息
+   *
+   * 多股票下消息分两种：
+   * - **大盘消息**（scope=全体，政策/宏观）：作用于全部股票，指数因此有系统性涨跌
+   * - **个股消息**（scope=机构/散户）：挂到随机一只股票上，文案前缀【简称】，
+   *   只影响那一只的情绪与公允价
+   * 这只是语义归属，不影响 power/until/衰减等既有机制。
+   *
    * @param {number} now
    * @param {number} [dirBias] 概率偏移：p(利好) = 0.5 + dirBias。
    *   调用方传 regime × regimeBias（如 0.2 → 牛市 70% 利好）
@@ -145,6 +156,9 @@ class NewsSystem {
     const dir = Math.random() < pPositive ? 1 : -1;
     const scope = pick(SCOPES);
     const power = 0.3 + Math.random() * 0.5;
+    // 全体 = 大盘消息（不带股票）；机构/散户 = 个股消息，随机挂一只
+    const stock = scope === '全体' || !this.stocks.length ? null : pick(this.stocks);
+    const text = stock ? `【${stock.alias}】${this.pickText(scope, dir)}` : this.pickText(scope, dir);
     this.seq += 1;
     const news = {
       id: 'N' + this.seq,
@@ -153,7 +167,9 @@ class NewsSystem {
       type: dir > 0 ? '利好' : '利空',
       scope,
       power,
-      text: this.pickText(scope, dir),
+      stockId: stock ? stock.id : null,
+      stockName: stock ? stock.name : null,
+      text,
       until: now + config.news.durationMs,
     };
     this.tape.unshift(news);
@@ -163,12 +179,24 @@ class NewsSystem {
     return news;
   }
 
-  /** 某群体当前情绪叠加 [-1, 1] */
-  sentiment(scope, now) {
+  /**
+   * 该消息是否作用于某只股票：大盘消息作用于全部，个股消息只作用于它自己
+   * @param {*} n 消息（this.active 里的元素）
+   * @param {string|null} stockId 目标股票；null 表示不限股票（只算大盘消息）
+   */
+  static applies(n, stockId) {
+    if (!n.stockId) return true; // 大盘消息
+    if (!stockId) return false;
+    return n.stockId === stockId;
+  }
+
+  /** 某群体在某只股票上的当前情绪叠加 [-1, 1] */
+  sentiment(scope, now, stockId = null) {
     let s = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
       if (n.scope !== '全体' && n.scope !== scope) continue;
+      if (!NewsSystem.applies(n, stockId)) continue;
       // 影响随时间线性衰减
       const remain = (n.until - now) / config.news.durationMs;
       s += n.dir * n.power * remain;
@@ -177,16 +205,17 @@ class NewsSystem {
   }
 
   /**
-   * 按 scope 分解当前情绪。机构做「公开消息对倒」时需要看见散户盘情绪，
+   * 按 scope 分解某只股票的当前情绪。机构做「公开消息对倒」时需要看见散户盘情绪，
    * 而不是只看自己 scope——利好出货、利空吸筹的前提是知道散户在追什么。
    * @returns {{ all: number, inst: number, retail: number }}
    */
-  sentimentByScope(now) {
+  sentimentByScope(now, stockId = null) {
     let all = 0;
     let inst = 0;
     let retail = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
+      if (!NewsSystem.applies(n, stockId)) continue;
       const remain = (n.until - now) / config.news.durationMs;
       const c = n.dir * n.power * remain;
       if (n.scope === '全体') all += c;
@@ -198,14 +227,15 @@ class NewsSystem {
   }
 
   /**
-   * 消息对公允价值的每 tick 相对推力（调用方按 fv *= 1 + 推力 消费）。
+   * 消息对某只股票公允价值的每 tick 相对推力（调用方按 fv *= 1 + 推力 消费）。
    * scope 与 sentiment() 保持同一语义：「全体」消息全额直接定价，
    * 只覆盖单一群体的消息只按其群体打折定价。
    */
-  fvDrift(now) {
+  fvDrift(now, stockId = null) {
     let d = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
+      if (!NewsSystem.applies(n, stockId)) continue;
       const remain = (n.until - now) / config.news.durationMs;
       d += n.dir * n.power * remain * config.news.fvDriftCoef * (SCOPE_FV_WEIGHT[n.scope] ?? 0.5);
     }

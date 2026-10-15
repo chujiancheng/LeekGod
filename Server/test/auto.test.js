@@ -8,6 +8,13 @@ const os = require('os');
 const path = require('path');
 const { Game, ACTIONS } = require('../src/game');
 const { Persister } = require('../src/persist');
+const config = require('../src/config');
+
+// ---- 多股票测试辅助：测试聚焦「大米集团」(config.stocks[0]) ----
+// P(g)/N(g)：取某局里大米集团的市场与做市引擎（多股票后 Game 持的是 Map）
+const STOCK = config.stocks[0];
+const P = (g) => g.markets.get(STOCK.id);
+const N = (g) => g.npcs.get(STOCK.id);
 
 let passed = 0;
 let failed = 0;
@@ -22,10 +29,10 @@ function assert(cond, msg) {
 }
 
 const g = new Game();
-const stock = g.stock;
-g.npc.init(g.startedAt);
-g.market.priceHistory.push({ t: g.startedAt, price: g.market.lastPrice, vol: 0 });
-g.npc.step(g.startedAt);
+const stock = STOCK;
+N(g).init(g.startedAt);
+P(g).priceHistory.push({ t: g.startedAt, price: P(g).lastPrice, vol: 0 });
+N(g).step(g.startedAt);
 
 // 仿真若干 tick 让盘口成型
 for (let i = 0; i < 30; i++) g.tick();
@@ -40,22 +47,22 @@ const nextT = () => (clock += 3000); // 每步推进 3 秒，避开下单冷却
 
 console.log('\n[1] 参数校验');
 {
-  const bad1 = g.auto.create(acc, 'nope', {});
+  const bad1 = g.auto.create(acc, 'nope', {}, STOCK.id);
   assert(!bad1.ok, '未知类型被拒');
 
-  const bad2 = g.auto.create(acc, 'tps', { position: 'long' });
+  const bad2 = g.auto.create(acc, 'tps', { position: 'long' }, STOCK.id);
   assert(!bad2.ok && /至少设置一个/.test(bad2.error), '止盈止损不设任何条件被拒');
 
-  const bad3 = g.auto.create(acc, 'grid', { stepPct: 0.01, qty: 100, maxLevels: 5 });
+  const bad3 = g.auto.create(acc, 'grid', { stepPct: 0.01, qty: 100, maxLevels: 5 }, STOCK.id);
   assert(!bad3.ok && /间距/.test(bad3.error), '网格间距过小被拒');
 
-  const bad4 = g.auto.create(acc, 'grid', { stepPct: 2, qty: 150, maxLevels: 5 });
+  const bad4 = g.auto.create(acc, 'grid', { stepPct: 2, qty: 150, maxLevels: 5 }, STOCK.id);
   assert(!bad4.ok && /整数倍/.test(bad4.error), '网格数量非整手被拒');
 
-  const bad5 = g.auto.create(acc, 'ma', { fast: 10, slow: 15, budgetPct: 50 });
+  const bad5 = g.auto.create(acc, 'ma', { fast: 10, slow: 15, budgetPct: 50 }, STOCK.id);
   assert(!bad5.ok && /慢线/.test(bad5.error), '均线慢线离快线太近被拒');
 
-  const bad6 = g.auto.create(acc, 'dca', { amount: 100, intervalMs: 1000 });
+  const bad6 = g.auto.create(acc, 'dca', { amount: 100, intervalMs: 1000 }, STOCK.id);
   assert(bad6.ok, '定投间隔低于下限自动夹到最小值');
   const dca = g.auto.byId.get(bad6.id);
   assert(dca.params.intervalMs >= 5000, `定投间隔被夹到 ${dca.params.intervalMs}ms`);
@@ -65,18 +72,18 @@ console.log('\n[1] 参数校验');
 console.log('\n[2] 止盈止损：触发即卖出并完成');
 {
   // 先买入建仓（noCooldown 绕冷却，测试重点不在冷却）
-  const ask = g.market.book.asks[0];
-  const buyR = g.market.place(acc, {
+  const ask = P(g).book.asks[0];
+  const buyR = P(g).place(acc, {
     action: ACTIONS.BUY_OPEN,
     qty: 100,
-    price: g.market.roundPrice(ask.price * 1.05),
+    price: P(g).roundPrice(ask.price * 1.05),
     now: nextT(),
     noCooldown: true,
   });
   assert(buyR.ok && acc.longQty(stock.id) >= 100, `建仓成功（持仓 ${acc.longQty(stock.id)}）`);
 
   // 止盈价设得极低 → 永远满足 last >= tp，立即触发
-  const cr = g.auto.create(acc, 'tps', { position: 'long', tp: 0.01, sl: 0, qty: 0 });
+  const cr = g.auto.create(acc, 'tps', { position: 'long', tp: 0.01, sl: 0, qty: 0 }, STOCK.id);
   assert(cr.ok, '止盈止损策略创建成功');
   const t0 = g.auto.byId.get(cr.id);
   assert(t0.enabled && !t0.done, '创建后处于启用状态');
@@ -102,8 +109,8 @@ console.log('\n[2] 止盈止损：触发即卖出并完成');
 
 console.log('\n[3] 网格：跌到格子挂买单，成交后记入格子库存');
 {
-  const base = g.market.lastPrice;
-  const cr = g.auto.create(acc, 'grid', { base, stepPct: 5, qty: 100, maxLevels: 3 });
+  const base = P(g).lastPrice;
+  const cr = g.auto.create(acc, 'grid', { base, stepPct: 5, qty: 100, maxLevels: 3 }, STOCK.id);
   assert(cr.ok, '网格策略创建成功');
   const s = g.auto.byId.get(cr.id);
 
@@ -112,23 +119,24 @@ console.log('\n[3] 网格：跌到格子挂买单，成交后记入格子库存'
   assert(!s.state.pendingBuyId && !s.state.pendingSellId, '价格未到格子不触发');
 
   // 把最新价压到第一格之下（只改内存行情，不走撮合）
-  const bp1 = g.market.roundPrice(base * 0.95);
-  g.market.lastPrice = g.market.roundPrice(bp1 * 0.99);
+  const bp1 = P(g).roundPrice(base * 0.95);
+  P(g).lastPrice = P(g).roundPrice(bp1 * 0.99);
   g.auto.step(nextT());
   assert(!!s.state.pendingBuyId, `价格跌破第 1 格触发买入挂单（${s.state.pendingBuyId || '-'}）`);
   assert(s.state.pendingBuyLevel === 1, '买入挂在第 1 格');
 
-  // 用 NPC 卖单去吃这张网格买单，模拟成交
+  // 模拟这笔挂单成交。刻意不走真实撮合：盘口里 NPC 的买价会随机抢在网格单前面，
+  // 让「吃单」变成掷骰子。这里直接把状态推进到撮合成功后的样子（已成交 + 出簿），
+  // 网格的结算分支本来就是从委托历史里读取成交量——撮合本身由 market.test.js 覆盖。
   const gridOrder = acc.orders.get(s.state.pendingBuyId);
   if (gridOrder) {
-    const npc = g.store.all().find((a) => a.isNPC && a.longQty(stock.id) > 500);
-    g.market.place(npc, {
-      action: ACTIONS.SELL_CLOSE,
-      qty: gridOrder.qty,
-      price: gridOrder.price,
-      now: nextT(),
-      noCooldown: true,
-      noDeviationCheck: true,
+    gridOrder.filled = gridOrder.qty;
+    gridOrder.status = 'filled';
+    P(g).book.remove(gridOrder);
+    acc.orders.delete(gridOrder.id);
+    // 同时补上撮合本该产生的多头批次（成交后才有券可卖）
+    acc.longPos(stock.id).lots.push({
+      qty: gridOrder.qty, price: gridOrder.price, ts: 0, reserved: 0, debt: 0, principal: 0,
     });
   }
   g.auto.step(nextT()); // 结算挂单 → 记入 buys
@@ -136,7 +144,7 @@ console.log('\n[3] 网格：跌到格子挂买单，成交后记入格子库存'
   assert(s.state.nextLevel === 1, 'nextLevel 推进到 1');
 
   // 价格拉回基准之上 → 第 1 格卖出目标 = base*1.05
-  g.market.lastPrice = g.market.roundPrice(base * 1.06);
+  P(g).lastPrice = P(g).roundPrice(base * 1.06);
   // 锁仓 2 分钟：新建仓不能立刻卖。推进时间越过锁仓窗口
   for (const lot of acc.longs.get(stock.id).lots) lot.ts = Date.now() - 3 * 60 * 1000;
   g.auto.step(nextT());
@@ -148,13 +156,13 @@ console.log('\n[3] 网格：跌到格子挂买单，成交后记入格子库存'
 console.log('\n[4] 双均线：构造先涨后跌序列，先金叉买、再死叉卖');
 {
   // 重置一条干净的价格序列：前 40 点上涨，后 40 点下跌
-  const h = g.market.priceHistory;
+  const h = P(g).priceHistory;
   h.length = 0;
-  const base = g.market.lastPrice;
+  const base = P(g).lastPrice;
   for (let i = 0; i < 40; i++) h.push({ t: Date.now() - (80 - i) * 700, price: base * (1 + i * 0.01), vol: 0 });
   for (let i = 0; i < 40; i++) h.push({ t: Date.now() - (40 - i) * 700, price: base * 1.39 * (1 - i * 0.02), vol: 0 });
 
-  const cr = g.auto.create(acc, 'ma', { fast: 10, slow: 30, budgetPct: 30 });
+  const cr = g.auto.create(acc, 'ma', { fast: 10, slow: 30, budgetPct: 30 }, STOCK.id);
   assert(cr.ok, '双均线策略创建成功');
   const s = g.auto.byId.get(cr.id);
 
@@ -165,7 +173,7 @@ console.log('\n[4] 双均线：构造先涨后跌序列，先金叉买、再死�
   // 造金叉：把序列尾部换成急涨
   for (let i = 0; i < 15; i++) h.push({ t: Date.now() + i * 700, price: base * 1.5 * (1 + i * 0.02), vol: 0 });
   while (h.length > 200) h.shift();
-  g.market.lastPrice = h[h.length - 1].price;
+  P(g).lastPrice = h[h.length - 1].price;
   g.auto.step(nextT());
   assert(s.state.lastSide === 1, `翻为多头排列（lastSide=${s.state.lastSide}）`);
   // 金叉后立即尝试买入（可能因冷却等待，再给一步）
@@ -181,7 +189,7 @@ console.log('\n[4] 双均线：构造先涨后跌序列，先金叉买、再死�
 
 console.log('\n[5] 定投：按间隔买入并计数');
 {
-  const cr = g.auto.create(acc, 'dca', { amount: 20000, intervalMs: 60000, maxTimes: 2 });
+  const cr = g.auto.create(acc, 'dca', { amount: 20000, intervalMs: 60000, maxTimes: 2 }, STOCK.id);
   assert(cr.ok, '定投策略创建成功');
   const s = g.auto.byId.get(cr.id);
 
@@ -203,7 +211,7 @@ console.log('\n[5] 定投：按间隔买入并计数');
 
 console.log('\n[6] 状态快照与数量上限');
 {
-  const cr1 = g.auto.create(acc, 'dca', { amount: 5000, intervalMs: 60000, maxTimes: 0 });
+  const cr1 = g.auto.create(acc, 'dca', { amount: 5000, intervalMs: 60000, maxTimes: 0 }, STOCK.id);
   const st = g.stateFor(token);
   assert(st.account.auto && st.account.auto.length >= 1, 'state.account.auto 包含策略列表');
   const row = st.account.auto.find((x) => x.id === cr1.id);
@@ -247,12 +255,12 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   g1.stop();
   const login1 = g1.login('存档玩家');
   const acc1 = g1.store.get('存档玩家');
-  const cr = g1.auto.create(acc1, 'tps', { position: 'long', tp: 999, sl: 1 });
-  const cr2 = g1.auto.create(acc1, 'grid', { stepPct: 3, qty: 100, maxLevels: 5 });
+  const cr = g1.auto.create(acc1, 'tps', { position: 'long', tp: 999, sl: 1 }, STOCK.id);
+  const cr2 = g1.auto.create(acc1, 'grid', { stepPct: 3, qty: 100, maxLevels: 5 }, STOCK.id);
   assert(cr.ok && cr2.ok, '存档局创建两条策略');
   g1.auto.update(acc1, cr2.id, { enabled: false }); // 启停状态也要随档走
   g1.tick();
-  const equityBefore = acc1.equity(g1.stock.id, g1.market.lastPrice);
+  const equityBefore = acc1.equity(STOCK.id, P(g1).lastPrice);
   p1.close();
 
   const p2 = new Persister(FILE);
@@ -266,7 +274,7 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   assert(rTps && rTps.params.tp === 999 && rTps.params.sl === 1, '止盈止损参数完整恢复');
   assert(rGrid && rGrid.enabled === false, '暂停状态随档恢复');
   const acc2 = g2.store.get('存档玩家');
-  const equityAfter = acc2.equity(g2.stock.id, g2.market.lastPrice);
+  const equityAfter = acc2.equity(STOCK.id, P(g2).lastPrice);
   assert(Math.abs(equityAfter - equityBefore) < 0.5, `重启前后权益守恒（${equityBefore} → ${equityAfter}）`);
   p2.close();
   cleanup();

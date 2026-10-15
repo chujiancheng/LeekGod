@@ -188,10 +188,12 @@ class SseHub {
   }
 
   broadcastAll() {
-    // 市场快照每条连接都一样，按 tick 只算一次；账户段仍按各自令牌单独拼
-    const market = this.game.market.snapshot();
+    // 行情快照（10 只股票 + 指数）每条连接都一样，按 tick 只算一次；账户段仍按各自令牌单独拼。
+    // 分时历史与股东榜都不进帧（体积太大），客户端按需拉 /api/history、/api/holders
+    const markets = this.game.marketSnapshots();
+    const index = this.game.index.snapshot();
     for (const conn of this.conns) {
-      const state = this.game.stateFor(conn.token, { market });
+      const state = this.game.stateFor(conn.token, { markets, index });
       this.send(conn, 'state', state);
     }
   }
@@ -253,16 +255,56 @@ function createServer(game) {
         if (!game.accountFor(token)) {
           return json(res, 401, { ok: false, error: '请先登录', account: null });
         }
-        return json(res, 200, game.stateFor(token, { withHistory: true }));
+        // 多股票后完整状态里不再带分时（10 只 × 10300 点太大），
+        // 首屏要的那只走 /api/history?stock=
+        return json(res, 200, game.stateFor(token));
       }
 
-      // ---- 股东占比走势：本账户最近若干次操作时的前十大快照（点前十名那行时按需拉） ----
+      // ---- 分时序列：切换股票时按需拉该股全量 ----
+      if (p === '/api/history' && req.method === 'GET') {
+        if (rl.enabled && !limiters.state.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        const r = game.historyFor(url.searchParams.get('stock'));
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 全部标的的降采样分时：主页行情列表的迷你走势 ----
+      if (p === '/api/sparks' && req.method === 'GET') {
+        if (rl.enabled && !limiters.state.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        return json(res, 200, game.sparksFor());
+      }
+
+      // ---- 某只股票的前十大股东（含两层变动）：进股东 tab / 切股票时拉，5 秒刷新 ----
+      if (p === '/api/holders' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        const r = game.holdersFor(token, url.searchParams.get('stock'));
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 股东占比走势：本账户在某只股票上最近若干次操作时的前十大快照 ----
       if (p === '/api/holders/history' && req.method === 'GET') {
         if (rl.enabled && !limiters.holders.allow(ip)) {
           return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
         }
         const token = bearerToken(req) || url.searchParams.get('token') || '';
-        const r = game.holderHistoryFor(token);
+        const r = game.holderHistoryFor(token, url.searchParams.get('stock'));
         return json(res, r.ok ? 200 : 401, r);
       }
 
@@ -293,15 +335,15 @@ function createServer(game) {
         return json(res, r.ok ? 200 : 400, r);
       }
 
-      // ---- 融券：挂借 / 撤借（列表走 /api/state 的 market.lending + account.lending）----
+      // ---- 融券：挂借 / 撤借（列表走 /api/state 的 account.positions[].lending）----
       if (p === '/api/lend' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.order)) return;
         const body = await readBody(req);
         const op = body && body.op;
         const qty = body && body.qty;
         let r;
-        if (op === 'lend') r = game.lend(bearerToken(req), qty);
-        else if (op === 'unlend') r = game.unlend(bearerToken(req), qty);
+        if (op === 'lend') r = game.lend(bearerToken(req), qty, body && body.stockId);
+        else if (op === 'unlend') r = game.unlend(bearerToken(req), qty, body && body.stockId);
         else r = { ok: false, error: '未知操作' };
         return json(res, r.ok ? 200 : 400, r);
       }
@@ -351,8 +393,8 @@ function createServer(game) {
         res.write('retry: 2000\n\n');
         const conn = { res, token, ip };
         hub.add(conn);
-        // 首帧立即推送
-        hub.send(conn, 'state', game.stateFor(token, { withHistory: true }));
+        // 首帧立即推送（行情全量 + 账户快照；分时按需拉 /api/history）
+        hub.send(conn, 'state', game.stateFor(token));
         req.on('close', () => hub.remove(conn));
         return;
       }

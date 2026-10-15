@@ -60,6 +60,12 @@ class NpcManager {
     this.polarTarget = 0.2; // 分歧度目标（一致/大战两态之间切换）
     this.polarIn = 0; // 当前分歧态剩余 tick
     this.tickCount = 0;
+    // 多股票：把「基准股」（流通 1 亿股 @ 20 元）口径的做市资金与报单量折算到本股。
+    // 不折算的话，同一笔钱在 43 亿的阿里上是小溪、在 20 亿的大米上是大河，
+    // 各股票的盘口深度会差出一倍多。资金按流通市值缩、股数按流通股数缩。
+    const cfg = config.npc;
+    this.capScale = (market.stock.floatShares * market.stock.initPrice) / cfg.refMarketCap;
+    this.qtyScale = market.stock.floatShares / cfg.refFloatShares;
   }
 
   /** 按类型取行为档案（初始化时已挂到 n.profile） */
@@ -74,6 +80,11 @@ class NpcManager {
     const lot = this.stock.lotSize;
     const preAge = config.trade.lockMs + 60000; // 初始持仓视为已解锁
     const entries = Object.entries(cfg.types);
+
+    // 多股票：每股一套独立 NPC 池。做市资金与报单量的缩放系数在构造函数里算好
+    // （capScale 按流通市值、qtyScale 按流通股数），这里直接用。
+    const capScale = this.capScale;
+    const qtyScale = this.qtyScale;
 
     // 严格守恒：五类 holdRatio 合计 = 100% 流通盘。
     // 各类按比例取整手后，余数补给最后一类（小散户），避免丢股。
@@ -93,8 +104,9 @@ class NpcManager {
       const [typeKey, t] = entries[ti];
       const sharesArr = split(holdTotals[ti], t.count);
       for (let i = 0; i < t.count; i++) {
-        const acc = new Account(`${t.label}${i + 1}`, true, typeKey);
-        acc.cash = t.totalCash / t.count;
+        // 账户名带股票简称前缀：10 只股票各有 316 个 NPC，不加前缀会互相覆盖
+        const acc = new Account(`${this.stock.alias}·${t.label}${i + 1}`, true, typeKey);
+        acc.cash = (t.totalCash / t.count) * capScale;
         const shares = sharesArr[i];
         acc.initialLong = shares;
         acc.longPos(this.stock.id).lots.push({ qty: shares, price: this.stock.initPrice, ts: now - preAge, reserved: 0 });
@@ -103,7 +115,7 @@ class NpcManager {
         if (lendRatio > 0) {
           const lendQty = Math.floor((shares * lendRatio) / lot) * lot;
           if (lendQty >= lot) {
-            acc.lendOffered = lendQty;
+            acc.ledgerOf(this.stock.id).lendOffered = lendQty;
             if (this.market) this.market.lendTotal += lendQty;
           }
         }
@@ -164,7 +176,7 @@ class NpcManager {
 
     let fv = this.fairValue;
     fv *= 1 + this.trendDrift; // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）
-    fv *= 1 + this.news.fvDrift(now); // 消息推力（乘性）
+    fv *= 1 + this.news.fvDrift(now, this.stock.id); // 消息推力（乘性，只算本股 + 大盘消息）
     fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
     fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
     fv += (this.fund - fv) * cfg.fvAnchor; // 向重心回归
@@ -239,13 +251,13 @@ class NpcManager {
     if (p.publicNewsFade != null) {
       // 聪明钱：看见公开消息（全体+散户盘）但对倒——利好出货、利空吸筹；
       // 机构专属消息仍小幅同向（知情盘）
-      const sb = this.news.sentimentByScope(now);
+      const sb = this.news.sentimentByScope(now, this.stock.id);
       const publicS = Math.max(-1, Math.min(1, sb.all + sb.retail));
       s -= publicS * p.publicNewsFade;
       s += sb.inst * (p.instNewsFollow != null ? p.instNewsFollow : 0.35);
     } else {
       const scope = p.newsScope || (n.type === 'inst' ? '机构' : '散户');
-      s = this.news.sentiment(scope, now);
+      s = this.news.sentiment(scope, now, this.stock.id);
       s *= p.sentimentScale != null ? p.sentimentScale : n.type === 'retail' ? 1.2 : 0.8;
     }
 
@@ -309,18 +321,22 @@ class NpcManager {
    */
   recycleLiquidity() {
     const cfg = config.npc;
-    if (!cfg.liquidityFloor) return;
+    if (!cfg.liquidityFloor || !this.npcs.length) return;
+    // 地板的绝对金额随本股流通市值等比放大：大盘股盘口深、需要的活水也多
+    const floor = cfg.liquidityFloor * this.capScale;
     let cash = 0;
     for (const n of this.npcs) cash += n.acc.cash;
-    if (cash >= cfg.liquidityFloor) {
+    if (cash >= floor) {
       this._dryLogged = false;
       return;
     }
     if (!this._dryLogged) {
       this._dryLogged = true;
-      logger.info(`[我是股神] NPC 池现金枯竭（${r2(cash)} < ${cfg.liquidityFloor}），开始向地板回补`);
+      logger.info(
+        `[我是股神] ${this.stock.name} NPC 池现金枯竭（${r2(cash)} < ${r2(floor)}），开始向地板回补`
+      );
     }
-    const need = (cfg.liquidityFloor - cash) * cfg.liquidityRefill;
+    const need = (floor - cash) * cfg.liquidityRefill;
     const per = need / this.npcs.length;
     for (const n of this.npcs) n.acc.cash = r2(n.acc.cash + per);
     // 现金变化影响挂单冻结口径，存档器需要知道这些账户变了
@@ -385,7 +401,7 @@ class NpcManager {
     // 分歧度高时机构双边挂单也加大（多空大战的“工事”更深）
     const reScale = p.polarOrderScale ? 1 + this.polar * 0.6 : 1;
     if (bidPx > 0.01) {
-      let qty = roundLot(rand(rq[0], rq[1]) * reScale * (1 + tilt), lot);
+      let qty = roundLot(rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt), lot);
       const coverable = n.acc.coverableShort(this.stock.id);
       if (coverable >= lot) {
         qty = Math.min(qty, coverable, this.closeCapacity(n, bidPx, qty));
@@ -413,7 +429,7 @@ class NpcManager {
 
     // 卖盘：优先卖出持仓（扣掉已挂借融券的）；机构/游资在持仓不足时可开空
     const sellable = n.acc.freeSellableLong(this.stock.id, now);
-    let askQty = roundLot(rand(rq[0], rq[1]) * (1 - tilt), lot);
+    let askQty = roundLot(rand(rq[0], rq[1]) * this.qtyScale * (1 - tilt), lot);
     if (sellable >= Math.min(askQty, lot)) {
       askQty = Math.min(askQty, sellable);
       if (askQty >= 100) {
@@ -472,7 +488,7 @@ class NpcManager {
         const isCover = coverable >= lot;
         // 分歧度越高机构出手越重（多空大战放量），一致期回归常规规模
         const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
-        let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+        let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
         if (isCover) {
           qty = Math.min(qty, coverable, this.closeCapacity(n, ask.price, qty));
         } else {
@@ -497,7 +513,7 @@ class NpcManager {
         const sellable = n.acc.freeSellableLong(this.stock.id, now);
         const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
         if (sellable >= 100) {
-          let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+          let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
           qty = Math.min(qty, sellable);
           this.market.place(n.acc, {
             action: ACTIONS.SELL_CLOSE,
@@ -507,7 +523,7 @@ class NpcManager {
             noCooldown: true,
           });
         } else if (canShort) {
-          let qty = roundLot(rand(aq[0], aq[1]) * moodScale, lot);
+          let qty = roundLot(rand(aq[0], aq[1]) * this.qtyScale * moodScale, lot);
           this.market.place(n.acc, {
             action: ACTIONS.SELL_OPEN,
             qty,

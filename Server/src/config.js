@@ -18,16 +18,24 @@ module.exports = {
     // 兜底全量扫描：每 tick 轮转写入 1/sweepTicks 的账户。
     // 正常路径靠脏标记精确落盘，这里是防御"某条改钱路径漏标脏"的保险，设为 0 关闭
     sweepTicks: 300,
+    // 成交流水（trades）保留窗口，每 tick 按时间裁掉更早的行。
+    // 这张表只有两处读取：每只股票恢复逐笔（最近 500 条）与玩家成交记录（最近 100 条），
+    // 而 NPC 之间每 tick 都在成交（实测 640 行/秒、6 MB/分钟），不裁会按小时级无限膨胀
+    tradeKeepMs: Number(process.env.TRADE_KEEP_MS || 10 * 60 * 1000),
   },
 
   // 行情推进间隔（毫秒）
   tickIntervalMs: 700,
 
-  // 股票定义（首期只有一只，后续扩展直接往数组里加）
+  // 股票定义。每只股票一套独立的 Market + NpcManager（各自盘口、融券池与做市资金），
+  // 大盘指数按其流通市值加权合成。alias 是 2 字简称，用于 NPC 账户名前缀与消息文案。
+  // 流通盘 × 开盘价 = 流通市值，决定指数权重；当前权重区间 6.8%~14.7%（最大/最小 ≈ 2.2 倍），
+  // 既保留大盘股主导的层次，又不让任何一只绑架指数。
   stocks: [
     {
       id: '600001',
       name: '大米集团',
+      alias: '大米',
       // 固定流通盘（股），开服时全部登记在 NPC 名下
       floatShares: 100000000,
       // 本局开盘价 / 昨收参考价
@@ -35,7 +43,25 @@ module.exports = {
       // 每手股数
       lotSize: 100,
     },
+    { id: '600002', name: '腾迅控股', alias: '腾迅', floatShares: 70000000, initPrice: 58.0, lotSize: 100 },
+    { id: '600003', name: '阿狸巴巴', alias: '阿狸', floatShares: 40000000, initPrice: 108.0, lotSize: 100 },
+    { id: '600004', name: '梅团集团', alias: '梅团', floatShares: 30000000, initPrice: 92.0, lotSize: 100 },
+    { id: '600005', name: '京冬集团', alias: '京冬', floatShares: 30000000, initPrice: 126.0, lotSize: 100 },
+    { id: '600006', name: '筷手集团', alias: '筷手', floatShares: 50000000, initPrice: 44.0, lotSize: 100 },
+    { id: '600007', name: '网艺集团', alias: '网艺', floatShares: 20000000, initPrice: 148.0, lotSize: 100 },
+    { id: '600008', name: '中新国际', alias: '中新', floatShares: 120000000, initPrice: 26.0, lotSize: 100 },
+    { id: '600009', name: '小朋集团', alias: '小朋', floatShares: 60000000, initPrice: 36.0, lotSize: 100 },
+    { id: '600010', name: '理享汽车', alias: '理享', floatShares: 28000000, initPrice: 72.0, lotSize: 100 },
   ],
+
+  // 大盘指数：全部股票的流通市值加权合成，纯展示不可交易。
+  // 点位 = base × Σ(流通股 × 现价) / Σ(流通股 × 开盘价)
+  // 本局「昨收」恒为 base（一轮即一次连续交易），涨跌幅相对基点。
+  index: {
+    code: '999999',
+    name: '大盘指数',
+    base: 1000,
+  },
 
   // 账户
   account: {
@@ -147,7 +173,15 @@ module.exports = {
   // 五类结构贴近活跃个股：少数机构 + 游资 + 长尾散户。
   // holdRatio 合计必须 = 1（初始化时把取整余数补给最后一类）。
   // 类间现金/筹码长尾；类内均分（首版从简，行为差异靠 profile）。
+  //
+  // 多股票：每股一套独立的 NPC 池（账户名前缀股票简称）。下面的 totalCash / 报单量是
+  // 「基准股」口径（流通 1 亿股 @ 20 元 = 20 亿流通市值），每只股票按自己的流通市值与
+  // 流通股数等比缩放后实例化——否则同样一笔钱在 43 亿的阿里上是小溪、在 20 亿的大米上是大河，
+  // 各股票的盘口深度会差出一倍多。缩放系数见 refMarketCap / refFloatShares。
   npc: {
+    // 基准口径：1 亿股 × 20 元
+    refMarketCap: 2000000000,
+    refFloatShares: 100000000,
     types: {
       inst: {
         label: '机构',

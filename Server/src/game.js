@@ -10,6 +10,7 @@ const { Market, ACTIONS } = require('./market');
 const { NewsSystem } = require('./news');
 const { NpcManager, normalizeNpcType } = require('./npc');
 const { AutoManager } = require('./auto');
+const { IndexFeed } = require('./indexfeed');
 
 const NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
 
@@ -27,15 +28,32 @@ class Game {
    * @param {{persist?: import('./persist').Persister|null}} [opts]
    */
   constructor(opts = {}) {
-    this.stock = config.stocks[0];
+    this.stocks = config.stocks;
+    this.stocksById = new Map(this.stocks.map((s) => [s.id, s]));
     this.store = new Store();
-    this.market = new Market(this.stock);
-    this.news = new NewsSystem();
-    this.npc = new NpcManager(this.market, this.news, this.store);
-    this.auto = new AutoManager(this.market, this.stock, this.store);
+    // 每只股票一套完全独立的市场与做市引擎：各自盘口、融券池、做市资金、趋势与情绪。
+    // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
+    this.markets = new Map();
+    this.npcs = new Map();
+    for (const stock of this.stocks) {
+      const market = new Market(stock);
+      market.journal = opts.persist || null;
+      market.accountsProvider = () => this.store.all();
+      // 跨股票取价：风控要按整个账户算权益，就得知道账户在其它股票上的持仓值多少
+      market.priceOf = (stockId) => this.marketOf(stockId).lastPrice;
+      // 跨股票找市场：强平撤单要把委托交回它所属股票的市场（见 Market.cancelAny）
+      market.marketOf = (stockId) => this.markets.get(stockId);
+      this.markets.set(stock.id, market);
+      this.npcs.set(stock.id, new NpcManager(market, null, this.store));
+    }
+    this.news = new NewsSystem(this.stocks);
+    for (const npc of this.npcs.values()) npc.news = this.news;
+
+    this.index = new IndexFeed(this.stocks);
+    this.markets.set(this.index.stockId, this.index); // 指数也进 markets：取价、落盘、广播一视同仁
+
+    this.auto = new AutoManager(this.markets, this.stocksById, this.store);
     this.persist = opts.persist || null;
-    this.market.journal = this.persist;
-    this.market.accountsProvider = () => this.store.all();
     this.auto.journal = this.persist;
     this.startedAt = Date.now();
     this.timer = null;
@@ -47,28 +65,70 @@ class Game {
     this._holderSnapshots = new Map(); // 账号名 -> 操作时刻的股东快照数组（环形缓冲）
   }
 
+  /** 取某只股票的市场/指数（未知 id 抛错，调用方应先校验） */
+  marketOf(stockId) {
+    const m = this.markets.get(stockId);
+    if (!m) throw new Error(`未知标的: ${stockId}`);
+    return m;
+  }
+
+  /** 是否是可交易股票（指数不可交易） */
+  stockOf(stockId) {
+    return this.stocksById.get(stockId) || null;
+  }
+
+  /** 取某只标的的最新价（风控、账户权益、序列化都走它） */
+  priceOf(stockId) {
+    return this.markets.get(stockId).lastPrice;
+  }
+
+  /** 账户的组合口径权益（跨全部持仓股票汇总），外部与测试直接用它 */
+  equityOf(account) {
+    return account.equity((sid) => this.priceOf(sid));
+  }
+
+  /** 归一化客户端传来的 stockId：缺省回落到第一只股票，非法值返回 null */
+  resolveStockId(raw) {
+    if (raw == null || raw === '') return this.stocks[0].id;
+    return this.stocksById.has(String(raw)) ? String(raw) : null;
+  }
+
+  /**
+   * 只读接口（分时等）用的标的解析：除股票外还接受大盘指数，
+   * 指数同样有分时序列，客户端要能画它的走势图。
+   */
+  resolveMarketId(raw) {
+    if (raw == null || raw === '') return this.stocks[0].id;
+    const id = String(raw);
+    return this.markets.has(id) ? id : null;
+  }
+
   start() {
     if (this.timer) return;
-    const snap = this.persist ? this.persist.loadAll(this.stock.id) : null;
+    const ids = [...this.markets.keys()];
+    const snap = this.persist ? this.persist.loadAll(ids) : null;
     const resumed = !!(snap && snap.resumed);
     if (resumed) {
       this.applySnapshot(snap);
     } else {
       this.startedAt = Date.now();
-      this.npc.init(this.startedAt);
-      this.market.priceHistory.push({ t: this.startedAt, price: this.market.lastPrice, vol: 0 });
-      this.persist?.startRound(this.startedAt, this.stock.id);
+      const now = this.startedAt;
+      for (const stock of this.stocks) {
+        const market = this.markets.get(stock.id);
+        this.npcs.get(stock.id).init(now);
+        market.priceHistory.push({ t: now, price: market.lastPrice, vol: 0 });
+      }
+      this.index.update(this.markets, now);
+      this.persist?.startRound(now);
     }
     // NPC 首轮报价（续跑时报价单不入存档，靠这一步把双边盘口重新挂上）
-    this.npc.step(Date.now());
+    for (const npc of this.npcs.values()) npc.step(Date.now());
     this.refreshStats();
     // 新开局的基线立即落盘：初始持仓、分时起点与行情断点，第一秒内被杀也能续跑
     if (!resumed && this.persist) {
-      const h = this.market.priceHistory;
       this.persist.commit({
         now: Date.now(),
-        market: this.market,
-        pricePoint: h[h.length - 1],
+        markets: [...this.markets.values()],
         allAccounts: this.store.all(),
       });
     }
@@ -101,18 +161,39 @@ class Game {
       acc.lastOrderAt = row.last_order_at;
       acc.createdAt = row.created_at;
       acc.deposited = row.deposited || 0;
-      acc.lendOffered = row.lend_offered || 0;
-      acc.lendInterestEarned = row.lend_interest_earned || 0;
-      acc.lendInterestDebt = row.lend_interest_debt || 0;
-      acc.lendInterestPaid = row.lend_interest_paid || 0;
-      acc.financeInterestAccrued = row.finance_interest_accrued || 0;
       this.store.put(acc);
       byName.set(acc.name, acc);
+    }
+
+    // 存档里的标的可能已经不在本局配置里（改了 config.stocks 又沿用旧档）。
+    // 这类行的价格取不到，留着会让 equity / 风控在 priceOf 上直接抛错、整局起不来，
+    // 所以连同行情一起丢弃并记一条日志（换股票列表的正规做法仍是删档开新局）
+    let droppedRows = 0;
+
+    // 按股票的融券/融资明细：挂借量、欠息、各类利息累计
+    for (const row of snap.ledger || []) {
+      const acc = byName.get(row.account);
+      if (!acc) continue;
+      if (!this.markets.has(row.stock_id)) {
+        droppedRows += 1;
+        continue;
+      }
+      acc.ledger.set(row.stock_id, {
+        lendOffered: row.lend_offered || 0,
+        lendInterestEarned: row.lend_interest_earned || 0,
+        lendInterestDebt: row.lend_interest_debt || 0,
+        lendInterestPaid: row.lend_interest_paid || 0,
+        financeInterestAccrued: row.finance_interest_accrued || 0,
+      });
     }
 
     for (const row of snap.lots) {
       const acc = byName.get(row.account);
       if (!acc) continue;
+      if (!this.markets.has(row.stock_id)) {
+        droppedRows += 1;
+        continue;
+      }
       const pos = row.side === 'long' ? acc.longPos(row.stock_id) : acc.shortPos(row.stock_id);
       const lot = { qty: row.qty, price: row.price, reserved: row.reserved };
       // 多头批次带锁仓起始时间（T+锁仓依据）与融资负债；空头批次带保证金
@@ -125,31 +206,68 @@ class Game {
       }
       pos.lots.push(lot);
     }
+    // NPC 账户的批次合并成一条：旧档里每个 NPC 可能已经攒了几千条碎片批次，
+    // 不先合并的话重启后的头几个 tick 仍要把它们整段重写一遍（见 Account.consolidate）
+    for (const acc of this.store.all()) {
+      if (!acc.isNPC) continue;
+      for (const sid of acc.longs.keys()) acc.consolidate(sid);
+      for (const sid of acc.shorts.keys()) acc.consolidate(sid);
+    }
+    if (droppedRows) {
+      logger.warn(
+        `[我是股神] 存档里有 ${droppedRows} 条持仓/融券明细属于本局已下线的标的，已忽略` +
+          `（改动 config.stocks 后建议删档开新局）`
+      );
+    }
 
-    const m = snap.market;
-    this.market.lastPrice = m.last_price;
-    this.market.prevClose = m.prev_close;
-    this.market.open = m.open;
-    this.market.high = m.high;
-    this.market.low = m.low;
-    this.market.volume = m.volume;
-    this.market.turnover = m.turnover;
-    this.market.shortInterest = m.short_interest;
-    this.market.orderSeq = Math.max(this.market.orderSeq, m.order_seq);
+    // 逐只恢复股票行情断点与分时/逐笔
+    for (const stock of this.stocks) {
+      const market = this.markets.get(stock.id);
+      const mk = snap.markets?.get(stock.id);
+      const m = mk && mk.state;
+      if (!m) continue; // 本轮新增、存档里没有的股票：保持开盘价，由主循环接着跑
+      market.lastPrice = m.last_price;
+      market.prevClose = m.prev_close;
+      market.open = m.open;
+      market.high = m.high;
+      market.low = m.low;
+      market.volume = m.volume;
+      market.turnover = m.turnover;
+      market.shortInterest = m.short_interest;
+      market.orderSeq = Math.max(market.orderSeq, m.order_seq);
+      market.priceHistory = mk.prices.map((p) => ({ t: p.t, price: p.price, vol: p.vol }));
+      market.trades = mk.tape.map((t) => ({
+        seq: t.trade_seq,
+        t: t.t,
+        price: t.price,
+        qty: t.qty,
+        side: t.side,
+      }));
+    }
+
+    // 指数断点：点位直接读存档，分时与成分由价格推出
+    const idxSnap = snap.markets?.get(this.index.stockId);
+    this.index.applyState(idxSnap && idxSnap.state, idxSnap && idxSnap.prices);
+    this.index.update(this.markets, Date.now());
 
     // 融券池聚合值从账户挂借量 + shortInterest 重建（挂借量已随 accounts 恢复）
     this.rebuildLendingPool();
 
-    // 停牌跟着存档走：重启不该把正在停牌的一局悄悄变回正常交易
-    if (snap.halt) {
-      this.market.haltUntil = snap.halt.until || 0;
-      this.market.haltReason = snap.halt.reason || '';
+    // 停牌是全市场一起停：把状态摊到每只股票（指数跟随，不单独停）
+    if (snap.halt && snap.halt.until) {
+      for (const stock of this.stocks) {
+        const market = this.markets.get(stock.id);
+        market.haltUntil = snap.halt.until || 0;
+        market.haltReason = snap.halt.reason || '';
+      }
     }
 
     // 活动委托回填订单簿与账户挂单表（账号 id 由 orderSeq 递增，不回退，避免与旧单撞号）
     for (const row of snap.orders) {
       const acc = byName.get(row.account);
       if (!acc) continue;
+      const market = this.markets.get(row.stock_id);
+      if (!market) continue;
       const order = {
         id: row.id,
         seq: row.seq,
@@ -166,64 +284,63 @@ class Game {
         status: 'live',
       };
       acc.orders.set(order.id, order);
-      this.market.book.add(order);
-      this.market.orderSeq = Math.max(this.market.orderSeq, order.seq);
+      market.book.add(order);
+      market.orderSeq = Math.max(market.orderSeq, order.seq);
       // 未成交的开空单在重启前占用了券源，回填时重新计入
       if (order.action === ACTIONS.SELL_OPEN && !config.margin.allowNakedShort) {
-        this.market.lendReserved += order.qty - order.filled;
+        market.lendReserved += order.qty - order.filled;
       }
     }
-
-    this.market.priceHistory = snap.prices.map((p) => ({ t: p.t, price: p.price, vol: p.vol }));
-    this.market.trades = snap.tape.map((t) => ({
-      seq: t.trade_seq,
-      t: t.t,
-      price: t.price,
-      qty: t.qty,
-      side: t.side,
-    }));
 
     for (const row of snap.sessions) {
       if (byName.has(row.account)) this.sessions.set(row.token, row.account);
     }
 
-    // 重建 NPC 报价对象：持仓/现金已在上面恢复，这里只补 manager 的运行期字段
+    // 重建 NPC 报价对象：持仓/现金已在上面恢复，这里只补 manager 的运行期字段。
+    // 每个 NPC 账户属于唯一一只股票（账户名带股票简称前缀），按前缀分派回各自的 manager
     const typeKeys = Object.keys(config.npc.types);
-    const npcRows = snap.accounts
-      .filter((r) => r.is_npc && typeKeys.includes(normalizeNpcType(r.role)))
-      .map((r) => ({ ...r, role: normalizeNpcType(r.role) }))
-      .sort((a, b) =>
-        a.role === b.role
-          ? a.name.length - b.name.length || a.name.localeCompare(b.name)
-          : a.role.localeCompare(b.role)
-      );
-    let instIdx = 0;
-    for (const row of npcRows) {
-      const typeKey = row.role;
-      const t = config.npc.types[typeKey];
-      this.npc.npcs.push({
-        acc: byName.get(row.name),
-        type: typeKey,
-        profile: t,
-        initialLong: row.initial_long,
-        initialCash: t ? t.totalCash / t.count : 0,
-        camp: t && t.useCamp ? (instIdx++ % 2 === 0 ? 1 : -1) : 0,
-        ownBias: 0,
-        ownResting: [],
-        requoteIn: 0,
-      });
+    for (const stock of this.stocks) {
+      const npc = this.npcs.get(stock.id);
+      const market = this.markets.get(stock.id);
+      const prefix = `${stock.alias}·`;
+      const rows = snap.accounts
+        .filter((r) => r.is_npc && typeKeys.includes(normalizeNpcType(r.role)) && r.name.startsWith(prefix))
+        .map((r) => ({ ...r, role: normalizeNpcType(r.role) }))
+        .sort((a, b) =>
+          a.role === b.role
+            ? a.name.length - b.name.length || a.name.localeCompare(b.name)
+            : a.role.localeCompare(b.role)
+        );
+      const capScale =
+        (stock.floatShares * stock.initPrice) / config.npc.refMarketCap;
+      let instIdx = 0;
+      for (const row of rows) {
+        const typeKey = row.role;
+        const t = config.npc.types[typeKey];
+        npc.npcs.push({
+          acc: byName.get(row.name),
+          type: typeKey,
+          profile: t,
+          initialLong: row.initial_long,
+          initialCash: t ? (t.totalCash / t.count) * capScale : 0,
+          camp: t && t.useCamp ? (instIdx++ % 2 === 0 ? 1 : -1) : 0,
+          ownBias: 0,
+          ownResting: [],
+          requoteIn: 0,
+        });
+      }
+      npc.tickCount = 0;
+      // 公允价值/重心/趋势阶段/情绪结构不落盘（随机游走的中间量），重新锚到现价
+      npc.fairValue = market.lastPrice;
+      npc.fund = market.lastPrice;
+      npc.regime = 0;
+      npc.regimeIn = 0;
+      npc.trendDrift = 0;
+      npc.instMood = 0;
+      npc.polar = 0.2;
+      npc.polarTarget = 0.2;
+      npc.polarIn = 0;
     }
-    this.npc.tickCount = 0;
-    // 公允价值/重心/趋势阶段/情绪结构不落盘（随机游走的中间量），重新锚到现价
-    this.npc.fairValue = this.market.lastPrice;
-    this.npc.fund = this.market.lastPrice;
-    this.npc.regime = 0;
-    this.npc.regimeIn = 0;
-    this.npc.trendDrift = 0;
-    this.npc.instMood = 0;
-    this.npc.polar = 0.2;
-    this.npc.polarTarget = 0.2;
-    this.npc.polarIn = 0;
 
     // 玩家委托/成交记录从存档回填（活动委托用内存对象，保证状态随成交实时变化）
     for (const acc of this.store.players()) {
@@ -244,56 +361,82 @@ class Game {
     const now = Date.now();
     this.tickCount += 1;
 
-    if (this.market.expireHalt(now)) logger.info('[我是股神] 停牌到期，已自动复牌');
+    // 停牌是全市场一起停（运营开关），以第一只股票的状态为准摊到全部股票
+    const primary = this.markets.get(this.stocks[0].id);
+    if (primary.expireHalt(now)) {
+      for (const stock of this.stocks) {
+        const m = this.markets.get(stock.id);
+        if (m !== primary && m.haltUntil) m.resume(now);
+      }
+      logger.info('[我是股神] 停牌到期，已自动复牌');
+    }
+    const halted = primary.isHalted(now);
 
-    // 停牌期间行情、报价、风控一并冻结：价格若继续走，玩家看到的停牌倒计时就成了假的
-    const halted = this.market.isHalted(now);
     if (!halted) {
-      const news = this.news.maybeEmit(now, this.npc.regime * config.news.regimeBias);
+      // 消息方向偏置取全市场平均阶段：10 只股票各自的牛熊互相对冲，
+      // 大盘消息（全体 scope）代表的是「整个市场」的方向，用均值最合理
+      let bias = 0;
+      for (const npc of this.npcs.values()) bias += npc.regime * config.news.regimeBias;
+      bias /= this.npcs.size;
+      const news = this.news.maybeEmit(now, bias);
       if (news) this.lastNews = news;
-
-      this.npc.step(now);
     }
 
     const allAccounts = this.store.all();
 
-    if (!halted) {
-      // 全账户风控扫描（成交触发之外的兜底）
-      for (const acc of allAccounts) {
-        this.market.maybeLiquidate(acc, now);
+    // 逐只股票推进：做市报价、风控扫描、融券/融资利息都按股票各自结算。
+    // 停牌时整段冻结（价格若继续走，玩家看到的停牌倒计时就成了假的）
+    for (const stock of this.stocks) {
+      const market = this.markets.get(stock.id);
+      if (!halted) {
+        this.npcs.get(stock.id).step(now);
+        // 全账户风控扫描（成交触发之外的兜底）。只扫持有本股敞口的账户：
+        // 10 只股票 × 3160 个 NPC 账户全扫一遍是几万次无效检查
+        for (const acc of allAccounts) {
+          if (!acc.longs.has(stock.id) && !acc.shorts.has(stock.id)) continue;
+          market.maybeLiquidate(acc, now);
+        }
+        // 融券利息：空头按 tick 付给出借方，券源越少利率越高
+        market.accrueLendingInterest(now);
+        // 做空欠息追缴：现金/保证金恢复后优先补缴历史欠息
+        market.collectLendingDebt();
+        // 融资利息：摊入批次负债并计入已实现盈亏，现金越紧利率越高
+        market.accrueFinanceInterest(now);
       }
-      // 玩家自动化策略：停牌时整段冻结，复牌后继续
-      this.auto.step(now);
-      // 融券利息：空头按 tick 付给出借方，券源越少利率越高
-      this.market.accrueLendingInterest(now);
-      // 做空欠息追缴：现金/保证金恢复后优先补缴历史欠息
-      this.market.collectLendingDebt();
-      // 融资利息：摊入批次负债并计入已实现盈亏，现金越紧利率越高
-      this.market.accrueFinanceInterest(now);
+      // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
+      market.sampleShortInterest(now);
+
+      // 分时序列（每 tick 一个点，vol 为累计成交量供客户端算柱）；停牌补平线，走势图不断点
+      const h = market.priceHistory;
+      h.push({ t: now, price: market.lastPrice, vol: market.volume });
+      // 保留最近 N 个点：push 在尾部，截断必须从头丢，h.length=N 会把最新点砍掉导致分时冻住
+      if (h.length > config.market.priceHistorySize) {
+        h.splice(0, h.length - config.market.priceHistorySize);
+      }
     }
 
-    // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
-    this.market.sampleShortInterest(now);
+    // 玩家自动化策略（按策略所属股票逐个判断停牌）
+    if (!halted) this.auto.step(now);
 
-    // 分时序列（每秒一个点，vol 为累计成交量供客户端算柱）；停牌补平线，走势图不断点
-    const h = this.market.priceHistory;
-    h.push({ t: now, price: this.market.lastPrice, vol: this.market.volume });
-    // 保留最近 N 个点：push 在尾部，截断必须从头丢，h.length=N 会把最新点砍掉导致分时冻住
-    if (h.length > config.market.priceHistorySize) h.splice(0, h.length - config.market.priceHistorySize);
+    // 大盘指数：用各股最新价合成点位并记分时
+    this.index.update(this.markets, now);
 
     // 排行榜/股东按 tick 算一次，避免每个 SSE 连接各算一遍
     this.refreshStats();
     this.broadcast();
 
-    // 本 tick 的全部变更（账户、委托、成交、行情）在一个事务里落盘
-    this.persist?.commit({ now, market: this.market, pricePoint: h[h.length - 1], allAccounts });
+    // 本 tick 的全部变更（账户、委托、成交、行情）在一个事务里落盘。
+    // markets 含 10 只股票 + 指数，接口同构所以一起写
+    this.persist?.commit({ now, markets: [...this.markets.values()], allAccounts });
   }
 
-  /** 刷新排行榜与前十大股东缓存 */
+  /** 刷新排行榜与各股票的前十大股东缓存 */
   refreshStats() {
+    const topHolders = new Map();
+    for (const stock of this.stocks) topHolders.set(stock.id, this.computeTopHolders(stock.id));
     this._stats = {
       players: this.leaderboard(),
-      topHolders: this.computeTopHolders(),
+      topHolders,
     };
   }
 
@@ -339,8 +482,9 @@ class Game {
     this.sessions.set(t, acc.name);
     this.persist?.addSession(t, acc.name);
     this.trimSessions(acc.name);
-    // 登录即留一份基线快照：不动手也能看到「较上次操作」的变动
-    this.snapshotHolders(acc, 'login');
+    // 登录即给每只股票各留一份基线快照：不动手也能在任一只股票上看到「较上次操作」的变动。
+    // 快照按 (账号, 股票) 存，所以这里要逐只记，不能只记一只
+    for (const stock of this.stocks) this.snapshotHolders(acc, 'login', stock.id);
     if (!existing) this.refreshStats();
     return { ok: true, name: acc.name, token: t };
   }
@@ -364,15 +508,23 @@ class Game {
     return name ? this.store.get(name) : null;
   }
 
+  /**
+   * 下单。stockId 必填；指数不可交易；下单按股票路由到各自的市场。
+   * 账户冷却跨股票共享：2 秒内不管下哪只都算同一笔冷却，防止刷单。
+   */
   placeOrder(token, body) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
+    const raw = body && body.stockId;
+    if (raw && raw === this.index.stockId) return { ok: false, error: '指数不可交易，仅供观察大盘' };
+    const stockId = this.resolveStockId(raw);
+    if (!stockId) return { ok: false, error: '未知股票' };
     const qty = Number(body.qty);
     const price = Number(body.price);
     if (!Number.isFinite(qty) || !Number.isFinite(price)) {
       return { ok: false, error: '价格或数量无效' };
     }
-    const res = this.market.place(acc, {
+    const res = this.markets.get(stockId).place(acc, {
       action: body.action,
       qty,
       price,
@@ -380,7 +532,7 @@ class Game {
       now: Date.now(),
     });
     if (res.ok) {
-      this.snapshotHolders(acc, 'order');
+      this.snapshotHolders(acc, 'order', stockId);
       this.broadcast();
     }
     return res.ok
@@ -388,12 +540,17 @@ class Game {
       : res;
   }
 
+  /** 撤单：按委托自身所属股票路由（交易所有各自的簿，撤单必须找对市场） */
   cancelOrder(token, orderId) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
-    const res = this.market.cancel(acc, orderId, Date.now());
+    const order = acc.orders.get(orderId);
+    if (!order) return { ok: false, error: '委托不存在或已完结' };
+    const market = this.markets.get(order.stockId);
+    if (!market) return { ok: false, error: '未知股票' };
+    const res = market.cancel(acc, orderId, Date.now());
     if (res.ok) {
-      this.snapshotHolders(acc, 'cancel');
+      this.snapshotHolders(acc, 'cancel', order.stockId);
       this.broadcast();
     }
     return res.ok ? { ok: true, order: this.serializeOrder(res.order, Date.now()) } : res;
@@ -401,41 +558,57 @@ class Game {
 
   // ---------- 融券：挂借 / 撤借 ----------
 
-  /** 从账户挂借量重建池子聚合值（新开局全部为 0，续跑时从存档恢复） */
+  /** 从账户各股票的挂借量重建每只股票的池子聚合值（新开局全为 0，续跑时从存档恢复） */
   rebuildLendingPool() {
-    let total = 0;
-    for (const acc of this.store.all()) total += acc.lendOffered || 0;
-    this.market.lendTotal = total;
-    // 借出量 = 未平空头（非裸空模式下空头都来自池）；裸空模式不走池
-    this.market.lendBorrowed = config.margin.allowNakedShort ? 0 : Math.min(this.market.shortInterest, total);
-    this.market.lendReserved = 0; // 活动委托回填时单独累计
+    for (const stock of this.stocks) {
+      const market = this.markets.get(stock.id);
+      let total = 0;
+      for (const acc of this.store.all()) {
+        const led = acc.ledger.get(stock.id);
+        if (led) total += led.lendOffered || 0;
+      }
+      market.lendTotal = total;
+      // 借出量 = 未平空头（非裸空模式下空头都来自池）；裸空模式不走池
+      market.lendBorrowed = config.margin.allowNakedShort
+        ? 0
+        : Math.min(market.shortInterest, total);
+      market.lendReserved = 0; // 活动委托回填时单独累计
+    }
   }
 
-  /** 挂借：把可卖持仓划入融券池生息 */
-  lend(token, qty) {
+  /** 挂借：把某只股票的可卖持仓划入该股的融券池生息 */
+  lend(token, qty, stockIdRaw) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
     if (acc.isNPC) return { ok: false, error: '仅玩家可操作挂借' };
-    const r = this.market.lendShares(acc, qty, Date.now());
+    const stockId = this.resolveStockId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知股票' };
+    const r = this.markets.get(stockId).lendShares(acc, qty, Date.now());
     if (r.ok) {
-      logger.info(`[我是股神] 账户 ${acc.name} 挂借 ${r.qty} 股（累计 ${r.lendOffered}，可借 ${r.available}）`);
+      logger.info(
+        `[我是股神] 账户 ${acc.name} 挂借 ${this.stocksById.get(stockId).name} ${r.qty} 股（累计 ${r.lendOffered}，可借 ${r.available}）`
+      );
       this.persist?.touch(acc);
-      this.snapshotHolders(acc, 'lend');
+      this.snapshotHolders(acc, 'lend', stockId);
       this.broadcast();
     }
     return r;
   }
 
   /** 撤借：撤回未被借走的挂借量 */
-  unlend(token, qty) {
+  unlend(token, qty, stockIdRaw) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
     if (acc.isNPC) return { ok: false, error: '仅玩家可操作撤借' };
-    const r = this.market.unlendShares(acc, qty, Date.now());
+    const stockId = this.resolveStockId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知股票' };
+    const r = this.markets.get(stockId).unlendShares(acc, qty, Date.now());
     if (r.ok) {
-      logger.info(`[我是股神] 账户 ${acc.name} 撤借 ${r.qty} 股（剩余 ${r.lendOffered}，可借 ${r.available}）`);
+      logger.info(
+        `[我是股神] 账户 ${acc.name} 撤借 ${this.stocksById.get(stockId).name} ${r.qty} 股（剩余 ${r.lendOffered}，可借 ${r.available}）`
+      );
       this.persist?.touch(acc);
-      this.snapshotHolders(acc, 'unlend');
+      this.snapshotHolders(acc, 'unlend', stockId);
       this.broadcast();
     }
     return r;
@@ -446,7 +619,7 @@ class Game {
   createAuto(token, body) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
-    const r = this.auto.create(acc, body && body.type, body && body.params);
+    const r = this.auto.create(acc, body && body.type, body && body.params, this.resolveStockId(body && body.stockId));
     if (r.ok) this.broadcast();
     return r;
   }
@@ -514,17 +687,29 @@ class Game {
 
   // ---------- 运维：停牌 ----------
 
-  /** 手动停牌，minutes 省略时用默认时长 */
+  /**
+   * 手动停牌：**全市场一起停**（10 只股票同时冻结，指数随之走平）。
+   * 单股停牌会让「停牌倒计时」变成对各股票含义不同的东西，运营口径也复杂化，
+   * 这里保持与单股时代一致的语义：一次操作停掉整个盘面。
+   * 只操作真实股票——指数是被合成的，没有独立的停牌语义，成分股停了它自然平。
+   */
   halt(minutes, reason) {
-    const r = this.market.halt(minutes ?? config.halt.defaultMinutes, reason);
+    const mins = minutes ?? config.halt.defaultMinutes;
+    let r = { ok: false, error: '停牌时长无效' };
+    for (const stock of this.stocks) {
+      r = this.markets.get(stock.id).halt(mins, reason);
+      if (!r.ok) return r;
+    }
     if (r.ok) this.broadcast();
     return r;
   }
 
-  /** 立即复牌 */
+  /** 立即复牌（全市场） */
   resume() {
     this.broadcast();
-    return this.market.resume();
+    let r = { ok: false, error: '未知股票' };
+    for (const stock of this.stocks) r = this.markets.get(stock.id).resume();
+    return r;
   }
 
   // ---------- 状态快照 ----------
@@ -534,20 +719,30 @@ class Game {
     return Math.max(0, config.trade.cooldownMs - (now - acc.lastOrderAt));
   }
 
+  /** 全部标的的行情快照（10 只股票 + 指数）。每 tick 只算一次，给所有 SSE 连接共用 */
+  marketSnapshots() {
+    const out = [];
+    for (const stock of this.stocks) out.push(this.markets.get(stock.id).snapshot());
+    return out;
+  }
+
   /** 玩家视角完整状态 */
   stateFor(token, opts = {}) {
     const now = Date.now();
     const acc = this.accountFor(token);
-    // 行情快照可由调用方传入：SSE 每 tick 要给每条连接推一份，市场部分完全一样
-    const market = opts.market || this.market.snapshot();
+    // 行情快照可由调用方传入：SSE 每 tick 要给每条连接推一份，行情部分完全一样
+    const markets = opts.markets || this.marketSnapshots();
+    const index = opts.index || this.index.snapshot();
     if (!this._stats) this.refreshStats();
     const stats = this._stats;
-    const snapList = acc ? this._holderSnapshots.get(acc.name) || [] : [];
-    const lastSnap = snapList.length ? snapList[snapList.length - 1] : null;
+    const primary = this.markets.get(this.stocks[0].id);
     const base = {
       serverTime: now,
       startedAt: this.startedAt,
-      market,
+      markets,
+      index,
+      // 兼容字段：老客户端只认单个 market。取第一只股票，新客户端一律走 markets
+      market: markets[0],
       news: this.news.tapeSnapshot(50),
       lastNews: this.lastNews,
       rules: {
@@ -567,14 +762,23 @@ class Game {
           ratio: config.margin.finance ? config.margin.finance.ratio : 1,
           baseMinuteRate: config.margin.finance ? config.margin.finance.baseMinuteRate : 0,
           maxMinuteRate: config.margin.finance ? config.margin.finance.maxMinuteRate : 0,
-          // 当前分钟息（百分数，0.01 = 0.01%/分）：1e6/1e4 比 r2 更干净地消掉浮点尾数
-          minuteRate: Math.round(this.market.financeMinuteRate() * 1e6) / 1e4,
+          // 当前分钟息（百分数，0.01 = 0.01%/分）：1e6/1e4 比 r2 更干净地消掉浮点尾数。
+          // 融资利率按市场整体现金紧张度算，各股同一档，取第一只即可
+          minuteRate: Math.round(primary.financeMinuteRate() * 1e6) / 1e4,
         },
         initialCash: config.account.initialCash,
-        lotSize: this.stock.lotSize,
+        lotSize: this.stocks[0].lotSize,
         maxDeviation: config.trade.maxDeviation,
         cagePct: config.trade.cagePct,
         priceLimit: config.priceLimit,
+        index: { code: this.index.stockId, name: this.index.stock.name, base: this.index.base },
+        stocks: this.stocks.map((s) => ({
+          id: s.id,
+          name: s.name,
+          alias: s.alias,
+          lotSize: s.lotSize,
+          floatShares: s.floatShares,
+        })),
         deposit: {
           enabled: !!config.account.deposit.enabled,
           maxLifetime: config.account.deposit.maxLifetime,
@@ -590,34 +794,30 @@ class Game {
       },
       players: stats.players,
       online: this.store.playerCount,
-      topHolders: this.serializeTopHolders(stats.topHolders, acc),
-      // 「较上次操作」的基线时刻：没有快照（未登录）时为 null
-      holderSnapshot: lastSnap
-        ? { t: lastSnap.t, action: lastSnap.action, count: snapList.length, limit: HOLDER_SNAPSHOT_LIMIT }
-        : null,
-      halt: this.market.haltInfo(now),
+      // 股东榜改为按需拉取（/api/holders?stock=X）：10 只股票 × 前 30 名每 tick 全推会把帧撑爆
+      halt: primary.haltInfo(now),
     };
-    if (opts.withHistory) base.priceHistory = this.market.priceHistory;
     if (!acc) {
       base.account = null;
       return base;
     }
-    base.account = this.serializeAccount(acc, market.last, now);
+    base.account = this.serializeAccount(acc, now);
     base.cooldownLeft = this.cooldownLeft(acc, now);
     return base;
   }
 
-  serializeAccount(acc, last, now) {
-    const sid = this.stock.id;
+  /** 账户在某只股票上的持仓切片 */
+  serializePosition(acc, stock, now) {
+    const sid = stock.id;
+    const market = this.markets.get(sid);
+    const last = market.lastPrice;
     const longPos = acc.longs.get(sid);
     const shortPos = acc.shorts.get(sid);
     let longCost = 0;
-    let financeDebtOfLots = 0;
     const longLots = [];
     if (longPos) {
       for (const lot of longPos.lots) {
         longCost += lot.qty * lot.price;
-        financeDebtOfLots += lot.debt || 0;
         const lockedUntil = lot.ts + config.trade.lockMs;
         longLots.push({
           qty: lot.qty,
@@ -636,76 +836,72 @@ class Game {
       for (const lot of shortPos.lots) {
         shortCost += lot.qty * lot.price;
         shortMarginOfLots += lot.margin;
-        shortLots.push({
-          qty: lot.qty,
-          price: r2(lot.price),
-          margin: r2(lot.margin),
-        });
+        shortLots.push({ qty: lot.qty, price: r2(lot.price), margin: r2(lot.margin) });
       }
     }
-
     const longQty = acc.longQty(sid);
     const shortQty = acc.shortQty(sid);
+    const debt = r2(acc.financeDebt(sid));
+    const led = acc.ledger.get(sid);
+    const offered = led ? led.lendOffered || 0 : 0;
+    // 没持仓、没挂借、没负债的股票整条不下发（省帧体积）
+    if (longQty <= 0 && shortQty <= 0 && !offered && debt <= 0) return null;
+
     const longValue = r2(longQty * last);
     const shortValue = r2(shortQty * last);
-    const equity = r2(acc.equity(sid, last));
-    const longPnl = r2(longValue - longCost);
-    const shortPnl = r2(shortCost - shortValue);
 
     // 强平价推导（含融资负债与做空欠息）：cash+orderFrozen+shortMargin-debt-debtLend + (L-S)*P = 维持率×敞口×P
     // 空头强平价：K = ((1+m)*S - L) * P → P = K / ((1+m)S - L)；K 为负时空头端安全
     // K 的两项负债口径必须与 equity（maybeLiquidate 判定用）完全一致，否则显示与真实触发点分叉：
     // m 取自配置（写死数字改维持率后即失真），欠息也要扣（它同样进了 equity）
+    // 多股票：账户现金与保证金是共享的，所以 K 里要并入「其它股票的净持仓值」，
+    // 否则持有其它股票时这只的强平价会算得过高/过低。
+    // 但**维持线那一侧也要并入其它股票的敞口**：触发条件是组合口径的
+    // equity < 维持率 × 账户总敞口，只把其它股票算进 K、不算进维持线，
+    // 解出来的价格就不是真正的触发点（空头会偏低、多头会偏高），显示与强平脱钩
     const m = config.margin.maintenance;
+    const priceOf = (s) => this.markets.get(s).lastPrice;
+    let otherLong = 0;
+    let otherShort = 0;
+    let otherDebt = 0;
+    for (const [oid, pos] of acc.longs) {
+      if (oid === sid) continue;
+      otherLong += acc.longQty(oid) * priceOf(oid);
+      for (const lot of pos.lots) otherDebt += lot.debt || 0;
+    }
+    for (const [oid] of acc.shorts) {
+      if (oid === sid) continue;
+      otherShort += acc.shortQty(oid) * priceOf(oid);
+    }
+    const lendDebt = r2(acc.totalLendInterestDebt());
+    const K =
+      acc.cash + acc.orderFrozen + acc.shortMargin - debt - lendDebt + otherLong - otherShort - otherDebt;
+
+    // 空头强平价：K + (L−S)·P = 维持率 × (其它空头市值 + S·P) → P = (K − 维持率×其它空头市值) / ((1+m)S − L)
     let liquidationPrice = null;
-    const lendDebt = r2(acc.lendInterestDebt);
-    const riskDebt = r2(financeDebtOfLots + lendDebt); // 融资负债 + 做空欠息
-    const K = acc.cash + acc.orderFrozen + acc.shortMargin - riskDebt;
     const denom = (1 + m) * shortQty - longQty;
     if (shortQty > 0 && denom > 0) {
-      const p = K / denom;
+      const p = (K - m * otherShort) / denom;
       if (p > 0) liquidationPrice = r2(p);
     }
-    // 多头（融资）强平价：K + (1-维持率)*Lq*P - Sq*P = 0 → P = -K / ((1-m)*Lq - Sq)
+    // 多头（融资）强平价：K + (L−S)·P = 维持率 × (其它多头市值 + L·P)
+    //   → P = (维持率×其它多头市值 − K) / ((1−m)L − S)
     let liquidationPriceLong = null;
     const denomL = (1 - m) * longQty - shortQty;
-    if (r2(financeDebtOfLots) > 0 && longQty > 0 && K < 0 && denomL > 0) {
-      const p = -K / denomL;
+    if (debt > 0 && longQty > 0 && m * otherLong - K > 0 && denomL > 0) {
+      const p = (m * otherLong - K) / denomL;
       if (p > 0) liquidationPriceLong = r2(p);
     }
 
-    const orders = [];
-    for (const o of acc.orders.values()) {
-      orders.push(this.serializeOrder(o, now));
-    }
-    const orderHistory = acc.orderHistory.slice(0, 50).map((o) => this.serializeOrder(o, now));
-
-    const trades = acc.tradeHistory.slice(0, 50).map((t) => ({
-      id: t.id,
-      orderId: t.orderId,
-      action: t.action,
-      price: t.price,
-      qty: t.qty,
-      t: t.t,
-      side: t.side,
-    }));
-
     return {
-      name: acc.name,
-      cash: r2(acc.cash),
-      orderFrozen: r2(acc.orderFrozen),
-      shortMargin: r2(acc.shortMargin),
-      financeDebt: r2(financeDebtOfLots), // 融资负债（本金 + 已摊利息）
-      financePrincipal: r2(acc.financePrincipal(sid)), // 其中还没还的借入本金（负债 − 本金 = 未还利息）
-      financeInterest: r2(acc.financeInterestAccrued || 0), // 累计已计利息（含已随平仓还掉的部分，展示用）
-      equity,
-      realizedPnL: r2(acc.realizedPnL),
-      deposited: r2(acc.deposited || 0), // 终身累计加钱额
+      stockId: sid,
+      name: stock.name,
+      last,
       long: {
         qty: longQty,
         cost: r2(longCost),
         value: longValue,
-        pnl: longPnl,
+        pnl: r2(longValue - longCost),
         lots: longLots,
         sellable: acc.freeSellableLong(sid, now),
       },
@@ -714,16 +910,73 @@ class Game {
         cost: r2(shortCost),
         value: shortValue,
         margin: r2(shortMarginOfLots),
-        pnl: shortPnl,
+        pnl: r2(shortCost - shortValue),
         lots: shortLots,
         coverable: acc.coverableShort(sid),
       },
-      // 风险度 = （空头市值 + 融资负债 + 做空欠息）/ 权益
-      marginUsage: riskDebt > 0 && equity > 0 ? r2(((shortValue + riskDebt) / equity) * 100) : 0,
+      financeDebt: debt, // 融资负债（本金 + 已摊利息）
+      financePrincipal: r2(acc.financePrincipal(sid)), // 其中还没还的借入本金
+      financeInterest: r2(led ? led.financeInterestAccrued || 0 : 0), // 该股累计已计利息（展示用）
       liquidationPrice,
       liquidationPriceLong,
-      // 融券：本人挂借 / 被借走 / 累计利息（被借走 = 挂借 × 池子借出率）
-      lending: this.serializeLending(acc),
+      lending: this.serializeLending(acc, sid),
+    };
+  }
+
+  serializeAccount(acc, now) {
+    const positions = [];
+    for (const stock of this.stocks) {
+      const p = this.serializePosition(acc, stock, now);
+      if (p) positions.push(p);
+    }
+    const priceOf = (s) => this.markets.get(s).lastPrice;
+    const equity = r2(acc.equity(priceOf));
+    const longValue = r2(acc.totalLongValue(priceOf));
+    const shortValue = r2(acc.totalShortMV(priceOf));
+    const debt = r2(acc.totalFinanceDebt());
+    const lendDebt = r2(acc.totalLendInterestDebt());
+    // 累计已计利息是展示口径（按股票加总）
+    let financeInterest = 0;
+    let financePrincipal = 0;
+    for (const l of acc.ledger.values()) financeInterest += l.financeInterestAccrued || 0;
+    for (const p of acc.longs.values()) {
+      for (const lot of p.lots) financePrincipal += lot.principal || 0;
+    }
+
+    const orders = [];
+    for (const o of acc.orders.values()) orders.push(this.serializeOrder(o, now));
+    const orderHistory = acc.orderHistory.slice(0, 50).map((o) => this.serializeOrder(o, now));
+    const trades = acc.tradeHistory.slice(0, 50).map((t) => ({
+      id: t.id,
+      orderId: t.orderId,
+      stockId: t.stockId,
+      action: t.action,
+      price: t.price,
+      qty: t.qty,
+      t: t.t,
+      side: t.side,
+    }));
+
+    const riskDebt = r2(debt + lendDebt);
+    return {
+      name: acc.name,
+      cash: r2(acc.cash),
+      orderFrozen: r2(acc.orderFrozen),
+      shortMargin: r2(acc.shortMargin),
+      financeDebt: debt, // 跨股票合计
+      financePrincipal: r2(financePrincipal),
+      financeInterest: r2(financeInterest),
+      equity,
+      realizedPnL: r2(acc.realizedPnL),
+      deposited: r2(acc.deposited || 0), // 终身累计加钱额
+      positions,
+      // 汇总口径（客户端资产区用）：全部股票的持仓市值与浮盈
+      longValue,
+      shortValue,
+      longPnl: r2(positions.reduce((a, p) => a + p.long.pnl, 0)),
+      shortPnl: r2(positions.reduce((a, p) => a + p.short.pnl, 0)),
+      // 风险度 = （空头市值 + 融资负债 + 做空欠息）/ 权益
+      marginUsage: riskDebt > 0 && equity > 0 ? r2(((shortValue + riskDebt) / equity) * 100) : 0,
       orders,
       orderHistory,
       trades,
@@ -735,6 +988,7 @@ class Game {
   serializeOrder(o, now) {
     return {
       id: o.id,
+      stockId: o.stockId,
       action: o.action,
       price: o.price,
       qty: o.qty,
@@ -745,55 +999,60 @@ class Game {
     };
   }
 
-  /** 账户融券视角：可挂借、挂借中、被借走、可撤、累计利息 */
-  serializeLending(acc) {
-    const m = this.market;
-    const offered = acc.lendOffered || 0;
+  /** 账户在某只股票上的融券视角：可挂借、挂借中、被借走、可撤、累计利息 */
+  serializeLending(acc, stockId) {
+    const m = this.markets.get(stockId);
+    const stock = this.stocksById.get(stockId);
+    const led = acc.ledger.get(stockId);
+    const offered = led ? led.lendOffered || 0 : 0;
     const lentOut = Math.floor(offered * m.lendUtilization());
     // 可撤口径必须与撤借闸门一致（含在途开空占用），否则 UI 显示可撤、点撤借却被拒
     const removable = m.lendRemovableQty(acc);
-    const free = acc.freeSellableLong(this.stock.id, Date.now());
+    const free = acc.freeSellableLong(stockId, Date.now());
     return {
+      stockId,
       offered,
       lentOut,
       removable,
-      freeToLend: Math.max(0, Math.floor(free / this.stock.lotSize) * this.stock.lotSize),
-      interestEarned: r2(acc.lendInterestEarned || 0),
-      interestDebt: r2(acc.lendInterestDebt || 0),
-      interestPaid: r2(acc.lendInterestPaid || 0),
+      freeToLend: Math.max(0, Math.floor(free / stock.lotSize) * stock.lotSize),
+      interestEarned: r2(led ? led.lendInterestEarned || 0 : 0),
+      interestDebt: r2(led ? led.lendInterestDebt || 0 : 0),
+      interestPaid: r2(led ? led.lendInterestPaid || 0 : 0),
     };
   }
 
-  /** 玩家资产排行 */
+  /** 玩家资产排行（组合口径：跨全部股票的总权益） */
   leaderboard() {
-    const last = this.market.lastPrice;
+    const priceOf = (s) => this.markets.get(s).lastPrice;
     return this.store
       .players()
-      .map((a) => ({ name: a.name, equity: r2(a.equity(this.stock.id, last)) }))
+      .map((a) => ({ name: a.name, equity: r2(a.equity(priceOf)) }))
       .sort((x, y) => y.equity - x.equity)
       .slice(0, 20);
   }
 
-  /** 前十大股东（走 tick 缓存） */
-  topHolders() {
+  /** 某只股票的前十大股东（走 tick 缓存） */
+  topHolders(stockId) {
     if (!this._stats) this.refreshStats();
-    return this._stats.topHolders;
+    return this._stats.topHolders.get(stockId) || [];
   }
 
   /**
    * 前十大股东：按当前持股排序（含 NPC 与玩家）
    * change/changePct = 当前持股与占比 − 开服/建仓时的持股与占比
    */
-  computeTopHolders(limit = 10) {
-    const sid = this.stock.id;
-    const total = this.stock.floatShares;
+  computeTopHolders(stockId, limit = 10) {
+    const stock = this.stocksById.get(stockId);
+    if (!stock) return [];
+    const total = stock.floatShares;
     const rows = [];
     for (const acc of this.store.all()) {
       if (acc.name === 'SYSTEM') continue;
-      const qty = acc.longQty(sid);
+      const qty = acc.longQty(stockId);
       if (qty <= 0) continue;
       const role = acc.isNPC ? acc.role || 'npc' : 'player';
-      const base = acc.initialLong || 0;
+      // NPC 的初始持股记录在账户上（每股一套 NPC 池，账户只属于一只股票）
+      const base = acc.isNPC ? acc.initialLong || 0 : 0;
       rows.push({
         name: acc.name,
         role, // inst / hot / big / mid / small / player
@@ -809,92 +1068,155 @@ class Game {
 
   // ---------- 股东快照（内存环形缓冲，重启清空） ----------
 
+  /** 快照键：账号 + 股票。股东榜是每只股票一份，快照也必须按股票分开存 */
+  static snapKey(name, stockId) {
+    return `${name}#${stockId}`;
+  }
+
   /**
-   * 给某账户记一份「操作时刻」的股东快照。
+   * 给某账户在某只股票上记一份「操作时刻」的股东快照。
    * 存的是当时按持股排序的前 N 名（含占比），既用来算「较上次操作」的变动，
    * 也用来画某个股东的占比走势。只走内存，不入库、重启清空。
    */
-  snapshotHolders(acc, action) {
+  snapshotHolders(acc, action, stockId) {
     if (!acc) return null;
-    const rows = this.computeTopHolders(HOLDER_SNAPSHOT_ROWS).map((r) => ({
+    const rows = this.computeTopHolders(stockId, HOLDER_SNAPSHOT_ROWS).map((r) => ({
       name: r.name,
       qty: r.qty,
       pct: r.pct,
     }));
-    const snap = { t: Date.now(), tick: this.tickCount, action, rows };
+    const snap = { t: Date.now(), tick: this.tickCount, action, stockId, rows };
     // 快照是不可变的，索引直接挂上去（不可枚举，不进 JSON）：
     // 每 tick 每条 SSE 连接都要查一次，别再重复建 Map
     const byName = new Map();
     for (const r of rows) byName.set(r.name, r);
     Object.defineProperty(snap, 'byName', { value: byName });
-    let list = this._holderSnapshots.get(acc.name);
+    const key = Game.snapKey(acc.name, stockId);
+    let list = this._holderSnapshots.get(key);
     if (!list) {
       list = [];
-      this._holderSnapshots.set(acc.name, list);
+      this._holderSnapshots.set(key, list);
     }
     list.push(snap);
     if (list.length > HOLDER_SNAPSHOT_LIMIT) list.splice(0, list.length - HOLDER_SNAPSHOT_LIMIT);
     return snap;
   }
 
-  /** 某账户最近一次股东快照（没有则 null） */
-  lastHolderSnapshot(name) {
-    const list = this._holderSnapshots.get(name);
+  /** 某账户在某只股票上最近一次股东快照（没有则 null） */
+  lastHolderSnapshot(name, stockId) {
+    const list = this._holderSnapshots.get(Game.snapKey(name, stockId));
     return list && list.length ? list[list.length - 1] : null;
   }
 
   /**
-   * 股东占比走势：本账户快照序列里每个股东在各次操作时的持股与占比。
+   * 股东占比走势：本账户在某只股票上的快照序列里每个股东在各次操作时的持股与占比。
    * 客户端拿到后按点击的股东名自己抽曲线，省得每点一行都来回请求。
    */
-  holderHistoryFor(token) {
+  holderHistoryFor(token, stockIdRaw) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
-    const list = this._holderSnapshots.get(acc.name) || [];
+    const stockId = this.resolveStockId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知股票' };
+    const list = this._holderSnapshots.get(Game.snapKey(acc.name, stockId)) || [];
     return {
       ok: true,
       account: acc.name,
+      stockId,
       limit: HOLDER_SNAPSHOT_LIMIT,
       snapshots: list.map((s) => ({ t: s.t, tick: s.tick, action: s.action, rows: s.rows })),
     };
   }
 
   /**
-   * 前十大股东 + 两层变动：
+   * 某只股票的前十大股东 + 两层变动（按需下发，见 /api/holders）：
    * - change / changePct：相对开服建仓
-   * - prevQty / prevPct / dQty / dPct：相对本账户最近一次操作快照。
+   * - prevQty / prevPct / dQty / dPct：相对本账户在该股上最近一次操作快照。
    *   没有快照（还没登录过）或该股东当时未进快照前 N 名时，这四个字段为 null，
    *   客户端据此显示「--」或「新进」，不做「上次持股按 0 算」的臆测
    */
-  serializeTopHolders(rows, acc) {
-    const snap = acc ? this.lastHolderSnapshot(acc.name) : null;
+  holdersFor(token, stockIdRaw) {
+    const stockId = this.resolveStockId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知股票' };
+    const acc = this.accountFor(token);
+    const rows = this.topHolders(stockId);
+    const snap = acc ? this.lastHolderSnapshot(acc.name, stockId) : null;
     const prev = snap ? snap.byName : null;
-    return rows.map((h) => {
-      const p = prev ? prev.get(h.name) || null : null;
-      return {
-        name: h.name,
-        role: h.role,
-        qty: h.qty,
-        pct: h.pct,
-        change: h.change,
-        changePct: h.changePct,
-        prevQty: p ? p.qty : null,
-        prevPct: p ? p.pct : null,
-        dQty: p ? h.qty - p.qty : null,
-        dPct: p ? r2(h.pct - p.pct) : null,
-      };
-    });
+    const list = acc ? this._holderSnapshots.get(Game.snapKey(acc.name, stockId)) || [] : [];
+    return {
+      ok: true,
+      stockId,
+      stockName: this.stocksById.get(stockId).name,
+      rows: rows.map((h) => {
+        const p = prev ? prev.get(h.name) || null : null;
+        return {
+          name: h.name,
+          role: h.role,
+          qty: h.qty,
+          pct: h.pct,
+          change: h.change,
+          changePct: h.changePct,
+          prevQty: p ? p.qty : null,
+          prevPct: p ? p.pct : null,
+          dQty: p ? h.qty - p.qty : null,
+          dPct: p ? r2(h.pct - p.pct) : null,
+        };
+      }),
+      holderSnapshot: snap
+        ? { t: snap.t, action: snap.action, count: list.length, limit: HOLDER_SNAPSHOT_LIMIT }
+        : null,
+    };
   }
 
-  /** 股东合计（校验流通盘用） */
-  holdersSummary() {
-    const sid = this.stock.id;
+  /** 某只股票的股东合计（校验流通盘用） */
+  holdersSummary(stockIdRaw) {
+    const stockId = this.resolveStockId(stockIdRaw);
+    const stock = this.stocksById.get(stockId);
+    if (!stock) return null;
     let total = 0;
     for (const acc of this.store.all()) {
       if (acc.name === 'SYSTEM') continue;
-      total += acc.longQty(sid);
+      total += acc.longQty(stockId);
     }
-    return { longTotal: total, float: this.stock.floatShares, shortInterest: this.market.shortInterest };
+    return {
+      stockId,
+      longTotal: total,
+      float: stock.floatShares,
+      shortInterest: this.markets.get(stockId).shortInterest,
+    };
+  }
+
+  /**
+   * 某只标的（股票或指数）的分时序列。客户端切股票时按需拉全量，SSE 帧里不带，
+   * 否则 10 只股票各 10300 点会把每帧撑到几 MB。
+   */
+  historyFor(stockIdRaw) {
+    const stockId = this.resolveMarketId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知标的' };
+    const market = this.markets.get(stockId);
+    return { ok: true, stockId, priceHistory: market.priceHistory };
+  }
+
+  /**
+   * 全部标的的**降采样**分时，只用于主页行情列表的迷你走势。
+   * 全量分时是 10 只 × 10300 点（几 MB），首屏拉不动；这里每只压到 ~60 点，
+   * 一次请求把所有股票的走势形状都拿到，之后客户端靠 SSE 自己往后追加。
+   */
+  sparksFor(points = 60) {
+    const sparks = {};
+    for (const [id, m] of this.markets) {
+      const h = m.priceHistory;
+      if (!h.length) {
+        sparks[id] = [];
+        continue;
+      }
+      const step = Math.max(1, Math.ceil(h.length / points));
+      const out = [];
+      for (let i = 0; i < h.length; i += step) out.push({ t: h[i].t, price: h[i].price, vol: h[i].vol });
+      const tail = h[h.length - 1];
+      if (out[out.length - 1].t !== tail.t) out.push({ t: tail.t, price: tail.price, vol: tail.vol });
+      sparks[id] = out;
+    }
+    return { ok: true, sparks };
   }
 }
 

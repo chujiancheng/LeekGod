@@ -24,18 +24,25 @@ const gridSellPrice = (base, stepPct, level) =>
 
 class AutoManager {
   /**
-   * @param {import('./market').Market} market
-   * @param {{id:string, lotSize:number, initPrice:number}} stock
+   * @param {Map<string, import('./market').Market>} markets 全部市场（stockId -> Market）
+   * @param {Map<string, {id:string, name:string, lotSize:number, initPrice:number}>} stocks
    * @param {import('./store').Store} store
    */
-  constructor(market, stock, store) {
-    this.market = market;
-    this.stock = stock;
+  constructor(markets, stocks, store) {
+    this.markets = markets;
+    this.stocks = stocks;
     this.store = store;
     this.byId = new Map();
     this.seq = 0;
     // 由 Game 注入的持久化器（与 market.journal 同一模式）
     this.journal = null;
+  }
+
+  /** 策略所属的股票与市场；股票已下线时返回 null */
+  ctxOf(stockId) {
+    const market = this.markets.get(stockId);
+    const stock = this.stocks.get(stockId);
+    return market && stock ? { market, stock } : null;
   }
 
   listFor(name) {
@@ -48,13 +55,16 @@ class AutoManager {
 
   // ---------- 增删改 ----------
 
-  create(account, type, paramsRaw) {
+  create(account, type, paramsRaw, stockId) {
     if (!account || account.isNPC) return { ok: false, error: '仅玩家账户可使用自动交易' };
     if (!TYPE_LABEL[type]) return { ok: false, error: '未知策略类型' };
+    const ctx = this.ctxOf(stockId);
+    if (!ctx) return { ok: false, error: '未知股票' };
+    // 上限按账户跨股票合计（20 条是防刷的账户级配额，不是每只股票 20 条）
     if (this.listFor(account.name).length >= config.auto.maxPerAccount) {
       return { ok: false, error: `单账户最多 ${config.auto.maxPerAccount} 条策略，请先删除旧策略` };
     }
-    const v = this.validate(type, paramsRaw);
+    const v = this.validate(type, paramsRaw, ctx);
     if (!v.ok) return v;
 
     this.seq += 1;
@@ -62,6 +72,7 @@ class AutoManager {
     const s = {
       id: 'A' + this.seq,
       account: account.name,
+      stockId: ctx.stock.id,
       type,
       enabled: true,
       done: false,
@@ -72,7 +83,7 @@ class AutoManager {
       updatedAt: now,
     };
     this.byId.set(s.id, s);
-    this.logEvent(s, now, `策略已创建（${TYPE_LABEL[type]}）`);
+    this.logEvent(s, now, `策略已创建（${TYPE_LABEL[type]}·${ctx.stock.name}）`);
     this.journal?.autoChanged(s);
     return { ok: true, id: s.id };
   }
@@ -108,9 +119,12 @@ class AutoManager {
     for (const row of rows) {
       try {
         if (!row || !TYPE_LABEL[row.type] || !row.id) continue;
+        // 股票已不在本局配置里的策略直接跳过（配置变动后不该留孤儿策略在跑）
+        if (!row.stock_id || !this.ctxOf(row.stock_id)) continue;
         const s = {
           id: String(row.id),
           account: String(row.account),
+          stockId: String(row.stock_id),
           type: row.type,
           enabled: !!row.enabled,
           done: !!row.done,
@@ -133,14 +147,17 @@ class AutoManager {
   // ---------- 主循环驱动 ----------
 
   step(now) {
-    if (this.market.isHalted(now)) return;
     for (const s of this.byId.values()) {
       if (!s.enabled || s.done) continue;
+      const ctx = this.ctxOf(s.stockId);
+      if (!ctx) continue;
+      // 停牌按股票单独判断：只有本股在停牌才冻结它的策略，其它股票照跑
+      if (ctx.market.isHalted(now)) continue;
       try {
-        if (s.type === 'tps') this.stepTps(s, now);
-        else if (s.type === 'grid') this.stepGrid(s, now);
-        else if (s.type === 'ma') this.stepMa(s, now);
-        else if (s.type === 'dca') this.stepDca(s, now);
+        if (s.type === 'tps') this.stepTps(s, ctx, now);
+        else if (s.type === 'grid') this.stepGrid(s, ctx, now);
+        else if (s.type === 'ma') this.stepMa(s, ctx, now);
+        else if (s.type === 'dca') this.stepDca(s, ctx, now);
       } catch (e) {
         logger.error(`[我是股神] 自动策略 ${s.id}(${s.type}) 执行异常:`, e);
         this.logEvent(s, now, '执行异常，本 tick 跳过');
@@ -151,15 +168,15 @@ class AutoManager {
 
   // ---------- 止盈止损（一次性触发） ----------
 
-  stepTps(s, now) {
+  stepTps(s, ctx, now) {
     const acc = this.store.get(s.account);
     if (!acc) {
       this.markDone(s, now, '账户不存在，策略结束');
       return;
     }
     const p = s.params;
-    const last = this.market.lastPrice;
-    const sid = this.stock.id;
+    const last = ctx.market.lastPrice;
+    const sid = ctx.stock.id;
     const isLong = p.position === 'long';
     const total = isLong ? acc.longQty(sid) : acc.shortQty(sid);
     if (total <= 0) {
@@ -189,8 +206,8 @@ class AutoManager {
       return;
     }
     const action = isLong ? ACTIONS.SELL_CLOSE : ACTIONS.BUY_CLOSE;
-    const price = isLong ? this.pegSell(last) : this.pegBuy(last);
-    const r = this.market.place(acc, { action, qty, price, now });
+    const price = isLong ? this.pegSell(ctx.market, last) : this.pegBuy(ctx.market, last);
+    const r = ctx.market.place(acc, { action, qty, price, now });
     if (r.ok) {
       s.state.waiting = false;
       this.markDone(s, now, `已触发${isLong ? '卖出平多' : '买入平空'} ${qty}股 @${price}，策略完成`);
@@ -202,7 +219,7 @@ class AutoManager {
 
   // ---------- 网格（循环） ----------
 
-  stepGrid(s, now) {
+  stepGrid(s, ctx, now) {
     const acc = this.store.get(s.account);
     if (!acc) {
       this.markDone(s, now, '账户不存在，策略结束');
@@ -212,8 +229,8 @@ class AutoManager {
     const st = s.state;
     if (!Array.isArray(st.buys)) st.buys = [];
     if (!Number.isFinite(st.nextLevel)) st.nextLevel = 0;
-    const sid = this.stock.id;
-    const last = this.market.lastPrice;
+    const sid = ctx.stock.id;
+    const last = ctx.market.lastPrice;
 
     // 1) 结算已完结的网格挂单（成交部分进格子库存）
     for (const key of ['pendingBuyId', 'pendingSellId']) {
@@ -250,10 +267,10 @@ class AutoManager {
         const qty = Math.min(entry.shares, sellable);
         if (qty > 0) {
           // 买一已 ≥ 目标价就按买价打（锁定更高卖价），否则挂目标价等
-          const bid = this.market.book.bids[0];
+          const bid = ctx.market.book.bids[0];
           const raw = bid && bid.price >= target ? bid.price : target;
-          const price = this.clampLimit(raw, last);
-          const r = this.market.place(acc, { action: ACTIONS.SELL_CLOSE, qty, price, now });
+          const price = this.clampLimit(ctx.market, raw, last);
+          const r = ctx.market.place(acc, { action: ACTIONS.SELL_CLOSE, qty, price, now });
           if (r.ok) {
             st.pendingSellId = r.order.id;
             this.logEvent(s, now, `第${entry.level}格触发卖出 ${qty}股 @${price}`);
@@ -281,10 +298,10 @@ class AutoManager {
           }
         } else {
           // 卖一已 ≤ 格子价就按卖价打（更快成交），否则挂格子价
-          const ask = this.market.book.asks[0];
+          const ask = ctx.market.book.asks[0];
           const raw = ask && ask.price <= bp ? ask.price : bp;
-          const price = this.clampLimit(raw, last);
-          const r = this.market.place(acc, { action: ACTIONS.BUY_OPEN, qty: p.qty, price, now });
+          const price = this.clampLimit(ctx.market, raw, last);
+          const r = ctx.market.place(acc, { action: ACTIONS.BUY_OPEN, qty: p.qty, price, now });
           if (r.ok) {
             st.pendingBuyId = r.order.id;
             st.pendingBuyLevel = level;
@@ -303,7 +320,7 @@ class AutoManager {
 
   // ---------- 双均线（金叉买 / 死叉卖） ----------
 
-  stepMa(s, now) {
+  stepMa(s, ctx, now) {
     const acc = this.store.get(s.account);
     if (!acc) {
       this.markDone(s, now, '账户不存在，策略结束');
@@ -311,7 +328,7 @@ class AutoManager {
     }
     const p = s.params;
     const st = s.state;
-    const hist = this.market.priceHistory;
+    const hist = ctx.market.priceHistory;
     if (hist.length < p.slow) {
       if (!st.warmLogged) {
         st.warmLogged = true;
@@ -353,18 +370,18 @@ class AutoManager {
     if (st.pendingSignal == null) return;
     if (this.cooldownLeft(acc, now) > 0) return;
 
-    const last = this.market.lastPrice;
-    const sid = this.stock.id;
+    const last = ctx.market.lastPrice;
+    const sid = ctx.stock.id;
     if (st.pendingSignal === 1) {
-      const price = this.pegBuy(last);
+      const price = this.pegBuy(ctx.market, last);
       const budget = acc.cash * (p.budgetPct / 100);
-      const lot = this.stock.lotSize;
+      const lot = ctx.stock.lotSize;
       const qty = Math.floor(budget / (price * (1 + config.trade.feeRate)) / lot) * lot;
       if (qty < lot) {
         this.clearSignal(s, now, '金叉触发但按投入比例可买资金不足，放弃本次买入');
         return;
       }
-      const r = this.market.place(acc, { action: ACTIONS.BUY_OPEN, qty, price, now });
+      const r = ctx.market.place(acc, { action: ACTIONS.BUY_OPEN, qty, price, now });
       if (r.ok) this.clearSignal(s, now, `金叉买入 ${qty}股 @${price}`);
       else if (!/频繁/.test(r.error || '')) this.clearSignal(s, now, `金叉买入失败: ${r.error}`);
     } else {
@@ -373,8 +390,8 @@ class AutoManager {
         if (acc.longQty(sid) <= 0) this.clearSignal(s, now, '死叉触发但无多头持仓，跳过本次卖出');
         return; // 锁仓中：等解锁后下个 tick 重试
       }
-      const price = this.pegSell(last);
-      const r = this.market.place(acc, { action: ACTIONS.SELL_CLOSE, qty, price, now });
+      const price = this.pegSell(ctx.market, last);
+      const r = ctx.market.place(acc, { action: ACTIONS.SELL_CLOSE, qty, price, now });
       if (r.ok) this.clearSignal(s, now, `死叉卖出 ${qty}股 @${price}`);
       else if (!/频繁/.test(r.error || '')) this.clearSignal(s, now, `死叉卖出失败: ${r.error}`);
     }
@@ -382,7 +399,7 @@ class AutoManager {
 
   // ---------- 定投 ----------
 
-  stepDca(s, now) {
+  stepDca(s, ctx, now) {
     const acc = this.store.get(s.account);
     if (!acc) {
       this.markDone(s, now, '账户不存在，策略结束');
@@ -398,16 +415,16 @@ class AutoManager {
     }
     if (this.cooldownLeft(acc, now) > 0) return;
 
-    const last = this.market.lastPrice;
-    const price = this.pegBuy(last);
+    const last = ctx.market.lastPrice;
+    const price = this.pegBuy(ctx.market, last);
     const budget = Math.min(p.amount, acc.cash);
-    const lot = this.stock.lotSize;
+    const lot = ctx.stock.lotSize;
     const qty = Math.floor(budget / (price * (1 + config.trade.feeRate)) / lot) * lot;
     if (qty < lot) {
       this.markDone(s, now, '可用资金不足以完成 1 手定投，策略自动结束');
       return;
     }
-    const r = this.market.place(acc, { action: ACTIONS.BUY_OPEN, qty, price, now });
+    const r = ctx.market.place(acc, { action: ACTIONS.BUY_OPEN, qty, price, now });
     if (r.ok) {
       st.doneTimes = (st.doneTimes || 0) + 1;
       st.totalSpent = r2((st.totalSpent || 0) + price * qty);
@@ -433,25 +450,33 @@ class AutoManager {
     return Math.max(0, config.trade.cooldownMs - (now - acc.lastOrderAt));
   }
 
-  /** 限价夹进「最新价 ± maxDeviation」窗口，避免委托被偏离校验拒掉 */
-  clampLimit(price, last) {
-    const max = last * (1 + config.trade.maxDeviation);
-    const min = Math.max(0.01, last * (1 - config.trade.maxDeviation));
-    return this.market.roundPrice(Math.min(max, Math.max(min, price)));
+  /**
+   * 限价夹进「最新价 ± maxDeviation」窗口，避免委托被偏离校验拒掉。
+   *
+   * 必须留出余量：夹到窗口边界后还要取整到分，而 `round()` 可能把价格推到边界之外
+   * （如 19.99 的上界 29.985 取整成 29.99，偏离变成 50.03% 就被服务端拒单）。
+   * 盘口里有脱离行情的旧挂单时（玩家/网格/均线留下的远价单），贴对手价就会取到这种价格，
+   * 策略于是每个间隔都下单失败——这里按「至少一分钱或 0.5%」的余量把价格收进窗口内侧。
+   */
+  clampLimit(market, price, last) {
+    const margin = Math.max(0.01, last * 0.005);
+    const hi = market.roundPrice(last * (1 + config.trade.maxDeviation) - margin);
+    const lo = Math.max(0.01, market.roundPrice(last * (1 - config.trade.maxDeviation) + margin));
+    return market.roundPrice(Math.min(hi, Math.max(lo, price)));
   }
 
   /** 主动买入挂价：优先贴卖一 */
-  pegBuy(last) {
-    const ask = this.market.book.asks[0];
-    const raw = ask ? ask.price : this.market.roundPrice(last * 1.002);
-    return this.clampLimit(raw, last);
+  pegBuy(market, last) {
+    const ask = market.book.asks[0];
+    const raw = ask ? ask.price : market.roundPrice(last * 1.002);
+    return this.clampLimit(market, raw, last);
   }
 
   /** 主动卖出挂价：优先贴买一 */
-  pegSell(last) {
-    const bid = this.market.book.bids[0];
-    const raw = bid ? bid.price : this.market.roundPrice(last * 0.998);
-    return this.clampLimit(raw, last);
+  pegSell(market, last) {
+    const bid = market.book.bids[0];
+    const raw = bid ? bid.price : market.roundPrice(last * 0.998);
+    return this.clampLimit(market, raw, last);
   }
 
   markDone(s, now, text) {
@@ -475,11 +500,15 @@ class AutoManager {
 
   // ---------- 参数校验 ----------
 
-  validate(type, raw) {
+  /**
+   * 参数校验。基准价/手数的默认值取**策略所属股票**的行情与手数；
+   * 网格 base 缺省时用该股最新价，所以 ctx 必传。
+   */
+  validate(type, raw, ctx) {
     const p = raw || {};
     const num = (v) => Number(v);
-    const last = this.market.lastPrice || this.stock.initPrice;
-    const lot = this.stock.lotSize;
+    const last = ctx.market.lastPrice || ctx.stock.initPrice;
+    const lot = ctx.stock.lotSize;
 
     if (type === 'tps') {
       const position = p.position === 'short' ? 'short' : 'long';
@@ -554,8 +583,11 @@ class AutoManager {
   // ---------- 客户端快照 ----------
 
   serialize(s, now) {
+    const ctx = this.ctxOf(s.stockId);
     const out = {
       id: s.id,
+      stockId: s.stockId,
+      stockName: ctx ? ctx.stock.name : s.stockId,
       type: s.type,
       typeLabel: TYPE_LABEL[s.type] || s.type,
       enabled: s.enabled,
@@ -580,7 +612,7 @@ class AutoManager {
         pending: !!(st.pendingBuyId || st.pendingSellId),
       };
     } else if (s.type === 'ma') {
-      const histLen = this.market.priceHistory.length;
+      const histLen = ctx ? ctx.market.priceHistory.length : 0;
       out.state = {
         ready: histLen >= s.params.slow,
         warmupLeft: Math.max(0, s.params.slow - histLen),

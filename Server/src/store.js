@@ -11,16 +11,15 @@ class Account {
     this.isNPC = isNPC;
     this.role = role || (isNPC ? 'npc' : 'player'); // inst / hot / big / mid / small / player
     this.cash = config.account.initialCash;
-    this.orderFrozen = 0; // 挂单冻结（买入资金 / 开空保证金预估 / 费用预估）
-    this.shortMargin = 0; // 已成交开空的真实保证金
+    this.orderFrozen = 0; // 挂单冻结（买入资金 / 开空保证金预估 / 费用预估），跨股票汇总
+    this.shortMargin = 0; // 已成交开空的真实保证金合计（跨股票）
     this.realizedPnL = 0; // 已实现盈亏（累计）
     this.deposited = 0; // 终身累计加钱额（受 config.account.deposit.maxLifetime 封顶）
     this.initialLong = 0; // 开服/建仓时初始持股（用于股东变动统计）
-    this.lendOffered = 0; // 已挂入融券池的股数（从可卖持仓中冻结，被借走前可撤）
-    this.lendInterestEarned = 0; // 出借累计利息收入（展示用）
-    this.lendInterestDebt = 0; // 做空方欠息（现金+保证金都扣不动时挂账，计入权益、恢复后追缴）
-    this.lendInterestPaid = 0; // 做空方累计已付融券利息（展示用；欠息另有 lendInterestDebt）
-    this.financeInterestAccrued = 0; // 融资累计已计利息（展示用；同额已摊入批次负债并扣减 realizedPnL）
+    // 按股票的融券/融资明细。融券池每只股票一套，挂借量与欠息必须按股票记账：
+    // 混在一个数里会让 A 股的欠息被拿去补 B 股的出借人，撤借闸门也会串池
+    // { stockId: { lendOffered, lendInterestEarned, lendInterestDebt, lendInterestPaid, financeInterestAccrued } }
+    this.ledger = new Map();
     this.longs = new Map(); // stockId -> { lots: [{qty, price, ts, reserved, debt, principal}] }
     this.shorts = new Map(); // stockId -> { lots: [{qty, price, margin, reserved}] }
     this.orders = new Map(); // 挂单中的订单 id -> order
@@ -28,6 +27,60 @@ class Account {
     this.tradeHistory = []; // 最近成交
     this.lastOrderAt = null; // 上次下单时间（冷却），null 表示从未下单
     this.createdAt = Date.now();
+  }
+
+  /** 取某只股票的融券/计息明细（没有则建一条全零的） */
+  ledgerOf(stockId) {
+    let l = this.ledger.get(stockId);
+    if (!l) {
+      l = {
+        lendOffered: 0,
+        lendInterestEarned: 0,
+        lendInterestDebt: 0,
+        lendInterestPaid: 0,
+        financeInterestAccrued: 0,
+      };
+      this.ledger.set(stockId, l);
+    }
+    return l;
+  }
+
+  // ---------- 账户级汇总（多股票口径） ----------
+
+  /** 全部股票的多头市值合计 */
+  totalLongValue(priceOf) {
+    let v = 0;
+    for (const [stockId, p] of this.longs) {
+      if (!p.lots.length) continue;
+      v += this.longQty(stockId) * priceOf(stockId);
+    }
+    return v;
+  }
+
+  /** 全部股票的空头市值合计 */
+  totalShortMV(priceOf) {
+    let v = 0;
+    for (const [stockId, p] of this.shorts) {
+      if (!p.lots.length) continue;
+      v += this.shortQty(stockId) * priceOf(stockId);
+    }
+    return v;
+  }
+
+  /** 全部股票的融资负债合计 */
+  totalFinanceDebt() {
+    let d = 0;
+    for (const p of this.longs.values()) {
+      for (const lot of p.lots) d += lot.debt || 0;
+    }
+    return d;
+  }
+
+  /** 全部股票的做空欠息合计（负债，计入权益） */
+  totalLendInterestDebt() {
+    let d = 0;
+    for (const l of this.ledger.values()) d += l.lendInterestDebt || 0;
+    return d;
   }
 
   longPos(stockId) {
@@ -71,9 +124,10 @@ class Account {
     return n;
   }
 
-  /** 真正可卖：可卖多头中未挂入融券池的部分 */
+  /** 真正可卖：可卖多头中未挂入融券池的部分（挂借量按股票取） */
   freeSellableLong(stockId, now) {
-    return Math.max(0, this.sellableLong(stockId, now) - (this.lendOffered || 0));
+    const offered = this.ledgerOf(stockId).lendOffered || 0;
+    return Math.max(0, this.sellableLong(stockId, now) - offered);
   }
 
   /**
@@ -85,7 +139,7 @@ class Account {
     if (!p) return 0;
     let n = 0;
     for (const lot of p.lots) n += lot.qty - lot.reserved;
-    return Math.max(0, n - (this.lendOffered || 0));
+    return Math.max(0, n - (this.ledgerOf(stockId).lendOffered || 0));
   }
 
   /** 可平掉的空头（未被占用） */
@@ -281,26 +335,80 @@ class Account {
   }
 
   /**
-   * 权益 = 可用现金 + 挂单冻结 + 空头保证金 + 多头市值 - 空头市值 - 融资负债 - 做空欠息
-   * （融券现金流模型：开空时卖出所得已入账，空头盈亏隐含在 -空头市值 中；
-   *   融资负债含未付利息，利息在摊入时已同步扣减 realizedPnL，权益与账本同步下移；
-   *   做空欠息是扣不动现金/保证金时挂账的融券利息，性质同样是负债，
-   *   不扣会让破产账户的权益虚高，排行榜与维持率判定一起失真）
+   * 组合口径权益 = 可用现金 + 挂单冻结 + 空头保证金 + Σ各股多头市值 − Σ各股空头市值
+   *                − Σ各股融资负债 − Σ各股做空欠息
+   *
+   * 多股票后必须按**整个账户**汇总：现金是一份（玩家只有一笔钱），
+   * 若按单只股票算，每只股票的开仓预检都会各自看到全额现金，敞口会被放大到 N 倍。
+   * 单股票账户下与旧口径逐项一致。
+   * @param {(stockId:string)=>number} priceOf 取某只股票最新价
    */
-  equity(stockId, lastPrice) {
+  equity(priceOf) {
     return (
       this.cash +
       this.orderFrozen +
       this.shortMargin +
-      this.longValue(stockId, lastPrice) -
-      this.shortMV(stockId, lastPrice) -
-      this.financeDebt(stockId) -
-      this.lendInterestDebt
+      this.totalLongValue(priceOf) -
+      this.totalShortMV(priceOf) -
+      this.totalFinanceDebt() -
+      this.totalLendInterestDebt()
     );
   }
 
+  /** 单只股票的空头市值（风控按股票定位敞口时用） */
   shortMV(stockId, lastPrice) {
     return this.shortQty(stockId) * lastPrice;
+  }
+
+  /**
+   * 把某只股票的多头/空头批次合并成一条（数量加权均价）。
+   *
+   * 只给 NPC 账户用。NPC 每 tick 都在成交，一笔成交就压一条批次，单账户能攒到几千条——
+   * 而落盘写一个账户要把它的全部批次整段删除再写回（persist.writeAccount），
+   * 正式档实测每 tick 因此要重写 40 万行批次、commit 占掉 2 秒（tick 预算才 0.7 秒）。
+   *
+   * 合并是**账实等价**的：数量、成本合计（Σ 数量×价格）、融资负债与本金、保证金、
+   * 已预留量全部按合计保留，锁仓时间取最早（等于「先卖最早买的」，与原 FIFO 口径一致）。
+   * 唯一变化是盈亏口径从 FIFO 变成均价——NPC 不参与排行榜与股东变动统计，没有可见影响；
+   * **玩家账户绝不合并**（玩家的已实现盈亏、成本价都是给人看的）。
+   */
+  consolidate(stockId) {
+    const lp = this.longs.get(stockId);
+    if (lp && lp.lots.length > 1) {
+      let qty = 0;
+      let cost = 0;
+      let reserved = 0;
+      let debt = 0;
+      let principal = 0;
+      let ts = Infinity;
+      for (const l of lp.lots) {
+        qty += l.qty;
+        cost += l.qty * l.price;
+        reserved += l.reserved || 0;
+        debt += l.debt || 0;
+        principal += l.principal || 0;
+        if (l.ts != null && l.ts < ts) ts = l.ts;
+      }
+      if (qty > 0) {
+        lp.lots = [{ qty, price: cost / qty, ts, reserved, debt: r2(debt), principal: r2(principal) }];
+      }
+    }
+    const sp = this.shorts.get(stockId);
+    if (sp && sp.lots.length > 1) {
+      let qty = 0;
+      let cost = 0;
+      let margin = 0;
+      let reserved = 0;
+      for (const l of sp.lots) {
+        qty += l.qty;
+        cost += l.qty * l.price;
+        margin += l.margin || 0;
+        reserved += l.reserved || 0;
+      }
+      if (qty > 0) {
+        sp.lots = [{ qty, price: cost / qty, margin: r2(margin), reserved }];
+      }
+    }
   }
 }
 
