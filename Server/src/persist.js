@@ -51,8 +51,8 @@ class Persister {
       `),
       delLots: db.prepare('DELETE FROM lots WHERE account = ?'),
       insLot: db.prepare(`
-        INSERT INTO lots (account, stock_id, side, seq, qty, price, ts, reserved, margin)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO lots (account, stock_id, side, seq, qty, price, ts, reserved, margin, debt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       insOrder: db.prepare(`
         INSERT INTO orders (id, account, stock_id, seq, action, side, price, qty, filled, frozen, ts, status)
@@ -308,13 +308,13 @@ class Persister {
     for (const [stockId, pos] of acc.longs) {
       for (let i = 0; i < pos.lots.length; i++) {
         const lot = pos.lots[i];
-        this.st.insLot.run(acc.name, stockId, 'long', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, 0);
+        this.st.insLot.run(acc.name, stockId, 'long', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, 0, lot.debt || 0);
       }
     }
     for (const [stockId, pos] of acc.shorts) {
       for (let i = 0; i < pos.lots.length; i++) {
         const lot = pos.lots[i];
-        this.st.insLot.run(acc.name, stockId, 'short', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, lot.margin);
+        this.st.insLot.run(acc.name, stockId, 'short', i, lot.qty, lot.price, lot.ts ?? null, isNpc ? 0 : lot.reserved || 0, lot.margin, 0);
       }
     }
   }

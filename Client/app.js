@@ -366,12 +366,22 @@
     const a = state.account;
     if (!a) return;
     const floatPnl = a.long.pnl + a.short.pnl;
+    const debtItem =
+      a.financeDebt > 0
+        ? `<div class="item"><label title="融资买入借入的资金（含未付利息与开仓手续费），按分钟计息，平仓/强平时优先从卖出款偿还">融资负债</label><span class="${cls(-1)}">${fmtMoney(a.financeDebt)}</span></div>`
+        : '';
+    const lendDebtItem =
+      a.lending && a.lending.interestDebt > 0
+        ? `<div class="item"><label title="现金与保证金都扣不动时挂账的融券利息，已从权益中扣除；现金恢复后自动补缴给出借方">做空欠息</label><span class="${cls(-1)}">${fmtMoney(a.lending.interestDebt)}</span></div>`
+        : '';
     $('assetsRow').innerHTML = `
       <div class="item"><label>总权益</label><span class="hl ${cls(a.equity - state.rules.initialCash)}">${fmtMoney(a.equity)}</span></div>
       <div class="item"><label title="现金口径，含融券卖出所得；开空后会大于总权益">可用资金</label><span>${fmtMoney(a.cash)}</span></div>
       <div class="item"><label>挂单冻结</label><span>${fmtMoney(a.orderFrozen)}</span></div>
       <div class="item"><label>空头保证金</label><span>${fmtMoney(a.shortMargin)}</span></div>
       <div class="item"><label>持仓市值</label><span>${fmtMoney(a.long.value)}</span></div>
+      ${debtItem}
+      ${lendDebtItem}
       <div class="item"><label>浮动盈亏</label><span class="${cls(floatPnl)}">${(floatPnl >= 0 ? '+' : '') + fmtMoney(floatPnl)}</span></div>
       <div class="item"><label>已实现盈亏</label><span class="${cls(a.realizedPnL)}">${(a.realizedPnL >= 0 ? '+' : '') + fmtMoney(a.realizedPnL)}</span></div>
     `;
@@ -392,6 +402,8 @@
         : lockedLot
           ? `<span class="tag ok">可卖 ${fmtQty(a.long.sellable)}</span>`
           : `<span class="tag ok">可卖 ${fmtQty(a.long.sellable)}</span>`;
+      const debtTag =
+        a.financeDebt > 0 ? `<span class="tag warn" title="融资负债（含未付利息），平仓时从卖出款优先偿还">融资 ${fmtMoney(a.financeDebt)}</span>` : '';
       rows.push(`<tr class="row-long">
         <td>多头持仓</td>
         <td>${fmtQty(a.long.qty)}</td>
@@ -400,7 +412,7 @@
         <td>${fmtP(last)}</td>
         <td>${fmtMoney(a.long.value)}</td>
         <td class="${cls(a.long.pnl)}">${(a.long.pnl >= 0 ? '+' : '') + fmtMoney(a.long.pnl)}</td>
-        <td>${status}</td>
+        <td>${status} ${debtTag}</td>
       </tr>`);
     }
     if (a.short.qty > 0) {
@@ -1299,6 +1311,7 @@
       renderEstimates();
     });
     $('qtyInput').addEventListener('input', renderEstimates);
+    $('financeCheck').addEventListener('change', renderEstimates);
     $('pxUp').addEventListener('click', () => stepPrice(0.01));
     $('pxDown').addEventListener('click', () => stepPrice(-0.01));
     $('pxAtMarket').addEventListener('click', () => {
@@ -1341,18 +1354,31 @@
     if (!a || price <= 0) return 0;
     let max = 0;
     switch (selectedAction) {
-      case 'buy_open':
-        max = Math.floor(a.cash / (price * (1 + state.rules.feeRate)));
+      case 'buy_open': {
+        const fin = state.rules.finance;
+        const useFinance = !!(fin && fin.enabled && $('financeCheck').checked);
+        if (useFinance) {
+          // 与服务端同口径：现金 ≥ V×ratio，权益 ≥ maint×(longMV + V) + V×fee
+          //   →  V ≤ min(cash / ratio, (equity - maint×longMV) / (maint + fee)) / price
+          // 手续费进融资负债，所以现金口径只按自备比例卡
+          const capCash = a.cash / fin.ratio;
+          const capEq = (a.equity - state.rules.maintenance * a.long.value) /
+            (state.rules.maintenance + state.rules.feeRate);
+          max = Math.floor(Math.max(0, Math.min(capCash, capEq)) / price);
+        } else {
+          max = Math.floor(a.cash / (price * (1 + state.rules.feeRate)));
+        }
         break;
+      }
       case 'sell_close':
         max = a.long.sellable;
         break;
       case 'sell_open': {
-        // 与服务端同口径：equity ≥ maint * (shortMV + V) + V * feeRate
-        //   →  V ≤ (equity - maint * shortMV) / (maint + feeRate)
+        // 与服务端同口径：equity ≥ ratio × (shortMV + V) + V × feeRate
+        //   →  V ≤ (equity - ratio × shortMV) / (ratio + feeRate)
+        const ratio = state.rules.marginRatio;
         const shortMV = a.short.value;
-        const cap = (a.equity - state.rules.maintenance * shortMV) /
-          (state.rules.maintenance + state.rules.feeRate);
+        const cap = (a.equity - ratio * shortMV) / (ratio + state.rules.feeRate);
         max = Math.floor(Math.max(0, cap) / price);
         // 融券模式下还要夹紧可借券源
         if (state.rules.allowNakedShort === false && state.market.lending) {
@@ -1404,6 +1430,15 @@
     if (!priceDirty) {
       $('priceInput').value = counterPrice().toFixed(2);
     }
+    // 融资开关只在买入开多且服务端开放时出现
+    const fin = state.rules.finance;
+    const finRow = $('financeRow');
+    const finAvailable = selectedAction === 'buy_open' && !!(fin && fin.enabled) && !halted;
+    finRow.hidden = !finAvailable;
+    if (finAvailable) {
+      const times = fin.ratio > 0 ? (1 / fin.ratio).toFixed(1).replace(/\.0$/, '') : '1';
+      $('financeTag').textContent = `自备 ${Math.round(fin.ratio * 100)}% · 最高${times}倍 · 息 ${fin.minuteRate}%/分`;
+    }
     const submit = $('submitBtn');
     submit.textContent = ACTION_LABEL[selectedAction];
     submit.classList.toggle('sell-mode', selectedAction === 'sell_close' || selectedAction === 'sell_open');
@@ -1422,6 +1457,14 @@
     const unit = selectedAction === 'sell_close' || selectedAction === 'buy_close' ? '可平' : '可开';
     $('estMax').textContent = `${unit} ${fmtQty(max)} 股`;
 
+    // 融资拆分预估：勾选时按自备比例展示两段金额
+    const fin = state.rules.finance;
+    const finOn = selectedAction === 'buy_open' && !!(fin && fin.enabled) && $('financeCheck').checked;
+    $('estFinanceRow').hidden = !finOn;
+    if (finOn) {
+      $('estFinance').textContent = `${fmtMoney(price * qty * fin.ratio)} / ${fmtMoney(price * qty * (1 - fin.ratio))}`;
+    }
+
     if (state.account) {
       $('fundsLine').textContent =
         `可用 ${fmtMoney(state.account.cash)} · 冻结 ${fmtMoney(state.account.orderFrozen)} · 保证金 ${fmtMoney(state.account.shortMargin)} · 权益 ${fmtMoney(state.account.equity)}`;
@@ -1431,14 +1474,26 @@
   function renderRisk() {
     const a = state.account;
     const el = $('riskLine');
-    if (!a || a.short.qty <= 0) {
+    const hasFinance = a && a.financeDebt > 0;
+    if (!a || (a.short.qty <= 0 && !hasFinance)) {
       el.textContent = '';
       el.className = 'risk-line';
       return;
     }
-    const liq = a.liquidationPrice;
-    el.textContent = `风险度 ${a.marginUsage}% · 空头 ${fmtQty(a.short.qty)} 股 · 强平价 ${liq ? fmtP(liq) : '--'}`;
-    el.className = 'risk-line ' + (liq && state.market.last >= liq ? 'danger' : a.marginUsage > 60 ? 'warn' : '');
+    const last = state.market.last;
+    const liqShort = a.liquidationPrice;
+    const liqLong = a.liquidationPriceLong;
+    const parts = [`风险度 ${a.marginUsage}%`];
+    if (a.short.qty > 0) parts.push(`空头 ${fmtQty(a.short.qty)} 股`);
+    if (hasFinance) parts.push(`融资 ${fmtMoney(a.financeDebt)}`);
+    const prices = [];
+    if (liqShort) prices.push(`空强平 ${fmtP(liqShort)}`);
+    if (liqLong) prices.push(`多强平 ${fmtP(liqLong)}`);
+    if (prices.length) parts.push(prices.join(' · '));
+    el.textContent = parts.join(' · ');
+    const danger =
+      (liqShort && last >= liqShort) || (liqLong && last <= liqLong);
+    el.className = 'risk-line ' + (danger ? 'danger' : a.marginUsage > 60 ? 'warn' : '');
   }
 
   function cooldownMsLeft() {
@@ -1492,7 +1547,8 @@
     if (!price || price <= 0) return toast('请输入有效价格', 'err');
     if (!qty || qty <= 0) return toast('请输入有效数量', 'err');
     $('submitBtn').disabled = true;
-    apiPost('/api/order', { action: selectedAction, qty, price })
+    const finance = selectedAction === 'buy_open' && $('financeCheck').checked;
+    apiPost('/api/order', { action: selectedAction, qty, price, finance })
       .then((r) => r.json())
       .then((res) => {
         if (!res.ok) {

@@ -360,13 +360,7 @@ class NpcManager {
         qty = Math.min(qty, this.cashCapacity(n, bidPx));
         qty = Math.floor(qty / lot) * lot;
         if (qty >= lot) {
-          const r = this.market.place(n.acc, {
-            action: ACTIONS.BUY_OPEN,
-            qty,
-            price: bidPx,
-            now,
-            noCooldown: true,
-          });
+          const r = this.market.place(n.acc, this.buyOpenOpts(n, qty, bidPx, now));
           if (r.ok) n.ownResting.push(r.order);
         }
       }
@@ -441,13 +435,12 @@ class NpcManager {
         }
         qty = Math.floor(qty / lot) * lot;
         if (qty >= lot) {
-          this.market.place(n.acc, {
-            action: isCover ? ACTIONS.BUY_CLOSE : ACTIONS.BUY_OPEN,
-            qty,
-            price: this.market.clampPrice(ask.price + 0.01),
-            now,
-            noCooldown: true,
-          });
+          const price = this.market.clampPrice(ask.price + 0.01);
+          if (isCover) {
+            this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true });
+          } else {
+            this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
+          }
         }
       }
     }
@@ -490,8 +483,28 @@ class NpcManager {
   }
 
   cashCapacity(n, price) {
-    const room = n.acc.cash; // 挂单冻结已从 cash 扣除
-    return Math.floor(room / (price * (1 + config.trade.feeRate)));
+    const fullUnit = price * (1 + config.trade.feeRate);
+    const fullCap = Math.floor(n.acc.cash / fullUnit); // 挂单冻结已从 cash 扣除
+    const fin = config.margin.finance;
+    if (!fin || !fin.enabled) return fullCap;
+    // 全款容量 × npcFinCapMult：温和超配，只有超出全款容量的部分才实际走融资单
+    const mult = fin.npcFinCapMult != null ? fin.npcFinCapMult : 1.2;
+    return Math.floor(fullCap * mult);
+  }
+
+  /** 买入开多参数：现金够全款就全款；不够且融资开放时下融资单（仍受维持保证金预检约束） */
+  buyOpenOpts(n, qty, price, now) {
+    const fin = config.margin.finance;
+    const fullNeed = price * qty * (1 + config.trade.feeRate);
+    const useFinance = !!(fin && fin.enabled && n.acc.cash < fullNeed);
+    return {
+      action: ACTIONS.BUY_OPEN,
+      qty,
+      price,
+      now,
+      noCooldown: true,
+      finance: useFinance,
+    };
   }
 
   /**

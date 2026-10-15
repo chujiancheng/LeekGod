@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 -- 持仓批次：FIFO 顺序靠 seq，T+锁仓靠 ts（空头批次没有 ts，也无锁仓概念）
+-- margin = 空头保证金；debt = 多头融资负债（旧档缺列时由 openDatabase 迁移补上）
 CREATE TABLE IF NOT EXISTS lots (
   account  TEXT NOT NULL,
   stock_id TEXT NOT NULL,
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS lots (
   ts       INTEGER,
   reserved INTEGER NOT NULL DEFAULT 0,
   margin   REAL NOT NULL DEFAULT 0,
+  debt     REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (account, stock_id, side, seq)
 );
 
@@ -150,6 +152,10 @@ function openDatabase(file) {
     db.exec('ALTER TABLE accounts ADD COLUMN lend_offered INTEGER NOT NULL DEFAULT 0');
     db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_earned REAL NOT NULL DEFAULT 0');
     db.exec('ALTER TABLE accounts ADD COLUMN lend_interest_debt REAL NOT NULL DEFAULT 0');
+  }
+  const lotCols = db.pragma('table_info(lots)').map((c) => c.name);
+  if (!lotCols.includes('debt')) {
+    db.exec('ALTER TABLE lots ADD COLUMN debt REAL NOT NULL DEFAULT 0');
   }
 
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();

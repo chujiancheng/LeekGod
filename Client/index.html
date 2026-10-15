@@ -15,7 +15,7 @@
       <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
       <input id="loginName" type="text" maxlength="16" placeholder="输入账号名即可进入（无需密码）" autocomplete="off">
       <button id="loginBtn">进入市场</button>
-      <div class="login-hint">初始资金 10 万 · 手续费万1 · T+2分钟锁仓 · 做空保证金 50%</div>
+      <div class="login-hint">初始资金 10 万 · 手续费万1 · T+2分钟锁仓 · 保证金 50%（多空各最高 2 倍）</div>
       <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息</div>
       <div class="login-hint">再次输入同一个账号名，就会回到原来的账户</div>
     </div>
@@ -204,10 +204,19 @@
           </div>
         </div>
 
+        <div class="finance-row" id="financeRow" hidden>
+          <label class="finance-check">
+            <input type="checkbox" id="financeCheck">
+            <span>融资买入</span>
+          </label>
+          <span class="tag" id="financeTag">--</span>
+        </div>
+
         <div class="estimates" id="estimates">
           <div><label>预计金额</label><span id="estAmount">--</span></div>
           <div><label>预计手续费</label><span id="estFee">--</span></div>
           <div><label>可交易</label><span id="estMax">--</span></div>
+          <div id="estFinanceRow" hidden><label>自备 / 借入</label><span id="estFinance">--</span></div>
         </div>
 
         <button class="submit-btn" id="submitBtn">提交委托</button>

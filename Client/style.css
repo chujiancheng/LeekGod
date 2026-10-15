@@ -328,6 +328,21 @@ input { font: inherit; color: inherit; }
 }
 .mini-btn:hover { color: var(--ink); border-color: var(--blue); }
 
+/* 融资买入开关（仅买入开多时出现） */
+.finance-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 6px 12px 0; padding: 6px 9px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12px;
+}
+.finance-check { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.finance-check input { accent-color: var(--blue); width: 14px; height: 14px; }
+.finance-row .tag {
+  color: var(--blue); border: 1px solid rgba(76, 141, 255, .35);
+  border-radius: 6px; padding: 1px 6px; font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .estimates { padding: 6px 12px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .estimates div { display: flex; justify-content: space-between; }
 .estimates label { color: var(--muted); }
@@ -397,6 +412,7 @@ input { font: inherit; color: inherit; }
 .grid-table .tag.ok { color: var(--green); border-color: rgba(31, 185, 120, .4); }
 .grid-table .tag.live { color: var(--blue); border-color: rgba(76, 141, 255, .4); }
 .grid-table .tag.done { color: var(--muted); }
+.grid-table .tag.warn { color: var(--red); border-color: rgba(240, 70, 75, .4); }
 .grid-table .tag.role-inst { color: var(--gold); border-color: rgba(240, 180, 41, .45); }
 .grid-table .tag.role-hot { color: #ff7a59; border-color: rgba(255, 122, 89, .45); }
 .grid-table .tag.role-big { color: #9b8cff; border-color: rgba(155, 140, 255, .45); }

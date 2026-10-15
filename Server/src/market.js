@@ -224,7 +224,8 @@ class Market {
    * 每 tick 融券利息：空头付、出借方收。
    * 按分钟利率折算到 tick：interest = 借出市值 × 分钟息 × (tickMs / 60000)。
    * 只对「借券开仓」的部分计息（裸空不计）；空头先扣现金再扣保证金，
-   * 都不够则记欠息（不触发强平）；出借方按池子份额分摊实收。
+   * 都不够则记欠息（计入权益的负债，等现金/保证金恢复后由 collectLendingDebt 追缴）；
+   * 出借方按池子份额分摊实收。
    */
   accrueLendingInterest(now = Date.now()) {
     const cfg = config.margin.lending;
@@ -268,21 +269,104 @@ class Market {
     }
 
     // 2) 向出借方分配：按挂借量占总挂借的比例（被借走的才真正参与计息分配）
-    if (collected > 0 && this.lendTotal > 0) {
-      const receivers = [];
-      let assigned = 0;
-      for (const acc of this._allAccountsForInterest()) {
-        const offered = acc.lendOffered || 0;
-        if (offered <= 0) continue;
-        const income = collected * (offered / this.lendTotal);
-        if (income <= 0) continue;
-        const take = assigned + income >= collected ? collected - assigned : income;
-        assigned += take;
-        acc.cash = r2(acc.cash + take);
-        acc.lendInterestEarned = r2((acc.lendInterestEarned || 0) + take);
-        receivers.push({ acc, take });
-        this.notifyChange(acc);
+    if (collected > 0) this.payLenders(collected);
+  }
+
+  /**
+   * 把 amount 元融券利息分给出借方：按挂借量占池子的比例，最后一位收尾差。
+   * 池子已清零时不分（没有收款方，分不出去的钱只能凭空消失）。
+   */
+  payLenders(amount) {
+    if (!(amount > 0) || this.lendTotal <= 0) return 0;
+    let assigned = 0;
+    for (const acc of this._allAccountsForInterest()) {
+      const offered = acc.lendOffered || 0;
+      if (offered <= 0) continue;
+      const income = amount * (offered / this.lendTotal);
+      if (income <= 0) continue;
+      const take = assigned + income >= amount ? amount - assigned : income;
+      assigned += take;
+      acc.cash = r2(acc.cash + take);
+      acc.lendInterestEarned = r2((acc.lendInterestEarned || 0) + take);
+      this.notifyChange(acc);
+    }
+    return assigned;
+  }
+
+  /**
+   * 追缴做空欠息：欠息账户的现金（其次保证金）恢复后优先补缴，
+   * 按挂借份额补给当时吃过亏的出借方（与计息同一分配口径）。
+   * 池子已清空时继续挂账——没有收款方，扣下来只会让资金凭空消失。
+   */
+  collectLendingDebt() {
+    if (this.lendTotal <= 0) return 0;
+    let collected = 0;
+    for (const acc of this._allAccountsForInterest()) {
+      const owed = acc.lendInterestDebt || 0;
+      if (owed <= 0) continue;
+      let pay = 0;
+      const fromCash = Math.min(owed, Math.max(0, acc.cash));
+      if (fromCash > 0) {
+        acc.cash = r2(acc.cash - fromCash);
+        pay += fromCash;
       }
+      const rest = owed - pay;
+      if (rest > 0.005 && acc.shortMargin > 0) {
+        const fromMargin = Math.min(rest, acc.shortMargin);
+        acc.shortMargin = r2(acc.shortMargin - fromMargin);
+        pay += fromMargin;
+      }
+      if (pay <= 0) continue;
+      const left = r2(owed - pay);
+      acc.lendInterestDebt = left > 0.005 ? left : 0;
+      collected += pay;
+      this.notifyChange(acc);
+    }
+    return this.payLenders(r2(collected));
+  }
+
+  // ---------- 融资利息 ----------
+
+  /** 当前融资分钟利率（小数）：s = 全市场负债 / (负债 + 可动用现金)，现金越紧利率越高 */
+  financeMinuteRate() {
+    const cfg = config.margin.finance;
+    if (!cfg || !cfg.enabled) return 0;
+    let debt = 0;
+    let cash = 0;
+    for (const acc of this._allAccountsForInterest()) {
+      debt += acc.financeDebt(this.stockId);
+      if (acc.cash > 0) cash += acc.cash;
+    }
+    const denom = debt + cash;
+    const s = denom > 0 ? debt / denom : 0;
+    return Math.min(cfg.baseMinuteRate * (1 + s * cfg.stressK), cfg.maxMinuteRate);
+  }
+
+  /**
+   * 每 tick 融资利息：按分钟利率折算到 tick，复利摊入各融资批次负债（debt ×= 1 + tickRate），
+   * 同步扣减已实现盈亏——权益与账本同时下移，保证 权益 = 初始资金 + 已实现盈亏 + 浮动盈亏。
+   * 利息没有对手方（券商资金成本），直接从权益里蒸发，是市场资金的净消耗。
+   */
+  accrueFinanceInterest(now = Date.now()) {
+    const cfg = config.margin.finance;
+    if (!cfg || !cfg.enabled) return;
+    const tickRate = this.financeMinuteRate() * (config.tickIntervalMs / 60000);
+    if (tickRate <= 0) return;
+    for (const acc of this._allAccountsForInterest()) {
+      let total = 0;
+      for (const [, pos] of acc.longs) {
+        for (const lot of pos.lots) total += lot.debt || 0;
+      }
+      if (total <= 0) continue;
+      const add = r2(total * tickRate);
+      if (add <= 0) continue;
+      for (const [, pos] of acc.longs) {
+        for (const lot of pos.lots) {
+          if (lot.debt > 0) lot.debt = r2(lot.debt + add * (lot.debt / total));
+        }
+      }
+      acc.realizedPnL = r2(acc.realizedPnL - add);
+      this.notifyChange(acc);
     }
   }
 
@@ -348,7 +432,32 @@ class Market {
 
     switch (action) {
       case ACTIONS.BUY_OPEN: {
-        freeze = r2(price * qty * (1 + feeRate));
+        const finCfg = config.margin.finance;
+        const useFinance = !!opts.finance;
+        if (useFinance && (!finCfg || !finCfg.enabled)) {
+          return { ok: false, error: '融资买入未开放' };
+        }
+        if (useFinance) {
+          // 融资开多：与开空同口径做权益预检。在途开多单的名义市值也要并入占用，
+          // 否则连挂多张贴边单各自预检都过、成交后合计跌破维持线，成交即强平
+          let pendingLongMV = 0;
+          for (const o of account.orders.values()) {
+            if (o.status === 'live' && o.action === ACTIONS.BUY_OPEN) {
+              pendingLongMV += o.price * (o.qty - o.filled);
+            }
+          }
+          const eq = account.equity(this.stock.id, this.lastPrice);
+          const addMV = price * qty;
+          const need =
+            maintenance * (account.longValue(this.stock.id, this.lastPrice) + pendingLongMV + addMV) +
+            r2(addMV * feeRate);
+          if (eq < need) return { ok: false, error: '保证金不足，无法融资买入' };
+          // 自备资金 = 成交市值 × ratio，手续费随借入部分进负债（见 settleBuy）。
+          // 冻结若额外含一份全款手续费，"2 倍"就买不到整 2 倍：满仓玩家会被最后几十元卡住
+          freeze = r2(price * qty * finCfg.ratio);
+        } else {
+          freeze = r2(price * qty * (1 + feeRate));
+        }
         if (account.cash < freeze) return { ok: false, error: '可用资金不足' };
         break;
       }
@@ -360,8 +469,17 @@ class Market {
           precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${config.trade.lockMs / 60000} 分钟锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
           return { ok: false, error: precheck };
         }
+        // 融资负债预检：深跌破位时卖出款可能盖不住将偿还的负债，此时要求现金补差。
+        // 不校验的话结算会把现金打成负数（自愿单不允许穿仓，穿仓只留给强平兜底）。
+        // 必须先预览再预留：previewFinanceDebt 只看未预留批次，先 reserve 会把自己的
+        // 预留段算成"他人占用"，预览金额直接归零（与 BUY_CLOSE 的保证金预览同一口径）
+        const repayPreview = account.previewFinanceDebt(this.stock.id, qty);
         if (!account.reserveLong(this.stock.id, qty, now)) {
           return { ok: false, error: '可卖数量不足' };
+        }
+        if (repayPreview > 0 && account.cash + price * qty < repayPreview + r2(price * qty * feeRate)) {
+          account.releaseLong(this.stock.id, qty);
+          return { ok: false, error: '可用资金不足（卖出款不足以偿还融资负债）' };
         }
         // 卖单一律不冻结手续费：费用在成交时从卖出款里扣，而卖出款必然覆盖
         // 手续费（费率万分之一），预冻结没有任何兜底作用。
@@ -385,7 +503,10 @@ class Market {
           }
           this.lendReserved += qty; // 占用券源，成交/撤单时释放
         }
-        // 开空：成交时从卖出所得中扣保证金，此处只做维持保证金预检。
+        // 开空：成交时从卖出所得中扣保证金，此处只做保证金预检。
+        // 预检按保证金率（ratio）而不是维持率（maintenance）——保证金是从卖出款里扣的、
+        // 不动自有资金，只按维持率放行会把敞口放到 3.3 倍权益，而做多被自备资金卡在 2 倍，
+        // 两边不对称，也和"做空保证金 50%"的说明对不上。
         // 在途开空（已挂未成交）的名义市值也要并入占用：否则连挂多张贴边单
         // 各自预检都过、成交后合计跌破维持线，成交即强平
         let pendingShortMV = 0;
@@ -396,7 +517,7 @@ class Market {
         }
         const eq = account.equity(this.stock.id, this.lastPrice);
         const addMV = price * qty;
-        const need = maintenance * (account.shortMV(this.stock.id, this.lastPrice) + pendingShortMV + addMV) + r2(addMV * feeRate);
+        const need = ratio * (account.shortMV(this.stock.id, this.lastPrice) + pendingShortMV + addMV) + r2(addMV * feeRate);
         if (eq < need) {
           if (!config.margin.allowNakedShort) this.lendReserved = Math.max(0, this.lendReserved - qty);
           return { ok: false, error: '保证金不足，无法继续开空' };
@@ -450,6 +571,7 @@ class Market {
       qty,
       filled: 0,
       frozen: freeze,
+      finance: action === ACTIONS.BUY_OPEN && !!opts.finance, // 融资开多标记（结算按此拆自备/借入）
       ts: now,
       status: 'live',
     };
@@ -630,13 +752,26 @@ class Market {
     const isGhost = acc === SYSTEM_ACCOUNT;
 
     if (order.action === ACTIONS.BUY_OPEN) {
+      const finCfg = config.margin.finance;
+      const fin = !!order.finance; // 按下单时的标记结算（冻结口径与之一致，不受配置热改影响）
       // 退回按挂单价冻结的资金，按实际成交价结算
-      const rel = this.releaseFrozen(order, r2(order.price * qty * (1 + config.trade.feeRate)));
+      const frozenPerShare = fin ? finCfg.ratio : 1 + config.trade.feeRate;
+      const rel = this.releaseFrozen(order, r2(order.price * qty * frozenPerShare));
       const cost = r2(price * qty);
-      acc.cash = r2(acc.cash + rel - cost - fee);
+      // 融资单只支付自备部分（ratio × 成交市值），手续费不扣现金而是并入负债：
+      // 冻结口径只含自备部分，若手续费另从现金扣，满仓时会因差几十元当场结算成负数
+      const selfPay = fin ? r2(cost * finCfg.ratio) : cost;
+      const cashFee = fin ? 0 : fee;
+      acc.cash = r2(acc.cash + rel - selfPay - cashFee);
       if (!isGhost) {
-        // 新买入批次：以本次成交时间起算锁仓
-        acc.longPos(order.stockId).lots.push({ qty, price, ts: now, reserved: 0 });
+        // 新买入批次：以本次成交时间起算锁仓；融资单带负债（借入本金 + 开仓手续费，利息按 tick 摊入）
+        acc.longPos(order.stockId).lots.push({
+          qty,
+          price,
+          ts: now,
+          reserved: 0,
+          debt: fin ? r2(cost * (1 - finCfg.ratio) + fee) : 0,
+        });
         // 开仓手续费也计入已实现盈亏，否则 权益 ≠ 初始资金 + 已实现盈亏 + 浮动盈亏
         acc.realizedPnL = r2(acc.realizedPnL - fee);
       }
@@ -672,7 +807,8 @@ class Market {
       // 只按实际扣减到的持仓入账：持仓不足时不得凭空产生现金
       const sold = Math.min(cons.qty, qty);
       const soldFee = r2(price * sold * config.trade.feeRate);
-      acc.cash = r2(acc.cash + price * sold + rel - soldFee);
+      // 卖出款优先偿还该批次融资负债（利息已在摊入时计入 realizedPnL，这里只还钱）
+      acc.cash = r2(acc.cash + price * sold + rel - cons.debt - soldFee);
       acc.realizedPnL = r2(acc.realizedPnL + (price * sold - cons.cost) - soldFee);
       // 按实际扣减到的数量计费，与被扣的手续费保持一致
       return soldFee;
@@ -754,17 +890,24 @@ class Market {
   }
 
   /**
-   * 爆仓检查：equity < 维持保证金 × 空头市值 时强平
-   * 强平顺序：先视需要卖出多头补充现金，再逐笔买入平空（吃对手盘，不足则系统兜底价）
+   * 爆仓检查（权益 < 维持保证金 × 敞口 时强平）：
+   * - 空头端：先视需要卖出多头补充现金，再逐笔买入平空（吃对手盘，不足则系统兜底价）
+   * - 融资多头端：强卖多头偿还负债。卖出只是把市值换成现金、不抬权益，
+   *   目的是缩敞口止损——持仓缩小后维持线下移，直到权益重新达标或负债清零。
+   *   全款多头（负债=0）不触发：权益 ≥ 多头市值 ≥ 维持线，永远不会被强卖。
    */
   maybeLiquidate(account, now) {
     if (!account || account === SYSTEM_ACCOUNT) return false;
     if (account._liquidating) return false;
+    const m = config.margin.maintenance;
     const last = this.lastPrice;
-    const mv = account.shortMV(this.stockId, last);
-    if (mv <= 0) return false;
     const eq = account.equity(this.stockId, last);
-    if (eq >= config.margin.maintenance * mv) return false;
+    const shortMV = account.shortMV(this.stockId, last);
+    const longMV = account.longValue(this.stockId, last);
+    const debt = account.financeDebt(this.stockId);
+    const shortTriggered = shortMV > 0 && eq < m * shortMV;
+    const longTriggered = debt > 0 && longMV > 0 && eq < m * longMV;
+    if (!shortTriggered && !longTriggered) return false;
 
     account._liquidating = true;
     const events = [];
@@ -776,11 +919,11 @@ class Market {
         this.cancel(account, o.id, now);
       }
       let guard = 0;
-      while (guard++ < 500) {
+      while (shortTriggered && guard++ < 500) {
         const curMV = account.shortMV(this.stockId, this.lastPrice);
         if (curMV <= 0) break;
         const curEq = account.equity(this.stockId, this.lastPrice);
-        if (curEq >= config.margin.maintenance * curMV) break;
+        if (curEq >= m * curMV) break;
 
         // 覆盖全部空头所需资金估算
         const needQty = account.shortQty(this.stockId);
@@ -789,7 +932,7 @@ class Market {
         // 否则 forceSellLong 返回 0 会 break 掉整个强平循环
         const sellableLong = account.forceSellableLong(this.stockId);
         if (account.cash + account.shortMargin < needCash && sellableLong > 0) {
-          // 先强卖多头补充现金
+          // 先强卖多头补充现金（若批次带融资负债，回款先还债，现金增量小于卖出款）
           const sold = this.forceSellLong(account, Math.min(sellableLong, needQty), now);
           if (sold <= 0) break;
           events.push({ type: 'force_sell_long', qty: sold });
@@ -808,6 +951,28 @@ class Market {
         const closed = this.forceCoverShort(account, target, now, false);
         if (closed <= 0) break;
         events.push({ type: 'force_cover', qty: closed });
+      }
+
+      // 融资多头强平：卖到 权益 ≥ 维持率 × 多头市值 或 负债清零 或 无可卖
+      guard = 0;
+      while (guard++ < 500) {
+        if (account.financeDebt(this.stockId) <= 0) break;
+        const curEq = account.equity(this.stockId, this.lastPrice);
+        const curLongMV = account.longValue(this.stockId, this.lastPrice);
+        if (curLongMV <= 0) break;
+        if (curEq >= m * curLongMV) break;
+        // 需卖出市值 = (维持线 - 权益) / (维持率 - 手续费率)：
+        // 卖出费用拉低权益、市值缩水同等拉低维持线，两者每元卖出净改善 (m - fee)
+        const xNeed = (m * curLongMV - curEq) / (m - config.trade.feeRate);
+        const lot = this.stock.lotSize;
+        const sellable = account.forceSellableLong(this.stockId);
+        let qtyNeed = Math.ceil((Math.max(0, xNeed) / Math.max(this.lastPrice, 0.01) / lot)) * lot;
+        qtyNeed = Math.min(qtyNeed, sellable);
+        if (qtyNeed <= 0) qtyNeed = Math.min(lot, sellable); // 数值抖动兜底：至少卖一手
+        if (qtyNeed <= 0) break; // 无可卖（全部挂借锁死）
+        const sold = this.forceSellLong(account, qtyNeed, now);
+        if (sold <= 0) break;
+        events.push({ type: 'force_sell_long', qty: sold, reason: 'finance' });
       }
     } finally {
       account._liquidating = false;

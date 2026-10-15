@@ -93,6 +93,9 @@ console.log('\n[4] 下单冷却 2 秒');
 console.log('\n[5] 开空保证金与盈亏');
 {
   const { m, A, N } = fresh();
+  // 开空预检按保证金率卡权益（名义 ≤ 2 倍权益），本节只验证保证金与盈亏记账，先给足权益
+  A.cash = 300000;
+  const cash0 = A.cash;
   // 玩家开空 1 万股 @20（对手买单）
   m.place(N, { action: ACTIONS.BUY_OPEN, qty: 10000, price: 20.0, now: 0, noCooldown: true });
   const r = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 10000, price: 20.0, now: 0 });
@@ -101,17 +104,18 @@ console.log('\n[5] 开空保证金与盈亏');
   const expectMargin = 10000 * 20 * 0.5;
   assert(Math.abs(A.shortMargin - expectMargin) < 0.01, `保证金 ${expectMargin} 冻结正确`);
   const eq = A.equity('600001', 20);
-  const expectEq = config.account.initialCash - 10000 * 20 * 0.0001;
-  assert(Math.abs(eq - expectEq) < 1, `开空后权益≈初始资金−手续费 (eq=${eq.toFixed(2)})`);
+  const expectEq = cash0 - 10000 * 20 * 0.0001;
+  assert(Math.abs(eq - expectEq) < 1, `开空后权益≈期初−手续费 (eq=${eq.toFixed(2)})`);
 }
 
 // ---- 6. 爆仓强平 ----
 console.log('\n[6] 价格暴涨触发爆仓强平');
 {
   const { m, A } = fresh();
-  // 本节只验证爆仓机制，需要够大的本金撑起 10 万股空头（保证金 100 万），
-  // 所以本金独立于 config.account.initialCash 显式给足；维持保证金线随之落在 ~23.08
-  A.cash = 1000000;
+  // 本节只验证爆仓机制，需要够大的本金撑起 10 万股空头（保证金 100 万，
+  // 且开空预检要求权益 ≥ 50% 名义 = 100 万），所以本金独立于 config.account.initialCash
+  // 显式给足；维持保证金线随之落在 ~23.85
+  A.cash = 1100000;
   const N = new Account('接盘N', true);
   N.cash = 100000000; // 接盘方需要足够现金
   m.place(N, { action: ACTIONS.BUY_OPEN, qty: 100000, price: 20.0, now: 0, noCooldown: true });
@@ -258,6 +262,8 @@ console.log('\n[14] 强平前先撤掉平仓挂单（不留幽灵单）');
 {
   const { m, A, N } = fresh();
   const t = 6 * 60 * 1000;
+  // 开空预检按保证金率卡权益（10 万股名义 20 万需权益 ≥ 10 万），先给足权益
+  A.cash = 300000;
   // A 建仓 1000 股，并开空 1 万股
   m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
   m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 0 });
@@ -349,7 +355,9 @@ console.log('\n[17] 撮合中途被强平撤单的委托不得变成幽灵单');
 {
   const { m, A, N } = fresh();
   const t = 6 * 60 * 1000;
-  // A 开空 1 万股（用 N 的买单成交），再把现金压到维持保证金线之上一点
+  // A 开空 1 万股（用 N 的买单成交），再把现金压到维持保证金线之上一点。
+  // 开空前先给足权益以过保证金率预检，成交后再把现金手动压到 141000
+  A.cash = 300000;
   m.place(N, { action: ACTIONS.BUY_OPEN, qty: 10000, price: 20.0, now: 0, noCooldown: true });
   m.place(A, { action: ACTIONS.SELL_OPEN, qty: 10000, price: 20.0, now: 1000 });
   A.longPos('600001').lots.push({ qty: 1000, price: 20, ts: 0, reserved: 0 });
@@ -487,11 +495,11 @@ console.log('\n[21] SELL_OPEN 预检计入在途开空名义市值');
 {
   config.margin.allowNakedShort = true;
   const { m, A } = fresh();
-  const r1 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 15000, price: 20, now: 0 });
-  assert(r1.ok, '第一张贴边开空单（需维持保证金 9 万，权益 10 万）通过预检');
-  const r2 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 15000, price: 20, now: 3000 });
+  const r1 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 9000, price: 20, now: 0 });
+  assert(r1.ok, '第一张贴边开空单（需保证金 9 万，权益 10 万）通过预检');
+  const r2 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 9000, price: 20, now: 3000 });
   assert(!r2.ok && /保证金不足/.test(r2.error),
-    `第二张被拒（在途 15000 股也要计占用）: ${r2.error}`);
+    `第二张被拒（在途 9000 股也要计占用）: ${r2.error}`);
 }
 
 // ---- 22. 并发平空单的保证金预览不重复计入 ----
@@ -549,6 +557,239 @@ console.log('\n[23] 强平卖多头豁免锁仓但不碰挂借');
   assert(L.shortQty('600001') < 1000 && L.shortQty('600001') > 0, `剩余空头 ${L.shortQty('600001')} 股（能负担多少平多少）`);
   assert(m.lendBorrowed === L.shortQty('600001'), '借出量与剩余空头一致');
   config.margin.allowNakedShort = true;
+}
+
+// ---- 24. 融资买入：冻结口径 / 结算 / 撤单退款 ----
+console.log('\n[24] 融资买入结算与冻结');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 20;
+  const fin = config.margin.finance;
+  assert(fin.enabled, '融资功能默认开放');
+  m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20.0, now: 0, noCooldown: true });
+  const r = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20.0, now: 0, finance: true });
+  assert(r.ok && r.order.filled === 1000, `融资买入成交${r.ok ? '' : ': ' + r.error}`);
+  const cost = 1000 * 20;
+  const fee = cost * config.trade.feeRate;
+  const selfPay = cost * fin.ratio;
+  const expectCash = config.account.initialCash - selfPay;
+  assert(Math.abs(A.cash - expectCash) < 0.01, `只扣自备 ${selfPay}，手续费随负债融资 (cash=${A.cash.toFixed(2)})`);
+  assert(Math.abs(A.financeDebt('600001') - (cost * (1 - fin.ratio) + fee)) < 0.01,
+    `批次负债 = 借入本金 + 开仓手续费 ${cost * (1 - fin.ratio) + fee} 记账正确`);
+  const expectEq = config.account.initialCash - fee;
+  assert(Math.abs(A.equity('600001', 20) - expectEq) < 0.01, `权益 = 初始资金 − 手续费 (eq=${A.equity('600001', 20).toFixed(2)})`);
+  assert(Math.abs(A.realizedPnL - -fee) < 0.01, '开仓手续费计入已实现盈亏');
+  assert(r.order.finance === true, '订单携带融资标记');
+
+  // 融资买单未成交部分撤单：按自备口径冻结、全额退回
+  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 500, price: 19.9, now: 100000, finance: true });
+  assert(r2.ok && r2.order.status === 'live', '低位融资买单挂入');
+  const wantFrozen = Math.round(500 * 19.9 * fin.ratio * 100) / 100;
+  assert(Math.abs(A.orderFrozen - wantFrozen) < 0.01, `冻结 ${wantFrozen} 为自备口径（不含手续费）`);
+  m.cancel(A, r2.order.id, 100001);
+  assert(A.orderFrozen === 0, '撤单后冻结归零');
+  assert(Math.abs(A.cash - expectCash) < 0.01, '撤单退回的钱与冻结一致');
+
+  // 融资未开放时拒单
+  fin.enabled = false;
+  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 20, now: 200000, finance: true });
+  assert(!r3.ok && /未开放/.test(r3.error), '融资关闭时拒绝融资单');
+  fin.enabled = true;
+}
+
+// ---- 25. 融资利息：压力利率与复利摊入 ----
+console.log('\n[25] 融资利息按 tick 摊入负债');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 20;
+  const fin = config.margin.finance;
+  A.cash = 0;
+  A.longPos('600001').lots.push({ qty: 100000, price: 20, ts: 0, reserved: 0, debt: 5000000 });
+  N.cash = 0; // 全市场现金耗尽 → 压力利率打满
+  m.accountsProvider = () => [A, N];
+  const rateHot = m.financeMinuteRate();
+  assert(rateHot === fin.maxMinuteRate, `现金耗尽时利率打满封顶 (${rateHot}/分钟)`);
+
+  N.cash = 1e10; // 现金充裕 → 回落到基础利率附近
+  const rate = m.financeMinuteRate();
+  assert(rate >= fin.baseMinuteRate && rate < rateHot, `现金充裕时利率回落 (${rate})`);
+
+  const tickRate = rate * (config.tickIntervalMs / 60000);
+  const expectAdd = Math.round(5000000 * tickRate * 100) / 100;
+  const realizedBefore = A.realizedPnL;
+  const eqBefore = A.equity('600001', 20);
+  m.accrueFinanceInterest(0);
+  const debtAfter = A.financeDebt('600001');
+  assert(Math.abs(debtAfter - 5000000 - expectAdd) <= 0.011, `负债复利摊入 ${expectAdd} (debt=${debtAfter.toFixed(2)})`);
+  assert(Math.abs(realizedBefore - A.realizedPnL - expectAdd) <= 0.011, '利息同步扣减已实现盈亏');
+  assert(Math.abs(eqBefore - A.equity('600001', 20) - expectAdd) <= 0.02, '权益与账本同步下移');
+
+  // 无负债账户不受影响
+  const B = new Account('无债B');
+  B.cash = 1000;
+  m.accountsProvider = () => [A, B, N];
+  const debtBBefore = B.financeDebt('600001');
+  const cashBBefore = B.cash;
+  m.accrueFinanceInterest(1);
+  assert(B.financeDebt('600001') === debtBBefore && B.cash === cashBBefore, '无负债账户不被计息');
+
+  // 关闭融资 → 利率为 0 且不摊息
+  fin.enabled = false;
+  assert(m.financeMinuteRate() === 0, '融资关闭时利率为 0');
+  fin.enabled = true;
+}
+
+// ---- 26. 平仓偿还负债与深跌破位拦截 ----
+console.log('\n[26] 卖平融资仓位：还债、盈亏与预检');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 22;
+  // 手工构造负债大于卖出款的深跌破位（负债 25000 > 卖出款 22000）
+  A.cash = 3000;
+  A.longPos('600001').lots.push({ qty: 1000, price: 20, ts: -1e9, reserved: 0, debt: 25000 });
+  m.place(N, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 22, now: 0, noCooldown: true });
+
+  // 3000 + 22000 = 25000 < 25000 + fee → 卖出款盖不住还债与手续费，拒卖
+  const rr = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: 1000, price: 22, now: 10000 });
+  assert(!rr.ok && /融资负债/.test(rr.error), `现金补不出差额时拒卖：${rr.error}`);
+
+  A.cash = 5000; // 5000 + 22000 ≥ 25000 + fee → 放行
+  const r = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: 1000, price: 22, now: 20000 });
+  assert(r.ok && r.order.filled === 1000, `补足现金后卖出成交${r.ok ? '' : ': ' + r.error}`);
+  assert(A.financeDebt('600001') === 0, '批次负债已清零');
+  assert(A.longQty('600001') === 0, '多头已清仓');
+  const fee = Math.round(1000 * 22 * config.trade.feeRate * 100) / 100;
+  const expectCash = 5000 + 22000 - 25000 - fee;
+  assert(Math.abs(A.cash - expectCash) < 0.01, `现金 = 期初 + 卖出款 − 还债 − 手续费 (${A.cash.toFixed(2)})`);
+  const expectRz = 22000 - 20000 - fee; // 差价按开仓成本 20000 算，负债超成本的部分是历史利息、已在摊入时计过账
+  assert(Math.abs(A.realizedPnL - expectRz) < 0.01, `已实现盈亏 = 差价 − 手续费 (${A.realizedPnL.toFixed(2)})`);
+}
+
+// ---- 27. 融资下单预检：权益与自备资金 ----
+console.log('\n[27] 融资开多预检');
+{
+  const { m, A } = fresh();
+  m.lastPrice = 15;
+  A.cash = 5000;
+  A.longPos('600001').lots.push({ qty: 1000, price: 20, ts: 0, reserved: 0, debt: 19000 });
+  // 权益 = 5000 + 15000 − 19000 = 1000 < 0.3 × (15000 + 20000)
+  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 15, now: 0, finance: true });
+  assert(!r1.ok && /保证金不足/.test(r1.error), `权益不足拒融资开多：${r1.error}`);
+
+  // 权益够（负债降到 12000 → eq=10000 ≥ 0.3×30000=9000）但自备 7500 > 现金 7000
+  A.cash = 7000;
+  A.longPos('600001').lots[0].debt = 12000;
+  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 15, now: 10000, finance: true });
+  assert(!r2.ok && /资金不足/.test(r2.error), `自备不足拒单：${r2.error}`);
+
+  // 权益与现金都够 → 放行（自备 7500 < 8000）
+  A.cash = 8000;
+  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 15, now: 20000, finance: true });
+  assert(r3.ok, `条件满足后放行${r3.ok ? '' : ': ' + r3.error}`);
+}
+
+// ---- 28. 融资强平：下跌触发、部分强卖恢复维持线；全款多头不触发 ----
+console.log('\n[28] 融资多头强平');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 14;
+  A.cash = 0;
+  A.longPos('600001').lots.push({ qty: 1000, price: 20, ts: 0, reserved: 0, debt: 10000 });
+  m.accountsProvider = () => [A, N];
+  // 权益 = 0 + 14000 − 10000 = 4000 < 0.3 × 14000 = 4200 → 触发
+  const liq = m.maybeLiquidate(A, 1000);
+  assert(liq, '跌破维持线触发融资强平');
+  const events = (A.liquidations && A.liquidations[0] && A.liquidations[0].events) || [];
+  assert(events.length > 0 && events.every((e) => e.type === 'force_sell_long' && e.reason === 'finance'), '强平事件为融资强卖多头');
+  assert(A.financeDebt('600001') < 10000, `负债已部分偿还 (剩 ${A.financeDebt('600001').toFixed(2)})`);
+  const eq = A.equity('600001', 14);
+  const mv = A.longValue('600001', 14);
+  assert(eq >= config.margin.maintenance * mv, `强平后恢复维持线 (权益 ${eq.toFixed(2)} ≥ ${(config.margin.maintenance * mv).toFixed(2)})`);
+  assert(A.cash > 0, `回款偿债后现金为正 (${A.cash.toFixed(2)})`);
+  // 维持线恢复后不再重复强平
+  assert(!m.maybeLiquidate(A, 1001), '恢复后不再触发');
+
+  // 全款多头：权益 ≥ 多头市值 ≥ 维持线，深跌也不强平
+  const { m: m2, A: A2, N: N2 } = fresh();
+  m2.lastPrice = 1;
+  A2.cash = 0;
+  A2.longPos('600001').lots.push({ qty: 1000, price: 20, ts: 0, reserved: 0, debt: 0 });
+  m2.accountsProvider = () => [A2, N2];
+  assert(!m2.maybeLiquidate(A2, 1), '全款多头跌到 1 元也不强平');
+}
+
+// ---- 29. 融资买入可以正好买满 2 倍（手续费并入负债） ----
+console.log('\n[29] 融资买入买满整 2 倍');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 20;
+  m.place(N, { action: ACTIONS.SELL_OPEN, qty: 10000, price: 20, now: 0, noCooldown: true });
+  // 10 万现金整好买 10000 股 @20 = 名义 2 倍；手续费不再额外占用自备资金
+  const r = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 10000, price: 20, now: 0, finance: true });
+  assert(r.ok && r.order.filled === 10000, `满 2 倍融资买入成交${r.ok ? '' : ': ' + r.error}`);
+  const cost = 10000 * 20;
+  const fee = cost * config.trade.feeRate;
+  assert(A.cash === 0, `自备资金刚好用尽，不因手续费挂不出单 (cash=${A.cash})`);
+  assert(Math.abs(A.financeDebt('600001') - (cost * 0.5 + fee)) < 0.01,
+    `借入本金 + 手续费 ${cost * 0.5 + fee} 一并计入负债`);
+  assert(A.orderFrozen === 0, '成交后无残留冻结');
+  const eq = A.equity('600001', 20);
+  assert(Math.abs(eq - (config.account.initialCash - fee)) < 0.01, `权益只少了手续费 (eq=${eq.toFixed(2)})`);
+  const lev = A.longValue('600001', 20) / eq;
+  assert(lev > 2 && lev < 2.001, `实际杠杆 ${lev.toFixed(4)} 倍`);
+}
+
+// ---- 30. 开空敞口按保证金率封顶 2 倍 ----
+console.log('\n[30] 开空敞口上限 2 倍');
+{
+  const { m, A, N } = fresh();
+  m.lastPrice = 20;
+  m.place(N, { action: ACTIONS.BUY_OPEN, qty: 20000, price: 20, now: 0, noCooldown: true });
+  const r = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 9900, price: 20, now: 0 });
+  assert(r.ok && r.order.filled === 9900, `10 万权益开空 9900 股（名义 19.8 万）成交${r.ok ? '' : ': ' + r.error}`);
+  const eq = A.equity('600001', 20);
+  const mv = A.shortMV('600001', 20);
+  assert(mv / eq > 1.9 && mv / eq < 2.001, `敞口/权益 = ${(mv / eq).toFixed(4)} 倍，贴近 2 倍上限`);
+  const r2 = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 100, price: 20, now: 3000 });
+  assert(!r2.ok && /保证金不足/.test(r2.error), `再开一手即越限被拒：${r2.error}`);
+}
+
+// ---- 31. 做空欠息：计入权益 + 现金恢复后追缴 ----
+console.log('\n[31] 做空欠息计入权益并追缴');
+{
+  const naked = config.margin.allowNakedShort;
+  config.margin.allowNakedShort = false; // 计息只发生在借券开仓的路径上
+  const { m, A, N } = fresh();
+  const L = new Account('出借人');
+  L.longPos('600001').lots.push({ qty: 20000, price: 10, ts: -1e9, reserved: 0 });
+  const t0 = 1000000;
+  assert(m.lendShares(L, 20000, t0).ok, '出借人挂借 20000 股');
+  m.lastPrice = 20;
+  m.place(N, { action: ACTIONS.BUY_OPEN, qty: 20000, price: 20, now: t0, noCooldown: true });
+  const r = m.place(A, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: t0 });
+  assert(r.ok && r.order.filled === 1000, `玩家借券开空 1000 股${r.ok ? '' : ': ' + r.error}`);
+  m.accountsProvider = () => [L, A];
+
+  // 现金与保证金都扣不动 → 利息只能挂账
+  A.cash = 0;
+  A.shortMargin = 0;
+  for (let i = 0; i < 200; i++) m.accrueLendingInterest(t0 + 1000 + i * config.tickIntervalMs);
+  const owed = A.lendInterestDebt;
+  assert(owed > 0, `欠息挂账 ${owed.toFixed(2)} 元`);
+  const mv = A.shortMV('600001', 20);
+  assert(Math.abs(A.equity('600001', 20) - (-mv - owed)) < 0.01,
+    `权益已扣掉欠息 (eq=${A.equity('600001', 20).toFixed(2)} = -${mv} - ${owed.toFixed(2)})`);
+
+  // 现金恢复 → 追缴并全额转给出借方
+  const lenderCashBefore = L.cash;
+  A.cash = 500;
+  const paid = m.collectLendingDebt();
+  assert(Math.abs(paid - owed) < 0.01, `追缴金额 ${paid.toFixed(2)} = 挂账欠息`);
+  assert(A.lendInterestDebt === 0, '欠息已清零');
+  assert(Math.abs(A.cash - (500 - owed)) < 0.01, `从现金里扣缴 (cash=${A.cash.toFixed(2)})`);
+  assert(Math.abs(L.cash - lenderCashBefore - owed) < 0.01, '欠息全额补给已挂借的出借方');
+  assert(Math.abs(L.lendInterestEarned - owed) < 0.01, '出借方累计利息同步计入');
+  config.margin.allowNakedShort = naked;
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

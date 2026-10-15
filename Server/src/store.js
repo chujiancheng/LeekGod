@@ -18,7 +18,7 @@ class Account {
     this.initialLong = 0; // 开服/建仓时初始持股（用于股东变动统计）
     this.lendOffered = 0; // 已挂入融券池的股数（从可卖持仓中冻结，被借走前可撤）
     this.lendInterestEarned = 0; // 出借累计利息收入（展示用）
-    this.lendInterestDebt = 0; // 做空方欠息（现金+保证金都扣不动时挂账，不触发强平）
+    this.lendInterestDebt = 0; // 做空方欠息（现金+保证金都扣不动时挂账，计入权益、恢复后追缴）
     this.longs = new Map(); // stockId -> { lots: [{qty, price, ts, reserved}] }
     this.shorts = new Map(); // stockId -> { lots: [{qty, price, margin, reserved}] }
     this.orders = new Map(); // 挂单中的订单 id -> order
@@ -122,12 +122,16 @@ class Account {
     }
   }
 
-  /** 扣减多头 FIFO（先释放预留再扣数量），返回实际扣减的总成本 */
+  /**
+   * 扣减多头 FIFO（先释放预留再扣数量），返回实际扣减的总成本与批次负债。
+   * 负债（融资买入的借入本金 + 已摊入利息）随批次按比例偿还。
+   */
   consumeLong(stockId, qty) {
     const p = this.longs.get(stockId);
-    if (!p) return { qty: 0, cost: 0 };
+    if (!p) return { qty: 0, cost: 0, debt: 0 };
     let need = qty;
     let cost = 0;
+    let debt = 0;
     const kept = [];
     for (const lot of p.lots) {
       if (need <= 0) {
@@ -135,14 +139,17 @@ class Account {
         continue;
       }
       const take = Math.min(lot.qty, need);
+      const frac = take / lot.qty;
       cost += take * lot.price;
+      debt += (lot.debt || 0) * frac;
       lot.qty -= take;
+      lot.debt = r2((lot.debt || 0) - (lot.debt || 0) * frac);
       lot.reserved = Math.max(0, lot.reserved - take);
       need -= take;
       if (lot.qty > 0) kept.push(lot);
     }
     p.lots = kept;
-    return { qty: qty - need, cost };
+    return { qty: qty - need, cost, debt: r2(debt) };
   }
 
   /** 从空头 FIFO 中预留 qty，成功返回 true */
@@ -171,6 +178,26 @@ class Account {
       lot.reserved -= take;
       need -= take;
     }
+  }
+
+  /**
+   * 预览平多 qty 将偿还的融资负债（与 reserveLong 同序遍历未预留部分，不修改状态）。
+   * 与 previewShortMargin 同口径：只看 qty - reserved，避免并发卖单重复计入预检。
+   */
+  previewFinanceDebt(stockId, qty) {
+    const p = this.longs.get(stockId);
+    if (!p) return 0;
+    let need = qty;
+    let debt = 0;
+    for (const lot of p.lots) {
+      if (need <= 0) break;
+      const avail = lot.qty - lot.reserved;
+      if (avail <= 0) continue;
+      const take = Math.min(avail, need);
+      if (lot.debt > 0) debt += lot.debt * (take / lot.qty);
+      need -= take;
+    }
+    return r2(debt);
   }
 
   /**
@@ -231,12 +258,32 @@ class Account {
     return this.longQty(stockId) * lastPrice;
   }
 
+  /** 融资负债（多头批次 borrow 本金 + 已摊利息合计） */
+  financeDebt(stockId) {
+    const p = this.longs.get(stockId);
+    if (!p) return 0;
+    let d = 0;
+    for (const lot of p.lots) d += lot.debt || 0;
+    return d;
+  }
+
   /**
-   * 权益 = 可用现金 + 挂单冻结 + 空头保证金 + 多头市值 - 空头市值
-   * （融券现金流模型：开空时卖出所得已入账，空头盈亏隐含在 -空头市值 中）
+   * 权益 = 可用现金 + 挂单冻结 + 空头保证金 + 多头市值 - 空头市值 - 融资负债 - 做空欠息
+   * （融券现金流模型：开空时卖出所得已入账，空头盈亏隐含在 -空头市值 中；
+   *   融资负债含未付利息，利息在摊入时已同步扣减 realizedPnL，权益与账本同步下移；
+   *   做空欠息是扣不动现金/保证金时挂账的融券利息，性质同样是负债，
+   *   不扣会让破产账户的权益虚高，排行榜与维持率判定一起失真）
    */
   equity(stockId, lastPrice) {
-    return this.cash + this.orderFrozen + this.shortMargin + this.longValue(stockId, lastPrice) - this.shortMV(stockId, lastPrice);
+    return (
+      this.cash +
+      this.orderFrozen +
+      this.shortMargin +
+      this.longValue(stockId, lastPrice) -
+      this.shortMV(stockId, lastPrice) -
+      this.financeDebt(stockId) -
+      this.lendInterestDebt
+    );
   }
 
   shortMV(stockId, lastPrice) {

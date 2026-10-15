@@ -90,6 +90,12 @@ for (let i = 0; i < 5; i++) g1.tick();
 assert(acc1.shortQty(g1.stock.id) > 0, `成交后持有空头 ${acc1.shortQty(g1.stock.id)} 股`);
 assert(acc1.orders.has(restingId), '活动委托仍在账户挂单表里');
 
+// 融资负债随多头批次落盘：手动挂负债并标脏，重启后必须原样恢复
+acc1.longPos(g1.stock.id).lots[0].debt = 1234.56;
+p1.touch(acc1);
+g1.tick();
+assert(acc1.financeDebt(g1.stock.id) > 0, `注入融资负债 ${acc1.financeDebt(g1.stock.id)}`);
+
 const before = {
   startedAt: g1.startedAt,
   lastPrice: g1.market.lastPrice,
@@ -106,7 +112,7 @@ const before = {
   deposited: acc1.deposited,
   longQty: acc1.longQty(g1.stock.id),
   shortQty: acc1.shortQty(g1.stock.id),
-  lots: acc1.longPos(g1.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved })),
+  lots: acc1.longPos(g1.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0 })),
   tradeCount: acc1.tradeHistory.length,
   pricePoints: g1.market.priceHistory.length,
   tapeCount: g1.market.trades.length,
@@ -148,8 +154,9 @@ assert(acc2.initialLong === acc1.initialLong, '初始持股标记一致');
 console.log('\n[4] 持仓批次（含锁仓时间与预留）完整恢复');
 assert(acc2.longQty(g2.stock.id) === before.longQty, `多头数量一致 ${acc2.longQty(g2.stock.id)}`);
 assert(acc2.shortQty(g2.stock.id) === before.shortQty, `空头数量一致 ${acc2.shortQty(g2.stock.id)}`);
-const lots2 = acc2.longPos(g2.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved }));
-assert(JSON.stringify(lots2) === JSON.stringify(before.lots), `多头批次逐笔一致（${lots2.length} 批，含 ts/reserved）`);
+const lots2 = acc2.longPos(g2.stock.id).lots.map((l) => ({ qty: l.qty, price: l.price, ts: l.ts, reserved: l.reserved, debt: l.debt || 0 }));
+assert(JSON.stringify(lots2) === JSON.stringify(before.lots), `多头批次逐笔一致（${lots2.length} 批，含 ts/reserved/debt）`);
+assert(lots2.some((l) => l.debt === 1234.56), '融资负债 1234.56 原样恢复');
 assert(acc2.shortPos(g2.stock.id).lots.every((l) => l.margin > 0), '空头批次带保证金');
 
 console.log('\n[5] 活动委托回填订单簿');

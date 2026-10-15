@@ -106,9 +106,13 @@ class Game {
       if (!acc) continue;
       const pos = row.side === 'long' ? acc.longPos(row.stock_id) : acc.shortPos(row.stock_id);
       const lot = { qty: row.qty, price: row.price, reserved: row.reserved };
-      // 多头批次带锁仓起始时间（T+锁仓依据），空头批次带保证金
-      if (row.side === 'long') lot.ts = row.ts;
-      else lot.margin = row.margin;
+      // 多头批次带锁仓起始时间（T+锁仓依据）与融资负债；空头批次带保证金
+      if (row.side === 'long') {
+        lot.ts = row.ts;
+        lot.debt = row.debt || 0;
+      } else {
+        lot.margin = row.margin;
+      }
       pos.lots.push(lot);
     }
 
@@ -252,6 +256,10 @@ class Game {
       this.auto.step(now);
       // 融券利息：空头按 tick 付给出借方，券源越少利率越高
       this.market.accrueLendingInterest(now);
+      // 做空欠息追缴：现金/保证金恢复后优先补缴历史欠息
+      this.market.collectLendingDebt();
+      // 融资利息：摊入批次负债并计入已实现盈亏，现金越紧利率越高
+      this.market.accrueFinanceInterest(now);
     }
 
     // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
@@ -356,6 +364,7 @@ class Game {
       action: body.action,
       qty,
       price,
+      finance: body.finance === true, // 融资买入开关（仅 buy_open 生效）
       now: Date.now(),
     });
     if (res.ok) this.broadcast();
@@ -531,6 +540,14 @@ class Game {
           baseMinuteRate: config.margin.lending ? config.margin.lending.baseMinuteRate : 0,
           maxMinuteRate: config.margin.lending ? config.margin.lending.maxMinuteRate : 0,
         },
+        finance: {
+          enabled: !!(config.margin.finance && config.margin.finance.enabled),
+          ratio: config.margin.finance ? config.margin.finance.ratio : 1,
+          baseMinuteRate: config.margin.finance ? config.margin.finance.baseMinuteRate : 0,
+          maxMinuteRate: config.margin.finance ? config.margin.finance.maxMinuteRate : 0,
+          // 当前分钟息（百分数，0.01 = 0.01%/分）：1e6/1e4 比 r2 更干净地消掉浮点尾数
+          minuteRate: Math.round(this.market.financeMinuteRate() * 1e6) / 1e4,
+        },
         initialCash: config.account.initialCash,
         lotSize: this.stock.lotSize,
         maxDeviation: config.trade.maxDeviation,
@@ -568,18 +585,20 @@ class Game {
     const sid = this.stock.id;
     const longPos = acc.longs.get(sid);
     const shortPos = acc.shorts.get(sid);
-
     let longCost = 0;
+    let financeDebtOfLots = 0;
     const longLots = [];
     if (longPos) {
       for (const lot of longPos.lots) {
         longCost += lot.qty * lot.price;
+        financeDebtOfLots += lot.debt || 0;
         const lockedUntil = lot.ts + config.trade.lockMs;
         longLots.push({
           qty: lot.qty,
           price: r2(lot.price),
           ts: lot.ts,
           lockedUntil,
+          debt: r2(lot.debt || 0),
           sellable: Math.max(0, lot.qty - lot.reserved) >= 1 && now >= lockedUntil,
         });
       }
@@ -607,13 +626,26 @@ class Game {
     const longPnl = r2(longValue - longCost);
     const shortPnl = r2(shortCost - shortValue);
 
-    // 强平价推导：cash+orderFrozen+shortMargin + (L-S)*P = 0.3*S*P
+    // 强平价推导（含融资负债与做空欠息）：cash+orderFrozen+shortMargin-debt-debtLend + (L-S)*P = 维持率×敞口×P
+    // 空头强平价：K = ((1+m)*S - L) * P → P = K / ((1+m)S - L)；K 为负时空头端安全
+    // K 的两项负债口径必须与 equity（maybeLiquidate 判定用）完全一致，否则显示与真实触发点分叉：
+    // m 取自配置（写死数字改维持率后即失真），欠息也要扣（它同样进了 equity）
+    const m = config.margin.maintenance;
     let liquidationPrice = null;
-    const K = acc.cash + acc.orderFrozen + acc.shortMargin;
-    const denom = 1.3 * shortQty - longQty;
+    const lendDebt = r2(acc.lendInterestDebt);
+    const riskDebt = r2(financeDebtOfLots + lendDebt); // 融资负债 + 做空欠息
+    const K = acc.cash + acc.orderFrozen + acc.shortMargin - riskDebt;
+    const denom = (1 + m) * shortQty - longQty;
     if (shortQty > 0 && denom > 0) {
       const p = K / denom;
       if (p > 0) liquidationPrice = r2(p);
+    }
+    // 多头（融资）强平价：K + (1-维持率)*Lq*P - Sq*P = 0 → P = -K / ((1-m)*Lq - Sq)
+    let liquidationPriceLong = null;
+    const denomL = (1 - m) * longQty - shortQty;
+    if (r2(financeDebtOfLots) > 0 && longQty > 0 && K < 0 && denomL > 0) {
+      const p = -K / denomL;
+      if (p > 0) liquidationPriceLong = r2(p);
     }
 
     const orders = [];
@@ -637,6 +669,7 @@ class Game {
       cash: r2(acc.cash),
       orderFrozen: r2(acc.orderFrozen),
       shortMargin: r2(acc.shortMargin),
+      financeDebt: r2(financeDebtOfLots), // 融资负债（本金 + 已摊利息）
       equity,
       realizedPnL: r2(acc.realizedPnL),
       deposited: r2(acc.deposited || 0), // 终身累计加钱额
@@ -657,8 +690,10 @@ class Game {
         lots: shortLots,
         coverable: acc.coverableShort(sid),
       },
-      marginUsage: shortQty > 0 && equity > 0 ? r2((shortValue / equity) * 100) : 0, // 风险度 %
+      // 风险度 = （空头市值 + 融资负债 + 做空欠息）/ 权益
+      marginUsage: riskDebt > 0 && equity > 0 ? r2(((shortValue + riskDebt) / equity) * 100) : 0,
       liquidationPrice,
+      liquidationPriceLong,
       // 融券：本人挂借 / 被借走 / 累计利息（被借走 = 挂借 × 池子借出率）
       lending: this.serializeLending(acc),
       orders,
