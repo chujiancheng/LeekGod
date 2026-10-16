@@ -6,6 +6,8 @@
  *   ② 集合竞价 —— 只入簿不成交、最大成交量原则定虚拟成交价、阶段结束集中撮合
  *   ③ 时段门控 —— 休市不下单、竞价不撤单、竞价不风控强平
  *   ④ 日终结算 —— 昨收滚动、当日高低量额归零、委托当日作废
+ *   ⑤ 竞价簿完整性 —— 无「无主委托」（主动吃单残单必须登记）、收敛档撤掉试探远价、
+ *      阶段首 tick 不误报买盘空档
  *
  * 本文件用**真实配置**（涨跌停开着、竞价段的真实毫秒数），
  * 与 game.test.js / market.test.js 里「关掉涨跌停 + 锚到上午段」的简化口径互补。
@@ -535,17 +537,43 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     } finally {
       Math.random = real;
     }
-    return { delta: npc0.fairValue - 20, closed: mk.closedForTrading(now), night: mk.isNight(now) };
+    return {
+      delta: npc0.fairValue - 20,
+      fundDelta: npc0.fund - 20,
+      closed: mk.closedForTrading(now),
+      night: mk.isNight(now),
+    };
   };
 
-  const m1 = at(P.morning + 1000);
-  const l1 = at(P.lunch + 1000);
-  const n1 = at(P.night + 1000);
+  // 隔离「推力」本身：先关掉三条回归项（向最新价 / 向重心 / 重心向发行价）。
+  // 夜间放大的是**整条定价路径**（短端公允 + 基本面重心一起按 overnightDriftMul 迁移，
+  // 见 config.npc.fundOvernightFollow），重心再通过 fvAnchor 二次耦合回公允价，
+  // 而 fundAnchor 的对数回归本来就是非线性的——不隔离的话比值只剩"13 倍左右"，
+  // 恰好看不出倍数是否真的生效。关掉回归项后，步进严格 = 20 × 漂移 × 倍数
+  const keep = {
+    priceCoupling: config.npc.priceCoupling,
+    fvAnchor: config.npc.fvAnchor,
+    fundAnchor: config.npc.fundAnchor,
+  };
+  config.npc.priceCoupling = 0;
+  config.npc.fvAnchor = 0;
+  config.npc.fundAnchor = 0;
+  let m1, l1, n1;
+  try {
+    m1 = at(P.morning + 1000);
+    l1 = at(P.lunch + 1000);
+    n1 = at(P.night + 1000);
+  } finally {
+    Object.assign(config.npc, keep);
+  }
   assert(m1.closed === false && m1.night === false, '上午：可交易、非夜间');
   assert(l1.closed === true && l1.night === false, '午休：休市但不是夜间');
   assert(n1.closed === true && n1.night === true, '夜间：休市且是夜间');
   assert(Math.abs(l1.delta - m1.delta) < 1e-9, `午休步进与上午相同（${m1.delta.toFixed(6)} vs ${l1.delta.toFixed(6)}）`);
-  assert(Math.abs(n1.delta - m1.delta * 3) < 1e-9, `夜间步进是上午的 3 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * 3).toFixed(6)}）`);
+  const mul = config.npc.overnightDriftMul;
+  assert(Math.abs(n1.delta - m1.delta * mul) < 1e-9, `夜间公允步进是上午的 ${mul} 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * mul).toFixed(6)}）`);
+  assert(config.npc.fundOvernightFollow === true, '夜间基本面重心同步放大（否则机构的定价锚一夜不动，跳空被稀释一半）');
+  assert(Math.abs(n1.fundDelta - m1.fundDelta * mul) < 1e-9, `夜间重心步进同倍数放大（${n1.fundDelta.toPrecision(14)} vs ${(m1.fundDelta * mul).toPrecision(14)}）`);
 }
 
 // ============================================================
@@ -594,6 +622,111 @@ console.log('\n[18] 盘后消息：作用期跨夜，次日开盘竞价仍驱动
   const gap = g.news.nextAt - Date.now();
   assert(g.news.nextAtPhase === 'night', `阶段登记切到夜间（${g.news.nextAtPhase}）`);
   assert(gap > 0 && gap <= config.news.phaseRules.night.maxIntervalMs, `夜间倒计时被拉回盘后节奏（${gap}ms ∈ (${config.news.phaseRules.night.minIntervalMs}, ${config.news.phaseRules.night.maxIntervalMs}]）`);
+}
+
+// ============================================================
+console.log('\n[19] 竞价簿里没有「无主委托」：主动吃单的残单也登记，收敛档才撤得掉');
+{
+  // 竞价段"只入簿不撮合"→ 每一笔主动吃单都留下残单。这几笔单如果不进 ownResting，
+  // requote 就撤不掉它们；而下一笔主动单又会拿这张远价当对手价再往外定一分，
+  // 试探档的 ±8% 就是这么被滚出去的——收敛档撤不掉，竞价成交价被拖出 ±3%
+  const g = new Game();
+  for (const s of config.stocks) g.npcs.get(s.id).init(g.startedAt);
+  const eng = g.npcs.get(ID);
+  const mk = g.markets.get(ID);
+  const lot = STOCK.lotSize;
+
+  // 先过完第 1 天：收盘竞价 → 夜间（日终委托作废，簿是干净的）→ 第 2 天开盘竞价
+  g.day.reanchor(Date.now() - P.closeAuction);
+  g.tick();
+  g.day.reanchor(Date.now() - P.night);
+  g.tick();
+  g.day.reanchor(Date.now() - P.dayMs - 500);
+  for (let i = 0; i < 3; i++) g.tick();
+  assert(mk.auctionKind(Date.now()) === 'open', '第 2 天开盘竞价：只入簿不撮合');
+
+  // ① 主动吃单的残单必须进 ownResting
+  const prevDepthAware = config.npc.intent.depthAware;
+  config.npc.intent.depthAware = false; // 关掉冲击成本上限，让残单必然产生
+  eng.intent = { mode: 'none', left: 0, age: 0, lure: 0, ref: 0, power: 1 };
+  const ask0 = mk.book.asks[0];
+  assert(!!ask0, `竞价簿里已有卖盘（${mk.book.asks.length} 档）`);
+  let residual = [];
+  for (const n of [...eng.npcs].sort((a, b) => b.acc.cash - a.acc.cash)) {
+    if (n.acc === ask0.account) continue;
+    n.sentiment = 1;
+    n.wantShort = false;
+    const before = new Set(n.ownResting.map((o) => o.id));
+    eng.tryAggressive(n, Date.now());
+    const added = n.ownResting.filter((o) => !before.has(o.id) && mk.book.orders.has(o.id));
+    if (added.length) {
+      residual = added;
+      break;
+    }
+  }
+  config.npc.intent.depthAware = prevDepthAware;
+  assert(
+    residual.length > 0,
+    `主动吃单残单已登记进 ownResting（${residual.length} 张 ${residual.map((o) => o.action).join(',')}）`
+  );
+
+  // ② 收敛档撤掉试探档留下的远价：手工塞一张 +6% 的"试探远价"并登记为有主
+  const far = eng.npcs.reduce((a, b) => (b.acc.cash > a.acc.cash ? b : a));
+  const farPx = mk.clampPrice(mk.lastPrice * 1.06);
+  far.acc.cash = Math.max(far.acc.cash, farPx * lot * 20);
+  const rf = mk.place(far.acc, {
+    action: ACTIONS.BUY_OPEN,
+    qty: lot * 50,
+    price: farPx,
+    now: Date.now(),
+    noCooldown: true,
+  });
+  if (rf.ok) far.ownResting.push(rf.order);
+  assert(rf.ok && mk.book.orders.has(rf.order.id), `试探远价已挂上（${farPx}，距最新价 +6%）`);
+
+  // 链式效应：这张远价成了最优买盘，别的账户拿它当对手价再往外定一分（bid - 0.01）
+  for (let t = 2000; t < 17000 && mk.auctionKind(Date.now()) === 'open'; t += 1000) {
+    g.day.reanchor(Date.now() - P.dayMs - t);
+    g.tick();
+  }
+
+  // 推进到收敛档（锁单前 auctionConvergeMs，仍可撤单）：tag 切换触发全体重报价
+  const ac = config.day.phases[0];
+  g.day.reanchor(Date.now() - (ac.ms - ac.cancelLockMs - 1000));
+  g.tick();
+  assert(!mk.book.orders.has(rf.order.id), '进入收敛档后试探远价被撤掉（tag 切换触发重报价）');
+
+  const owners = new Set();
+  for (const n of eng.npcs) for (const o of n.ownResting) owners.add(o.id);
+  const orphan = [...mk.book.orders.values()].filter(
+    (o) => o.account && o.account.isNPC && !owners.has(o.id)
+  );
+  assert(orphan.length === 0, `竞价簿内无主委托 = 0（实际 ${orphan.length} / 簿内 ${mk.book.orders.size}）`);
+  // 允许点差带来的少量外溢，但绝不能出现试探档量级的远价
+  const over = [...mk.book.orders.values()].filter(
+    (o) =>
+      o.account &&
+      o.account.isNPC &&
+      Math.abs(o.price / mk.lastPrice - 1) > config.npc.quoteCushion + 0.008
+  );
+  assert(
+    over.length === 0,
+    `收敛档后无超出 ±${(config.npc.quoteCushion * 100).toFixed(0)}% 的 NPC 报价（实际 ${over.length}）`
+  );
+
+  // ③ 开服首 tick 不误报「买盘侧为空」：init() 不挂单，首个 step 里 recycleLiquidity
+  //    跑在报价循环之前，簿天然是空的——那不是症状
+  const g2 = new Game();
+  for (const s of config.stocks) g2.npcs.get(s.id).init(g2.startedAt);
+  const eng2 = g2.npcs.get(ID);
+  g2.day.reanchor(Date.now() - P.morning - 1000);
+  g2.tick();
+  assert(
+    eng2._quotedOnce === true && !eng2._dryLogged,
+    '首个 tick 不误报买盘为空（闸在本阶段第一轮报价之前生效）'
+  );
+  eng2.setSession({ key: 'afternoon', pct: 0, auction: null, converging: false });
+  assert(eng2._quotedOnce === false, '阶段切换重新武装闸（新阶段第一 tick 也不算症状）');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

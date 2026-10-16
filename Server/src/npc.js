@@ -29,6 +29,36 @@ function totalNpcCount(cfg = config.npc) {
   return Object.values(cfg.types).reduce((s, t) => s + t.count, 0);
 }
 
+/**
+ * 交易日阶段的活跃度乘子 = 阶段基准 × 段内 U 型曲线。
+ *
+ * 真实市场的日内量能是 U 型（开盘半小时与尾盘半小时最重、午间清淡），
+ * 引入「天」之后盘面必须跟着段走，否则「天」只体现在时钟与竞价上。
+ * 段内曲线是分段线性的：段首 openBurstMul 衰减到 troughMul、中段保持谷底、
+ * 段尾回升到 closeRampMul——比阶跃曲线更贴近真实的"逐渐清淡 / 逐渐回暖"。
+ *
+ * 没有阶段信息（未接交易日时钟、或配置关掉）时恒为 1，等价于旧行为。
+ * @param {{key:string, pct:number}|null} s 由 Game.tick 下发的阶段快照
+ */
+function phaseActivity(s) {
+  const r = config.npc.rhythm;
+  if (!r || !r.enabled || !s) return 1;
+  const base = r.phases && r.phases[s.key] != null ? r.phases[s.key] : 1;
+  let curve = 1;
+  if (r.curvePhases && r.curvePhases.indexOf(s.key) >= 0 && Number.isFinite(s.pct)) {
+    const ob = r.openBurstPct;
+    const cb = 1 - r.closeRampPct;
+    if (s.pct < ob) {
+      curve = r.openBurstMul + (r.troughMul - r.openBurstMul) * (s.pct / ob);
+    } else if (s.pct > cb) {
+      curve = r.troughMul + (r.closeRampMul - r.troughMul) * ((s.pct - cb) / r.closeRampPct);
+    } else {
+      curve = r.troughMul;
+    }
+  }
+  return Math.max(0.2, base * curve);
+}
+
 /** 旧档 role=retail → 现行类型；其余原样 */
 function normalizeNpcType(role, cfg = config.npc) {
   if (role === 'retail') return cfg.legacyRetailType || 'small';
@@ -66,6 +96,15 @@ class NpcManager {
     // 与 fairValue/fund/regime 一样不落盘——重启后重新观察盘面再决定
     this.intent = { mode: 'none', left: 0, age: 0, lure: 0, ref: 0, shortRef: 0, power: 1 };
     this.intentCool = { squeeze: 0, accumulate: 0, distribute: 0 };
+    // 交易日阶段快照（Game.tick 每 tick 下发；未接时钟时为 null = 旧行为）。
+    // 只影响交易行为（吃单率/单笔量/重报价/点差/竞价报价缓冲），不碰公允价值
+    this.session = null;
+    this._sessionKey = null; // 上一次下发的阶段 key（用来识别阶段切换）
+    // 本阶段是否已经完整走过一轮报价。新阶段的第一 tick 簿天然是空的（日终委托作废、
+    // 竞价刚开始），此时报"买盘侧为空"是假症状——只是这一 tick 还没轮到自己挂单
+    this._quotedOnce = false;
+    this._mul = { aggro: 1, qty: 1, requote: 1, spread: 1 };
+    this._topUpCool = 0; // 买盘空档补款的冷却（tick）
     // 多股票：把「基准股」（流通 1 亿股 @ 20 元）口径的做市资金与报单量折算到本股。
     // 不折算的话，同一笔钱在 43 亿的阿里上是小溪、在 20 亿的大米上是大河，
     // 各股票的盘口深度会差出一倍多。资金按流通市值缩、股数按流通股数缩。
@@ -77,6 +116,76 @@ class NpcManager {
   /** 按类型取行为档案（初始化时已挂到 n.profile） */
   profileOf(n) {
     return n.profile || config.npc.types[n.type] || config.npc.types.small;
+  }
+
+  /**
+   * 交易日阶段注入（`Game.tick` 每 tick 一次；时钟未启用时下发 null）。
+   * @param {{key:string, pct:number, auction:string|null, converging:boolean}|null} s
+   */
+  setSession(s) {
+    // 阶段切换时重新武装「首 tick 不算症状」的闸：日终作废（夜间）之后进入次日竞价，
+    // 或竞价结束翻连续竞价时，簿本来就可能是空的，那不是买盘空档
+    const key = s ? s.key : null;
+    if (key !== this._sessionKey) {
+      this._sessionKey = key;
+      this._quotedOnce = false;
+    }
+    this.session = s || null;
+  }
+
+  /** 本 tick 的阶段活跃度（1 = 与"没有天"的旧行为等价） */
+  activity() {
+    return this.session ? phaseActivity(this.session) : 1;
+  }
+
+  /**
+   * 把活跃度摊到四条行为通道上。分开给敏感度是因为这几件事在真实盘里的
+   * 放大倍数并不一样：吃单率几乎跟着活跃度走，挂单量涨得慢一些，
+   * 点差是反向的（越活跃成交越容易，做市商愿意收窄）。
+   */
+  updateActivityMuls() {
+    const r = config.npc.rhythm || {};
+    const act = this.activity();
+    const g = (gain) => Math.max(0.2, 1 + (act - 1) * (gain == null ? 1 : gain));
+    this._mul.aggro = g(r.aggroGain);
+    this._mul.qty = g(r.qtyGain);
+    this._mul.requote = g(r.requoteGain);
+    this._mul.spread = g(r.spreadGain);
+  }
+
+  /**
+   * 本 tick 的报价缓冲（报价中枢离最新价的硬夹）。
+   * 开盘集合竞价的**试探档**放宽到 `auctionCushionOpen`：只有在这里，
+   * 隔夜走远的定价锚才真的体现在竞价成交价上（= 隔夜跳空）。进入收敛档
+   * （锁单前 `auctionConvergeMs`）之后回到常规 `quoteCushion`。
+   *
+   * ⚠️ 放大只是「允许」，不等于跳空就有那么大：真正的印刷价由收敛档这一步决定——
+   * 收敛档把全体报价夹回 ±quoteCushion，并撤掉试探档留下的远价。实测（gap-probe
+   * 60 样本）缓冲 8% 不收敛 std 2.90% / ≥3% 占 15%，同样 8% 但有收敛档
+   * std 1.54% / ≥3% 占 6.7%——收敛档吃掉了放大效果的一半。所以
+   * `auctionCushionOpen` 与 `auctionConvergeMs` 是强耦合的，改一个要连另一个一起看。
+   */
+  quoteCushion() {
+    const cfg = config.npc;
+    const s = this.session;
+    if (s && s.auction === 'open' && !s.converging && cfg.auctionCushionOpen != null) {
+      return cfg.auctionCushionOpen;
+    }
+    return cfg.quoteCushion;
+  }
+
+  /**
+   * 本 tick 报价中枢里「最新价」的权重。竞价试探档压到 `auctionProbeLastWeight`：
+   * 竞价里的"最新价"还是昨收（过了一夜的信息），参与者拿着新估值报价，
+   * 不该贴着昨收——否则隔夜漂移被中枢稀释掉四成，跳空建不起来。
+   */
+  quoteLastWeight(p) {
+    const cfg = config.npc;
+    const s = this.session;
+    if (s && s.auction === 'open' && !s.converging && cfg.auctionProbeLastWeight != null) {
+      return cfg.auctionProbeLastWeight;
+    }
+    return p.quoteLastWeight != null ? p.quoteLastWeight : cfg.quoteLastWeight;
   }
 
   /** 初始化 NPC 账户、持仓与初始报价 */
@@ -143,6 +252,8 @@ class NpcManager {
           camp: t.useCamp ? (instIdx++ % 2 === 0 ? 1 : -1) : 0,
           ownBias: 0,
           ownResting: [],
+          // 竞价报价档位（'probe' 试探档 / 'converge' 收敛档），离开竞价清空
+          aucTag: null,
           // 报价阵营：同股多空互斥下每张单只能落在一侧，空头阵营要先派发库存再翻净空
           wantShort: false,
           // 大户错峰更散，小散户随机拉长，避免同拍重报价
@@ -159,8 +270,9 @@ class NpcManager {
     if (this.priceTrail.length > config.npc.momentumTicks + 10) {
       this.priceTrail.shift();
     }
+    this.updateActivityMuls();
     this.updateFairValue(now);
-    this.recycleLiquidity();
+    this.recycleLiquidity(now);
     this.updateForce(now);
     this.updateMoodPolar();
     this.updateIntent();
@@ -172,11 +284,15 @@ class NpcManager {
       this.syncLend(n);
       const shouldRequote = this.shouldRequote(n, now);
       if (shouldRequote) this.requote(n, now);
-      // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate
+      // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate。
+      // 再乘日内节奏：开盘/尾盘段吃单更密、午间更稀
       const p = this.profileOf(n);
-      const rate = p.aggressiveRate * (p.polarOrderScale ? 1 + this.polar * 0.8 : 1);
+      const rate =
+        p.aggressiveRate * (p.polarOrderScale ? 1 + this.polar * 0.8 : 1) * this._mul.aggro;
       if (Math.random() < rate) this.tryAggressive(n, now);
     }
+    // 本阶段已经完整走过一轮报价：此后买盘侧还是空的，就是真的空档（见 recycleLiquidity）
+    this._quotedOnce = true;
   }
 
   /**
@@ -202,10 +318,18 @@ class NpcManager {
 
     this.updateTrend();
 
+    // 夜间（40 秒休市代表现实的一整夜）推力按 overnightDriftMul 放大。
+    // **重心与短端公允一起放大**——只推短端的话，机构的定价锚（fundWeight 0.7）一夜不动，
+    // 而机构是竞价簿里单量最大的一侧，最大成交量原则算出的开盘价会被这批"没改口"的
+    // 报价拉回昨收，跳空幅度衰减掉一半以上（见 config.npc.fundOvernightFollow）
+    const overnight = this.market.isNight && this.market.isNight(now);
+    const trendMul = overnight ? cfg.overnightDriftMul || 1 : 1;
+    const fundMul = overnight && cfg.fundOvernightFollow ? trendMul : 1;
+
     // 重心跟随趋势慢一拍迁移（大级别的底），再以约 15 分钟时间常数回归发行价。
     // 回归用对数空间（乘性距离对称）：涨十倍和跌到十分之一受同等强度的拉回，
     // 不会像线性回归那样把深跌底部额外托住
-    this.fund *= 1 + this.trendDrift * cfg.fundTrendFollow;
+    this.fund *= 1 + this.trendDrift * fundMul * cfg.fundTrendFollow;
     this.fund *= 1 + Math.log(init / this.fund) * cfg.fundAnchor;
     this.fund *= 1 + gauss() * cfg.fundNoiseRel;
 
@@ -214,8 +338,7 @@ class NpcManager {
     // **只有夜间**按 overnightDriftMul 放大——游戏里的 40 秒夜间代表现实一整夜，
     // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
     // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
-    const overnight = this.market.isNight && this.market.isNight(now);
-    fv *= 1 + this.trendDrift * (overnight ? cfg.overnightDriftMul || 1 : 1);
+    fv *= 1 + this.trendDrift * trendMul;
     fv *= 1 + this.news.fvDrift(now, this.stock.id); // 消息推力（乘性，只算本股 + 大盘消息）
     fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
     fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
@@ -754,48 +877,120 @@ class NpcManager {
   }
 
   /**
-   * 流动性回收：NPC 全池现金被空头保证金吸干（开空时现金的一半进保证金）
-   * 后，盘面没人买得动 → 双向死锁。低于地板时每 tick 向地板回补一小段，
-   * 只"补到地板"不无限注水；日志每个枯竭周期记一次
+   * 流动性回收：做市池的"活水"。两条判据，触发的东西完全不同——
+   *
+   * ① **全池现金低于地板**（原有）：空头保证金会把池子吸干（开空时现金的一半进保证金），
+   *    钱归零后没人买得动 → 双向死锁。按人头平均回补一小段，只补到地板不注水。
+   *
+   * ② **买盘侧空了**（2026-10-16 加）：这才是真正的失败态——玩家挂卖单没人接、
+   *    砸盘直接穿档。**根因不是池子没钱，是钱的位置**：实测买盘空那一刻全池现金
+   *    仍占流通市值 18.75%（有买盘时 18.92%，几乎一样），但拿得出一个手数现金的
+   *    账户只剩 **19.9/316**——一天下来散户/中户都把现金换成了股票，钱集中在机构手里，
+   *    买盘侧实际只剩十几个聪明钱账户，它们一转空头阵营买盘就整侧空掉。
+   *    所以**按症状补**：只在买盘真的空了的时候，给最穷的几个账户补到
+   *    `liquidityTopUpLots` 手，补一次歇 `liquidityTopUpCooldown` tick。
+   *
+   * ⚠️ 冷却与"每次只补几个人头"是必需的，不是保守：补进去的钱会被立刻挂成买盘
+   * （可用现金随即归零），按"人头不足"当判据的话**每 tick 都会触发**——
+   * 正式服实测 3 秒内连记 4 条日志，等于逐 tick 无限注水，还会把账户反复标脏。
    */
-  recycleLiquidity() {
+  recycleLiquidity(now = Date.now()) {
     const cfg = config.npc;
-    if (!cfg.liquidityFloor || !this.npcs.length) return;
-    // 地板的绝对金额随本股流通市值等比放大：大盘股盘口深、需要的活水也多
-    const floor = cfg.liquidityFloor * this.capScale;
+    if (!this.npcs.length) return;
+    if (this._topUpCool > 0) this._topUpCool -= 1;
+    const lot = this.stock.lotSize;
+    const need = (this.market.lastPrice || 1) * lot; // 挂一手需要的现金
     let cash = 0;
     for (const n of this.npcs) cash += n.acc.cash;
-    if (cash >= floor) {
+    const floor = (cfg.liquidityFloor || 0) * this.capScale;
+    const dry = !!cfg.liquidityFloor && cash < floor;
+    // 集合竞价里簿是"只累积不撮合"的、开盘那一 tick 本来就空，不算症状；
+    // 同理本阶段第一 tick（`_quotedOnce` 还没置）也还没轮到自己挂单——
+    // init() 不挂单，首个 step 里 recycleLiquidity 跑在报价循环**之前**，
+    // 缺这道闸的话每次开服/换阶段都会给 10 只股票各记一条假的"买盘侧为空"
+    const auction = this.market.auctionKind ? this.market.auctionKind(now) : null;
+    const noBid = !auction && this._quotedOnce && this.market.book.bids.length === 0;
+    if (!dry && (!noBid || this._topUpCool > 0)) {
       this._dryLogged = false;
       return;
     }
     if (!this._dryLogged) {
       this._dryLogged = true;
       logger.info(
-        `[我是股神] ${this.stock.name} NPC 池现金枯竭（${r2(cash)} < ${r2(floor)}），开始向地板回补`
+        `[我是股神] ${this.stock.name} NPC 池流动性不足（` +
+          (dry ? `全池现金 ${r2(cash)} < 地板 ${r2(floor)}` : `买盘侧为空`) +
+          `），开始回补`
       );
     }
-    const need = (floor - cash) * cfg.liquidityRefill;
-    const per = need / this.npcs.length;
-    for (const n of this.npcs) n.acc.cash = r2(n.acc.cash + per);
-    // 现金变化影响挂单冻结口径，存档器需要知道这些账户变了
-    for (const n of this.npcs) this.market.notifyChange(n.acc);
+    if (dry) {
+      const per = ((floor - cash) * cfg.liquidityRefill) / this.npcs.length;
+      for (const n of this.npcs) n.acc.cash = r2(n.acc.cash + per);
+      // 现金变化影响挂单冻结口径，存档器需要知道这些账户变了
+      for (const n of this.npcs) this.market.notifyChange(n.acc);
+      return;
+    }
+    // 买盘空了：只给最穷的几个人头补到目标，然后歇一会儿
+    const lots = cfg.liquidityTopUpLots != null ? cfg.liquidityTopUpLots : 8;
+    const heads = cfg.liquidityTopUpHeads != null ? cfg.liquidityTopUpHeads : 2;
+    const cd = cfg.liquidityTopUpCooldown != null ? cfg.liquidityTopUpCooldown : 12;
+    if (heads <= 0) return; // 配 0 = 关掉这条（探针 A/B 用）
+    const target = need * lots;
+    // 只补**还有买入空间**的账户：钱给了已经打满 longCapMult 的账户也进不了买盘，
+    // 只会变成闲钱把池子现金越垫越高（进而抬高力量天平的"弹药"票）。
+    // 这条同时给机制设了一个自然上界——全池买入空间被填满后它就不再注水
+    const poor = this.npcs
+      .filter((n) => n.acc.cash < target && this.longCapacity(n) >= lot)
+      .sort((a, b) => a.acc.cash - b.acc.cash);
+    if (!poor.length) {
+      this._topUpCool = cd;
+      return;
+    }
+    const k = Math.min(poor.length, heads);
+    for (let i = 0; i < k; i++) {
+      poor[i].acc.cash = r2(target);
+      this.market.notifyChange(poor[i].acc);
+    }
+    this._topUpCool = cd;
   }
 
   shouldRequote(n, now) {
     // 集合竞价：只在手上完全没有挂单时补一次盘口，之后保持不动。
     // 跟着 tick 一直撤单-重挂会把竞价簿搅散——竞价要的是"委托累积起来"，
-    // 每 tick 撤光重挂的话虚拟成交价永远在抖，也凑不出真实的集中成交量
+    // 每 tick 撤光重挂的话虚拟成交价永远在抖，也凑不出真实的集中成交量。
+    // 例外是**试探档 → 收敛档**这一次切换（锁单前 auctionConvergeMs）：
+    // 真实市场 09:20 前会有一波撤掉试探远价的动作，报价在这里必须重新落一次
     if (this.market.auctionKind && this.market.auctionKind(now)) {
+      const tag = this.session && this.session.converging ? 'converge' : 'probe';
+      if (n.aucTag !== tag) {
+        n.aucTag = tag;
+        return true;
+      }
       return n.ownResting.length === 0;
     }
+    n.aucTag = null;
     if (n.ownResting.length === 0) return true;
+    // 买盘侧空着、而自己有现金却没有活买单 → 立刻补，不等随机门。
+    // 这是买盘空档的主要来源：自己的买单被卖方吃光之后，手上还剩一张卖单
+    // （ownResting 非空）就要等 25%/tick 的随机门，平均 4~5 tick 才补回买盘——
+    // 实测买盘空档那一刻，"有资格挂买盘"的账户全部卡在这里（手上只有卖单在挂）。
+    // ⚠️ 判据只看**买侧**（bids 空 + 有现金 + 没有活买单），从不看卖侧；而 requote
+    // 是双边撤挂，所以这里一旦放行，手上那张卖单也会被一起撤掉重挂。这是有意的
+    // （双边同时重挂价差更整齐），但别理解成"卖侧不空就不补"——卖侧空不空跟这个分支无关
+    if (
+      this.market.book.bids.length === 0 &&
+      n.acc.cash >= this.market.lastPrice * this.stock.lotSize &&
+      !n.ownResting.some(
+        (o) => o.status === 'live' && (o.action === ACTIONS.BUY_OPEN || o.action === ACTIONS.BUY_CLOSE)
+      )
+    ) {
+      return true;
+    }
     if (n.requoteIn > 0) {
       n.requoteIn -= 1;
       return false;
     }
-    // 随机 + 目标价偏离触发重报价
-    if (Math.random() < 0.25) {
+    // 随机 + 目标价偏离触发重报价（活跃时段重报更勤，盘口跟得更紧）
+    if (Math.random() < 0.25 * this._mul.requote) {
       n.requoteIn = Math.floor(rand(config.npc.minRequoteTicks, config.npc.minRequoteTicks + 5));
       return true;
     }
@@ -821,7 +1016,7 @@ class NpcManager {
     // 同时保留对公允/基本面的领先量——锚领先时主动吃单会触发，价格被一段段拉过去
     const cfg = config.npc;
     const lastPx = this.market.lastPrice;
-    const qlw = p.quoteLastWeight != null ? p.quoteLastWeight : cfg.quoteLastWeight;
+    const qlw = this.quoteLastWeight(p);
     const base = qlw * lastPx + (1 - qlw) * fv;
     // 情绪直接平移报价中枢，再硬夹到最新价 ±quoteCushion（小于价格笼子 5%）：
     // 公允价值无论滑多远，盘口都留在可成交区间，成交不会被笼子切断
@@ -829,11 +1024,15 @@ class NpcManager {
     // 战术意图的额外压价（压盘吸筹：把报价中枢按下去，反弹一上来就被自己的卖单压住）
     const ie = this.intentEffects(n);
     if (ie && ie.pressDown) center *= 1 - ie.pressDown;
-    const cush = cfg.quoteCushion;
+    const cush = this.quoteCushion();
     center = Math.min(lastPx * (1 + cush), Math.max(lastPx * (1 - cush), center));
-    // 点差按价格比例缩放（价位高点差大、价位低点差小），下限 0.02 防止取整后买一=卖一
+    // 点差按价格比例缩放（价位高点差大、价位低点差小），下限 0.02 防止取整后买一=卖一；
+    // 再乘日内节奏：活跃段（开盘/尾盘）点差收窄，清淡段放宽
     const spreadRange = p.spread || [0.001, 0.003];
-    const spread = Math.max(0.02, base * rand(spreadRange[0], spreadRange[1]));
+    const spread = Math.max(
+      0.02,
+      base * rand(spreadRange[0], spreadRange[1]) * this._mul.spread
+    );
     const bidPx = this.market.clampPrice(center - spread / 2);
     const askPx = this.market.clampPrice(center + spread / 2);
     const lot = this.stock.lotSize;
@@ -856,7 +1055,7 @@ class NpcManager {
     const blockOpenBuy = wantShort || !!(ie && ie.suppressOpenBuy);
     if ((!wantShort || shortQty > 0) && bidPx > 0.01) {
       let qty = roundLot(
-        rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt) * (ie ? ie.bidBoost : 1),
+        rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt) * (ie ? ie.bidBoost : 1) * this._mul.qty,
         lot
       );
       const coverable = n.acc.coverableShort(this.stock.id);
@@ -891,7 +1090,7 @@ class NpcManager {
     // 挤兑期间这一侧整个停掉：一边往上打一边挂卖单，等于自己给自己拆台。
     const sellable = n.acc.freeSellableLong(this.stock.id, now);
     let askQty = roundLot(
-      rand(rq[0], rq[1]) * this.qtyScale * (1 - tilt) * (ie ? ie.askBoost : 1),
+      rand(rq[0], rq[1]) * this.qtyScale * (1 - tilt) * (ie ? ie.askBoost : 1) * this._mul.qty,
       lot
     );
     if (!(ie && ie.suppressSell)) {
@@ -965,7 +1164,7 @@ class NpcManager {
           // 分歧度越高机构出手越重（多空大战放量），一致期回归常规规模
           const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
           let qty = roundLot(
-            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1),
+            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1) * this._mul.qty,
             lot
           );
           if (isCover) {
@@ -979,11 +1178,14 @@ class NpcManager {
           qty = Math.floor(qty / lot) * lot;
           if (qty >= lot) {
             const price = this.market.clampPrice(ask.price + 0.01);
-            if (isCover) {
-              this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true });
-            } else {
-              this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
-            }
+            // 残单必须登记：impactCap 只保证"大部分成交"，超出最优档承接力的那部分会留在盘口。
+            // 不登记它就不在 ownResting 里，requote 撤不掉 → 竞价段（只入簿不撮合）每一笔主动单
+            // 都变成永久残单，而且**下一笔主动单会拿这笔远价当对手价再往外定一分**（试探档 ±8%
+            // 就是这么被滚出去的），收敛档撤不掉它们，竞价成交价于是被拖出 ±3%
+            const r = isCover
+              ? this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true })
+              : this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
+            if (r && r.ok) n.ownResting.push(r.order);
           }
         }
       }
@@ -1007,34 +1209,36 @@ class NpcManager {
         if (bidRemain < floor) return;
         if (sellable >= 100) {
           let qty = roundLot(
-            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1),
+            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1) * this._mul.qty,
             lot
           );
           qty = sized(Math.min(qty, sellable));
           if (qty >= lot) {
-            this.market.place(n.acc, {
+            const r = this.market.place(n.acc, {
               action: ACTIONS.SELL_CLOSE,
               qty,
               price: this.market.clampPrice(bid.price - 0.01),
               now,
               noCooldown: true,
             });
+            if (r && r.ok) n.ownResting.push(r.order);
           }
         } else if (canShort && !n.acc.sideLock(this.stock.id).long) {
           // 开空同样要求多头端是空的（一手都不剩、也没有在途买开/买平之外的多头占用）
           let qty = roundLot(
-            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1),
+            rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1) * this._mul.qty,
             lot
           );
           qty = sized(qty);
           if (qty >= lot) {
-            this.market.place(n.acc, {
+            const r = this.market.place(n.acc, {
               action: ACTIONS.SELL_OPEN,
               qty,
               price: this.market.clampPrice(bid.price - 0.01),
               now,
               noCooldown: true,
             });
+            if (r && r.ok) n.ownResting.push(r.order);
           }
         }
       }

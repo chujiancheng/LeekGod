@@ -157,9 +157,16 @@ function run(seed) {
     for (const st of config.stocks) {
       const m = g.markets.get(st.id);
       const man = g.npcs.get(st.id);
-      bookSamples += 1;
-      if (m.book.bids.length === 0) emptyBid += 1;
-      if (m.book.asks.length === 0) emptyAsk += 1;
+      // 盘口空档率只在**连续竞价时段**采样：引入「天」之后夜间有日终结算
+      // （委托当日全部作废）与两段集合竞价（只累积不连续撮合），
+      // 这些 tick 里簿本来就是空的/不撮合的，混进来会把空档率从 1% 量级抬到 15%，
+      // 指标直接失去分辨力（实测：不经过滤买盘空 15.57%，改动前后一样高）
+      const phase = g.day && g.day.ok ? g.day.locate(clock) : null;
+      if (!phase || (phase.phase.trading && !phase.phase.auction)) {
+        bookSamples += 1;
+        if (m.book.bids.length === 0) emptyBid += 1;
+        if (m.book.asks.length === 0) emptyAsk += 1;
+      }
       if (lastPx.get(st.id) === m.lastPrice) {
         still += 1;
         if (still === 300) stalls += 1; // 价格连续 300 tick 不动 = 冻结

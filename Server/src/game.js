@@ -405,6 +405,24 @@ class Game {
     // 可交易 = 未停牌 且 不在休市阶段。集合竞价算可交易（只是不连续撮合）
     const active = !halted && !closed;
 
+    // 日内节奏：把当前阶段与段内进度下发给每只股票的做市引擎——NPC 据它调制
+    // 主动吃单率 / 单笔量 / 重报价频率 / 点差（U 型），并在开盘竞价锁单前从
+    // 「试探档」收敛回常规报价缓冲。时钟缺失（day 未启用）时下发 null，退化为旧行为
+    const session = dayState
+      ? {
+          key: dayState.phase.key,
+          pct: dayState.phase.ms ? dayState.elapsedMs / dayState.phase.ms : 0,
+          auction: dayState.phase.auction || null,
+          converging: !!(
+            dayState.phase.auction &&
+            dayState.phase.cancelLockMs &&
+            dayState.leftMs <=
+              dayState.phase.cancelLockMs + (config.npc.auctionConvergeMs || 0)
+          ),
+        }
+      : null;
+    for (const npc of this.npcs.values()) npc.setSession(session);
+
     if (!halted) {
       // 消息方向偏置取全市场平均阶段：10 只股票各自的牛熊互相对冲，
       // 大盘消息（全体 scope）代表的是「整个市场」的方向，用均值最合理。
