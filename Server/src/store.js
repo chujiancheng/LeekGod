@@ -2,6 +2,7 @@
  * 账户存储（内存）：玩家与 NPC 共用同一结构
  */
 const config = require('./config');
+const milestones = require('./milestones');
 
 const r2 = (v) => Math.round(v * 100) / 100;
 
@@ -42,6 +43,11 @@ class Account {
     // 每日免息券：今天这张用掉没有 / 今天是否利息全免（都按交易日号）
     this.couponUsedDay = null;
     this.freeInterestDay = null;
+
+    // ---- 彩蛋里程碑（见 Doc/彩蛋玩法方案.md）----
+    // **只有玩家有**：NPC 一律 null——彩蛋是玩家专属，3160 个 NPC 账户既不判也不落盘。
+    // 判定内核只读这里的状态、只读账户快照，绝不回写任何交易字段
+    this.milestones = isNPC ? null : milestones.emptyState();
   }
 
   /** 取某只股票的融券/计息明细（没有则建一条全零的） */

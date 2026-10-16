@@ -88,6 +88,17 @@
       <span class="halt-left" id="marginCallLeft"></span>
     </div>
 
+    <!-- 彩蛋演出横幅（L2 及以上）：股神猫头像 + 稀有度配色 + 服务端下发的文案。
+         固定定位滑入，不参与文档流——否则它一出现整个页面会往下跳一下 -->
+    <div class="egg-banner" id="eggBanner" hidden>
+      <img class="egg-avatar" id="eggAvatar" alt="" />
+      <div class="egg-body">
+        <span class="egg-head" id="eggHead">--</span>
+        <span class="egg-text" id="eggText">--</span>
+      </div>
+      <button class="egg-close" id="eggClose" type="button">收起</button>
+    </div>
+
     <!-- 股票切换栏：交易终端顶部（顶栏下方），10 只股票 + 大盘指数 -->
     <div class="stock-tabs" id="stockTabs"></div>
 
@@ -116,6 +127,9 @@
 
         <!-- 我的券商：名称 / 声誉星级 / 拥挤度 / 特权清单 / 每周之星 / 免息券 / 转户 -->
         <section class="panel home-card span-3 my-broker-card" id="myBrokerCard"></section>
+
+        <!-- 股神里程碑（彩蛋）：下一档发家线的进度条 + 已获得的称号 -->
+        <section class="panel home-card span-3 egg-card" id="eggCard"></section>
 
         <section class="panel home-card span-2">
           <div class="panel-title">

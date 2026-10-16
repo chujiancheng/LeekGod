@@ -24,6 +24,7 @@ function assert(cond, msg) {
 // ---- 极简 DOM 桩：$() 按 id 惰性造元素，把要断言的值直接挂在元素上 ----
 const els = new Map();
 function mkEl(id) {
+  const cls = new Set();
   return {
     id,
     hidden: false,
@@ -34,7 +35,17 @@ function mkEl(id) {
     value: '',
     style: {},
     dataset: {},
-    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    classList: {
+      add: (c) => cls.add(c),
+      remove: (c) => cls.delete(c),
+      toggle: (c, force) => {
+        const on = force === undefined ? !cls.has(c) : !!force;
+        if (on) cls.add(c);
+        else cls.delete(c);
+        return on;
+      },
+      contains: (c) => cls.has(c),
+    },
     addEventListener() {},
     removeEventListener() {},
     querySelectorAll: () => [],
@@ -66,6 +77,19 @@ const localStorageStub = {
   },
 };
 
+// ---- 定时器登记处：只记录不触发（真跑 app.js，但不等 8 秒横幅超时）----
+let timerSeq = 0;
+const timers = new Map();
+const stubSetTimeout = (fn, delay) => {
+  timerSeq += 1;
+  timers.set(timerSeq, { id: timerSeq, fn, delay: delay || 0, cleared: false });
+  return timerSeq;
+};
+const stubClearTimeout = (id) => {
+  const t = timers.get(id);
+  if (t) t.cleared = true;
+};
+
 // ---- 把 app.js 真跑一遍，并在收尾前把内部函数挂到 globalThis 上 ----
 const srcPath = path.join(__dirname, '..', '..', 'Client', 'app.js');
 // 仓库里的源码是 CRLF，先归一化成 LF 再匹配 IIFE 收尾（vm 执行对换行不敏感）
@@ -85,6 +109,10 @@ src = src.replace(
     renderFlow, renderChartMode, onState,
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall,
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
+    pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
+    setIdentity, resetEggStream,
+    eggState: () => ({ lastSeq: lastEggSeq, queued: eggQueue.length, busy: eggBusy }),
+    eggTimerInfo: () => (eggTimer == null ? null : __timers.get(eggTimer) || null),
     setState: (v) => { state = v; },
     setBrokers: (m) => { brokerMeta = m; },
     setPicked: (k) => { pickedBroker = k; },
@@ -118,12 +146,13 @@ const sandbox = {
   parseFloat,
   isNaN,
   encodeURIComponent,
-  setTimeout: () => 0,
-  clearTimeout: () => {},
+  setTimeout: stubSetTimeout,
+  clearTimeout: stubClearTimeout,
   setInterval: () => 0,
   clearInterval: () => {},
   requestAnimationFrame: () => 0,
   localStorage: localStorageStub,
+  __timers: timers,
   location: { href: 'http://127.0.0.1/', search: '', hash: '' },
   navigator: { userAgent: 'node' },
   document: {
@@ -670,6 +699,184 @@ console.log('\n[14] 追保预警与提前消息');
   assert(early.indexOf('未公开') >= 0, '未满 4★ 的提前消息标「未公开」且无方向');
   assert(early.indexOf('nearly') >= 0, '提前条目左侧有强调');
   assert(early.indexOf('提前') >= 0, '5★ 的提前消息标「提前」并带方向');
+}
+
+console.log('\n[15] 彩蛋：toast / 横幅 / 队列 / seq 去重与进度卡');
+{
+  // ---- seq 去重：首次进入从当前水位起步，不补播历史 ----
+  const mkEggs = (seq, events, extra = {}) =>
+    Object.assign(
+      {
+        enabled: true,
+        seq,
+        events,
+        count: 0,
+        titles: [],
+        title: null,
+        peakEquity: 1000000,
+        drawdown: 0,
+        maxDrawdown: 0,
+        progress: null,
+      },
+      extra
+    );
+  const ev = (id, seq, level, rarity, kind) => ({
+    id,
+    seq,
+    day: 3,
+    t: Date.now(),
+    kind,
+    level,
+    rarity,
+    title: `称号${id}`,
+    text: `文案${id}`,
+    mascot: 'smug',
+  });
+
+  assert(api.eggState().lastSeq === null, '初始还没读过 localStorage 的水位');
+  api.pumpEggs(mkEggs(9, [ev('A01', 8, 'L2', 'common', 'wealth')]));
+  assert(api.eggState().lastSeq === 9, '首次进入把水位记成当前 seq');
+  assert(api.eggState().queued === 0, '首次进入不补播历史事件（陈年横幅不糊脸）');
+  assert(api.eggState().busy === false && api.el('eggHead').textContent === '', '首次进入不弹横幅（横幅位空着，标题从没被写过）');
+
+  assert(api.eggSeqStored() === 9, '水位落进 localStorage（刷新不重播）');
+
+  // ---- L1 走 toast，不占横幅位 ----
+  api.pumpEggs(mkEggs(10, [ev('B1-01', 10, 'L1', 'common', 'crash')]));
+  assert(api.eggState().queued === 0, 'L1 事件直接播完，不进横幅队列');
+  assert(api.eggState().busy === false, 'L1 不占用横幅位');
+
+  // ---- L2 及以上走横幅：猫头像 + 稀有度配色 ----
+  api.pumpEggs(mkEggs(11, [ev('A07', 11, 'L3', 'rare', 'wealth')]));
+  const b = api.el('eggBanner');
+  assert(b.hidden === false, 'L2/L3 弹出横幅');
+  assert(b.className.indexOf('rare') >= 0 && b.className.indexOf('wealth') >= 0, `横幅带稀有度与族类：${b.className}`);
+  assert(api.el('eggAvatar').src === '/img/egg-cat-smug-96.png', `猫头像走白名单路径：${api.el('eggAvatar').src}`);
+  assert(api.el('eggHead').textContent.indexOf('称号A07') >= 0, `标题带称号：${api.el('eggHead').textContent}`);
+  assert(api.el('eggText').textContent === '文案A07', '正文用服务端下发的文案');
+  assert(api.eggState().busy === true, '横幅占用中');
+
+  // ---- 同一帧来多条：按稀有度降序排队，横幅收起后串行播下一条 ----
+  api.pumpEggs(
+    mkEggs(13, [ev('B2-04', 12, 'L4', 'legend', 'crash'), ev('A03', 13, 'L2', 'common', 'wealth')])
+  );
+  assert(api.eggState().queued === 2, '横幅忙时新事件进队列等待');
+  api.hideEggBanner(); // 模拟自动收起
+  assert(api.el('eggBanner').className.indexOf('legend') >= 0, '队列按稀有度降序：传说档先播');
+  assert(api.el('eggHead').textContent.indexOf('称号B2-04') >= 0, '先播的是传说档');
+  api.hideEggBanner();
+  assert(api.el('eggHead').textContent.indexOf('称号A03') >= 0, '串行播下一条');
+  assert(api.eggState().queued === 0, '队列播空');
+  api.hideEggBanner();
+  assert(api.el('eggBanner').hidden === true, '队列空了横幅收起');
+
+  // ---- 已经播过的 seq 不重播（同一帧反复收到也不叠加） ----
+  api.pumpEggs(mkEggs(13, [ev('A03', 13, 'L2', 'common', 'wealth')]));
+  assert(api.eggState().queued === 0 && api.el('eggBanner').hidden === true, 'seq 不大于水位的事件被丢弃');
+
+  // ---- 进度卡 ----
+  const st = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  st.rules = Object.assign(st.rules, { milestones: { enabled: true, tone: 'savage' } });
+  st.account = Object.assign(st.account, {
+    events: mkEggs(13, [], {
+      count: 3,
+      titles: [
+        { id: 'A01', title: '保本出关', rarity: 'common', level: 'L1', day: 1 },
+        { id: 'A05', title: '半个千万', rarity: 'rare', level: 'L2', day: 2 },
+      ],
+      title: { id: 'A05', title: '半个千万', rarity: 'rare', level: 'L2', day: 2 },
+      peakEquity: 5200000,
+      drawdown: 0.0615,
+      maxDrawdown: 0.18,
+      progress: { id: 'A06', title: '八百万', equity: 8000000, from: 5000000, need: 2770000, pct: 0.0733, reached: false },
+    }),
+  });
+  api.setState(st);
+  api.renderEggCard();
+  const card = api.el('eggCard');
+  assert(card.hidden === false, '有彩蛋段时卡片显示');
+  const html = card.innerHTML;
+  assert(html.indexOf('半个千万') >= 0 && html.indexOf('当前称号') >= 0, '展示当前称号（取稀有度最高）');
+  assert(html.indexOf('八百万') >= 0 && html.indexOf('277.00万元') >= 0, '展示下一档与还差多少');
+  assert(html.indexOf('520.00万元') >= 0, '展示峰值权益（水位线）');
+  assert(html.indexOf('6.2%') >= 0 && html.indexOf('18.0%') >= 0, '展示当前回撤与历史最大回撤');
+  assert(html.indexOf('保本出关') >= 0, '已获得的称号都列出来');
+  assert(html.indexOf('data-w="7"') >= 0, '进度条宽度走 data-w（CSP 禁内联 style）');
+
+  // 门槛已达：文案切换成「等收盘确认」
+  const st2 = JSON.parse(JSON.stringify(st));
+  st2.account.events.progress = { id: 'A06', title: '八百万', equity: 8000000, from: 5000000, need: 0, pct: 1, reached: true };
+  api.setState(st2);
+  api.renderEggCard();
+  assert(api.el('eggCard').innerHTML.indexOf('等收盘结算确认') >= 0, '已越过门槛时提示等收盘确认');
+
+  // 服务端关掉彩蛋 / 老服务端没有这个段：卡片隐藏且不报错
+  api.setState(mkState(AUCTION_DAY, null));
+  api.renderEggCard();
+  assert(api.el('eggCard').hidden === true, '没有 account.events 段（老服务端）时卡片隐藏');
+  const st3 = JSON.parse(JSON.stringify(st));
+  st3.rules.milestones = { enabled: false };
+  api.setState(st3);
+  api.renderEggCard();
+  assert(api.el('eggCard').hidden === true, '服务端关掉彩蛋时卡片隐藏');
+
+  // ---- 横幅与 toast 的落点：两类 fixed 元素撞同一块位置，横幅 z-index 更高 ----
+  // 不让位的话，第一条 toast 会被完全盖住——而那正是 pumpEggQueue 刚 toast 出来的 L1 事件，
+  // 也会盖住玩家的成交 / 爆仓提醒
+  ['haltBanner', 'dayBanner', 'marginCallBanner'].forEach((id) => {
+    api.el(id).hidden = true; // 真实页面里这三条初始带 hidden 属性
+  });
+  api.pumpEggs(mkEggs(21, [ev('B1-03', 21, 'L1', 'rare', 'crash'), ev('C02', 22, 'L3', 'rare', 'liquidation')]));
+  assert(api.el('eggBanner').hidden === false, '同批里 L1 先 toast、L2+ 接着弹横幅');
+  assert(api.el('eggHead').textContent.indexOf('称号C02') >= 0, '横幅显示的是 L3 那条');
+  assert(api.el('eggBanner').style.top === '60px', `没有状态横幅时落在顶栏下沿（${api.el('eggBanner').style.top}）`);
+  assert(api.el('toastWrap').style.top === '132px', `toast 容器让到横幅下沿之外（60+72 → ${api.el('toastWrap').style.top}）`);
+  api.hideEggBanner();
+  assert(api.el('toastWrap').style.top === '' && api.el('eggBanner').style.top === '', '横幅收起后两处都复位');
+
+  // ---- 状态横幅可见时，彩蛋横幅让到它下面（追保预警这类提示不能被盖住）----
+  api.el('marginCallBanner').hidden = false;
+  api.el('marginCallBanner').getBoundingClientRect = () => ({ top: 103.6, bottom: 137.7, height: 34.1 });
+  api.pumpEggs(mkEggs(23, [ev('C01', 23, 'L2', 'common', 'liquidation')]));
+  assert(
+    api.el('eggBanner').style.top === '146px',
+    `让到追保横幅下沿（137.7 + 8 → 146px，实际 ${api.el('eggBanner').style.top}）`
+  );
+  assert(api.el('toastWrap').style.top === '218px', `toast 跟着让（146+72 → ${api.el('toastWrap').style.top}）`);
+  api.hideEggBanner();
+  api.el('marginCallBanner').hidden = true;
+
+  // ---- 手动「收起」必须撤掉自动收起的定时器 ----
+  api.pumpEggs(mkEggs(24, [ev('A10', 24, 'L4', 'epic', 'wealth')]));
+  const t1 = api.eggTimerInfo();
+  assert(!!t1 && t1.delay === 8000 && t1.cleared === false, `L4 横幅挂 8 秒的自动收起定时器（${t1 && t1.delay}）`);
+  api.pumpEggs(mkEggs(25, [ev('A12', 25, 'L4', 'legend', 'wealth')]));
+  api.hideEggBanner(); // 手动点「收起」
+  assert(t1.cleared === true, '手动收起把这一条的定时器一起撤掉了');
+  const t2 = api.eggTimerInfo();
+  assert(!!t2 && t2.id !== t1.id && t2.cleared === false, '新横幅有自己的定时器（不会被上一条的残留提前掐掉）');
+  api.hideEggBanner();
+
+  // ---- 服务端 seq 回退（换存档 / 开新局）= 重起一条事件流 ----
+  assert(api.eggSeqStored() === 25, `本地水位推到 25（${api.eggSeqStored()}）`);
+  api.pumpEggs(mkEggs(2, [ev('A01', 1, 'L2', 'common', 'wealth')]));
+  assert(api.eggSeqStored() === 2, '服务端 seq 比本地小 → 水位跟着回退（不再永久封堵新事件）');
+  assert(api.eggState().queued === 0, '回退这一次不补播历史');
+  api.pumpEggs(mkEggs(3, [ev('A02', 3, 'L2', 'common', 'wealth')]));
+  assert(api.el('eggHead').textContent.indexOf('称号A02') >= 0, '回退之后新事件能正常播');
+  api.hideEggBanner();
+
+  // ---- 换号 = 换一条事件流：水位必须跟着清 ----
+  api.setIdentity('alice', 'tok-a');
+  api.pumpEggs(mkEggs(5, [ev('A01', 5, 'L2', 'common', 'wealth')]));
+  assert(api.eggSeqStored() === 5, `alice 的水位记到 5（${api.eggSeqStored()}）`);
+  api.setIdentity('', '');
+  assert(api.eggSeqStored() === null && api.eggState().lastSeq === null, '换号把水位清掉（内存与 localStorage）');
+  api.setIdentity('bob', 'tok-b');
+  api.pumpEggs(mkEggs(1, [ev('A01', 1, 'L2', 'common', 'wealth')])); // 首帧只锚水位（与"首次进入不补播"同规矩）
+  api.pumpEggs(mkEggs(2, [ev('A02', 2, 'L2', 'common', 'wealth')]));
+  assert(api.el('eggHead').textContent.indexOf('称号A02') >= 0, 'bob 的事件照常播（没有继承 alice 的水位）');
+  api.hideEggBanner();
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

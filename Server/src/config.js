@@ -705,6 +705,87 @@ module.exports = {
   },
 
   // ------------------------------------------------------------------
+  // 彩蛋（里程碑）
+  //
+  // 设计见 Doc/彩蛋玩法方案.md。三条纪律写在代码里：
+  // ① **只读观测层**：判定一律读账户快照（收盘权益 / 风险度 / 强平通知），绝不回写任何
+  //    交易状态——任何一个彩蛋玩法的失败都不应该能影响一次撮合的结果；
+  // ② **硬门槛只认收盘结算权益**：一天一次、重启可复现，判定挂在 `Game.settleDay`
+  //    （跨天兜底路径 `ensureDaySettled` 也走它）。P0 不做盘中瞬时演出；
+  // ③ **只有玩家参与**：NPC 那 3160 个账户一律不判、不落盘（逐 tick 标脏是项目禁忌）。
+  //
+  // 权益一律用 `game.equityOf`（与 `stateFor` 下发给客户端的是同一个数），前端不许自己重算。
+  // 未实现的期（P0 之外）**刻意不写进配置**——配置里出现没人读的键，下一个人会以为它在生效：
+  //   全服广播与负面广播开关、股神墙、免息券奖励（P1/P2）、D 族行为彩蛋、C03~C07。
+  // ------------------------------------------------------------------
+  milestones: {
+    enabled: true,
+    // 基调：savage（毒舌，默认，与项目整体语气一致）/ gentle / deadpan，见方案 §6
+    tone: 'savage',
+    // 软着陆（§12 D2）：**收盘权益**跌破这条线后，崩盘/爆仓类文案强制降级为 gentle——
+    // 嘲讽的甜区是"还输得起的人"，亏到只剩一成本来就难受，再嘲讽就是劝退
+    gentleBelowEquity: 100000,
+    // A 族 · 发家线（收盘权益 ≥ 门槛，向上）。**前密后疏**（§12 D1）：
+    // 100 万 → 800 万 用密档，新玩家需要高频正反馈才留得住；1000 万 → 10 亿 拉成大目标，
+    // 后期要的是"大目标"而不是"连续的小惊喜"。
+    // 1 亿 = 「一个小目标」是全局长线主目标：加钱已屏蔽、终身加钱上限也是 1 亿，**只能靠交易赚**
+    wealth: [
+      { id: 'A01', equity: 1100000, title: '保本出关', level: 'L1', rarity: 'common' },
+      { id: 'A02', equity: 1500000, title: '五十个点', level: 'L1', rarity: 'common' },
+      { id: 'A03', equity: 2000000, title: '翻倍人生', level: 'L2', rarity: 'common' },
+      { id: 'A04', equity: 3000000, title: '三百万', level: 'L2', rarity: 'common' },
+      { id: 'A05', equity: 5000000, title: '半个千万', level: 'L2', rarity: 'rare' },
+      { id: 'A06', equity: 8000000, title: '八百万', level: 'L2', rarity: 'rare' },
+      { id: 'A07', equity: 10000000, title: '千万身家', level: 'L3', rarity: 'rare' },
+      { id: 'A08', equity: 20000000, title: '两千万', level: 'L2', rarity: 'rare' },
+      { id: 'A09', equity: 50000000, title: '准亿', level: 'L3', rarity: 'epic' },
+      { id: 'A10', equity: 100000000, title: '一个小目标', level: 'L4', rarity: 'epic' },
+      { id: 'A11', equity: 300000000, title: '三个小目标', level: 'L4', rarity: 'legend' },
+      { id: 'A12', equity: 1000000000, title: '封神', level: 'L4', rarity: 'legend' },
+    ],
+    // B1 族 · 绝对水位跌破（收盘权益 ≤ 门槛，向下）。与 B2 是**两条独立的尺子**，不可混：
+    // 从 100 万做到 5000 万又跌回 1000 万的人，绝对水位仍是 +900%（B1 全亮），
+    // 但回撤 −80%——那才是他真实的痛。只用一条会漏掉另一半玩家
+    absolute: [
+      { id: 'B1-01', equity: 900000, title: '出师不利', level: 'L1', rarity: 'common' },
+      { id: 'B1-02', equity: 700000, title: '七折促销', level: 'L1', rarity: 'common' },
+      { id: 'B1-03', equity: 500000, title: '腰斩', level: 'L2', rarity: 'rare' },
+      { id: 'B1-04', equity: 300000, title: '三折清仓', level: 'L2', rarity: 'rare' },
+      { id: 'B1-05', equity: 100000, title: '回到起点（方向反了）', level: 'L3', rarity: 'epic' },
+      { id: 'B1-06', equity: 10000, title: '一万元户', level: 'L3', rarity: 'epic' },
+      { id: 'B1-07', equity: 1000, title: '精确爆仓预备役', level: 'L3', rarity: 'epic' },
+      { id: 'B1-08', equity: 0, title: '倒欠券商', level: 'L4', rarity: 'legend' },
+    ],
+    // B2 族 · 相对峰值回撤（1 − 收盘权益 / peakEquity）。**越过哪档就发哪档**，
+    // 每档只发一次（`fired` 是幂等键），所以一段持续下跌会把 30% → 50% → 70% → 90%
+    // 依次点亮。早先还有一道"触发后必须回到距峰值 10% 以内才重新武装"的整族闸门
+    // （`drawdownRearmAt`），2026-10-17 删除：它和 `fired` 的幂等语义重复，唯一的效果
+    // 是把首次越过的更高档一起压掉，让 B2-03/B2-04 几乎不可达。
+    drawdown: [
+      { id: 'B2-01', pct: 30, title: '回吐', level: 'L1', rarity: 'common' },
+      { id: 'B2-02', pct: 50, title: '一夜回到解放前', level: 'L2', rarity: 'rare' },
+      { id: 'B2-03', pct: 70, title: '财富蒸发术', level: 'L3', rarity: 'epic' },
+      { id: 'B2-04', pct: 90, title: '从 Billionaire 到 Beggar', level: 'L4', rarity: 'legend' },
+    ],
+    // C 族 · 爆仓线。⚠️ 波动按真实口径收敛后**强平从 66.7 次/天 掉到 0 次/天**，
+    // 爆仓在当前参数下是稀有事件（§12 D3 已拍板：不为救频率改风控参数）。
+    // 所以 C 族的立族之本是「预警 → 擦边 → 落地」三段链，整局没人爆仓时
+    // 「天台初体验」反而是一枚真·勋章。
+    liquidation: [
+      // 收盘风险度 ≥ 80%（券商风控开始注意你）
+      { id: 'C00', kind: 'nearMargin', marginUsage: 80, title: '被风控盯上', level: 'L1', rarity: 'common' },
+      // 收盘风险度 ≥ 95% 而**没爆**——差一点就没了。
+      // `noLiquidationToday`：当天已经被强平过的人不再给这句（口径是「且没爆」，
+      // 爆完再加杠杆回到 95% 的人收到"擦边过关"就是文案打脸）
+      { id: 'C01', kind: 'nearMargin', marginUsage: 95, noLiquidationToday: true, title: '擦边过关', level: 'L2', rarity: 'common' },
+      // 首次被强平
+      { id: 'C02', kind: 'firstLiq', title: '天台初体验', level: 'L3', rarity: 'rare' },
+    ],
+    // 未播事件队列上限（超出丢旧）。一天跨多档时，丢旧的正好留下最高的那几档
+    eventQueueMax: 5,
+  },
+
+  // ------------------------------------------------------------------
   // 券商（出身门派）
   //
   // 设计见 Doc/券商方案.md。三条硬约束写在代码里：

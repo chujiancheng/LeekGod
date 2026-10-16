@@ -827,7 +827,11 @@ input { font: inherit; color: inherit; }
 .toast-wrap {
   position: fixed; top: 68px; left: 50%; transform: translateX(-50%);
   display: flex; flex-direction: column; gap: 8px; z-index: 90; align-items: center;
+  transition: top .2s ease;
 }
+/* top 由 app.js 按"彩蛋横幅下沿"改写（CSP 允许 CSSOM，禁止内联 style 属性）：
+   横幅（fixed / z-index 95）就在这块位置且压在上面，不让位的话第一条 toast 会被
+   完全盖住——包括 pumpEggQueue 刚 toast 出来的 L1 事件，以及成交 / 爆仓提醒 */
 .toast {
   padding: 9px 18px; border-radius: 8px; font-size: 13px;
   background: rgba(18, 23, 34, .96); border: 1px solid var(--line);
@@ -1091,6 +1095,73 @@ input { font: inherit; color: inherit; }
 .margin-banner { border-color: rgba(240, 180, 41, .45); background: rgba(240, 180, 41, .1); }
 .margin-banner .halt-tag { background: rgba(240, 180, 41, .22); color: var(--gold); }
 
+/* ---------- 彩蛋（里程碑） ---------- */
+/* 稀有度四档配色：普通(灰) / 稀有(蓝) / 史诗(紫) / 传说(金)。一条规则管横幅与称号 chip */
+:root { --epic: #a970ff; }
+
+/* L2 演出横幅：固定定位滑入，不参与文档流（否则它一出现整个页面会往下跳一下） */
+.egg-banner {
+  position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+  z-index: 95; width: min(660px, 94vw);
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: rgba(18, 23, 34, .97);
+  border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 10px; box-shadow: var(--shadow);
+  animation: eggIn .26s ease;
+}
+@keyframes eggIn { from { opacity: 0; transform: translate(-50%, -14px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.egg-banner .egg-avatar {
+  flex: none; width: 44px; height: 44px; border-radius: 50%;
+  border: 1px solid var(--line); object-fit: cover;
+}
+.egg-banner .egg-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.egg-banner .egg-head { font-size: 11.5px; font-weight: 700; letter-spacing: .5px; }
+.egg-banner .egg-text { font-size: 13px; color: var(--ink); line-height: 1.5; }
+.egg-banner .egg-close {
+  margin-left: auto; flex: none; padding: 3px 10px; border-radius: 6px;
+  background: transparent; border: 1px solid var(--line); color: var(--muted); font-size: 11.5px;
+}
+.egg-banner .egg-close:hover { color: var(--ink); border-color: var(--blue); }
+
+.egg-banner.common { border-left-color: #6b7688; }
+.egg-banner.common .egg-head { color: #9aa4b8; }
+.egg-banner.rare { border-left-color: var(--blue); }
+.egg-banner.rare .egg-head { color: var(--blue); }
+.egg-banner.epic { border-left-color: var(--epic); }
+.egg-banner.epic .egg-head { color: var(--epic); }
+.egg-banner.legend { border-left-color: var(--gold); background: rgba(46, 35, 12, .97); }
+.egg-banner.legend .egg-head { color: var(--gold); }
+/* 亏钱类把头像压暗一点，赚钱类提亮——同一张素材也能读出情绪 */
+.egg-banner.crash .egg-avatar { filter: saturate(.75) brightness(.92); }
+.egg-banner.liquidation .egg-avatar { filter: grayscale(.35); }
+.egg-banner.legend .egg-avatar { border-color: rgba(240, 180, 41, .6); }
+
+/* L1 的 toast 加一档配色（与 ok/err/info 同级） */
+.toast.egg { border-color: rgba(240, 180, 41, .6); color: #ffe0a3; }
+
+.egg-card { padding: 14px 16px; gap: 10px; }
+.egg-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.egg-cur { font-size: 15px; font-weight: 700; }
+.egg-cur.common { color: #9aa4b8; }
+.egg-cur.rare { color: var(--blue); }
+.egg-cur.epic { color: var(--epic); }
+.egg-cur.legend { color: var(--gold); }
+.egg-cur-sub { font-size: 11px; color: var(--muted); }
+.egg-goal { display: flex; align-items: center; gap: 10px; }
+.egg-goal label { flex: none; font-size: 11.5px; color: var(--muted); }
+.egg-goal .pfull { color: var(--ink); }
+.egg-goal .egg-need { flex: none; font-size: 11px; color: var(--gold); font-variant-numeric: tabular-nums; }
+.egg-note { font-size: 11.5px; color: var(--gold); }
+.egg-titles { display: flex; flex-wrap: wrap; gap: 6px; }
+.egg-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--panel-2);
+}
+.egg-chip.rare { color: var(--blue); border-color: rgba(76, 141, 255, .45); }
+.egg-chip.epic { color: var(--epic); border-color: rgba(169, 112, 255, .45); }
+.egg-chip.legend { color: var(--gold); border-color: rgba(240, 180, 41, .5); }
+
 /* ---------- 转户弹窗 ---------- */
 .transfer-card { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; }
 .transfer-card .broker-wall { margin: 10px 0; }
@@ -1139,4 +1210,9 @@ input { font: inherit; color: inherit; }
   .broker-wall { grid-template-columns: minmax(0, 1fr); }
   .mb-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .transfer-card { width: min(96vw, 820px); }
+  /* 窄屏：横幅占满宽度，头像缩小，文案允许换行 */
+  .egg-banner { top: 52px; width: 96vw; padding: 9px 11px; gap: 9px; }
+  .egg-banner .egg-avatar { width: 36px; height: 36px; }
+  .egg-banner .egg-text { font-size: 12px; }
+  .egg-goal { flex-wrap: wrap; gap: 6px; }
 }

@@ -12,6 +12,7 @@
 const config = require('./config');
 const { openDatabase } = require('./db');
 const { r2 } = require('./store');
+const milestones = require('./milestones');
 
 const ORDER_HISTORY_KEEP = 100; // 每个账户保留的已完结委托行数（与内存 orderHistory 一致）
 const TAPE_KEEP = 500; // 逐笔成交恢复条数（与 config.market.tradeTapeSize 一致）
@@ -41,17 +42,20 @@ class Persister {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
           (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
-           broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day)
+           broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day,
+           milestones)
         VALUES
           (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
-           @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day)
+           @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day,
+           @milestones)
         ON CONFLICT(name) DO UPDATE SET
           is_npc = @is_npc, role = @role, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
           initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
           broker = @broker, broker_changed_at = @broker_changed_at, broker_since_day = @broker_since_day,
           broker_stats = @broker_stats, free_reselect_used = @free_reselect_used,
-          coupon_used_day = @coupon_used_day, free_interest_day = @free_interest_day
+          coupon_used_day = @coupon_used_day, free_interest_day = @free_interest_day,
+          milestones = @milestones
       `),
       delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
       insLedger: db.prepare(`
@@ -409,6 +413,9 @@ class Persister {
       free_reselect_used: isNpc || acc.freeReselectUsed ? 1 : 0,
       coupon_used_day: isNpc ? null : (acc.couponUsedDay == null ? null : acc.couponUsedDay),
       free_interest_day: isNpc ? null : (acc.freeInterestDay == null ? null : acc.freeInterestDay),
+      // 彩蛋里程碑：**NPC 写 NULL**（与券商那几列同规矩）——写它等于让 3160 个 NPC
+      // 每 tick 都有变化可写，踩的就是「NPC 逐 tick 标脏」这条禁忌
+      milestones: isNpc || !acc.milestones ? null : milestones.serialize(acc.milestones),
     });
 
     // 按股票的融券/融资计息明细：整段重写（行数很少，省去逐行 diff 的复杂度）。

@@ -233,9 +233,9 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
   g.stop();
 }
 
-console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列可原地升级');
+console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列与彩蛋列可原地升级');
 {
-  assert(SCHEMA_VERSION === 4, `存档表结构版本为 4（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 5, `存档表结构版本为 5（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -251,8 +251,9 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   assert(/表结构版本为 2/.test(msg), `版本 2 的旧档被明确拒绝：${msg.slice(0, 40)}…`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
 
-  // 版本 3 → 4 走的是**原地 ALTER 升级**（券商那批列全是可空/带默认值，不用清库）。
-  // 这条分支存在的意义是：引入券商不必强制清掉正在跑的那一局
+  // 版本 3 → 5 走的是**逐级原地 ALTER 升级**（券商那批列与彩蛋的 milestones 列全是
+  // 可空/带默认值，不用清库）。这条分支存在的意义是：引入券商与彩蛋都不必强制
+  // 清掉正在跑的那一局
   const FILE3 = path.join(os.tmpdir(), `gushen-flow-v3-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });
   const db3 = new Database(FILE3);
@@ -285,10 +286,11 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   assert(!upMsg && !!db4, `版本 3 的旧档被原地升级而不是拒绝：${upMsg}`);
   if (db4) {
     const v = db4.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert(Number(v.value) === 4, `升级后版本号写成 4（实际 ${v.value}）`);
+    assert(Number(v.value) === 5, `升级后版本号写成 5（实际 ${v.value}）`);
     const row = db4.prepare('SELECT * FROM accounts WHERE name = ?').get('老玩家');
     assert(row && row.cash === 123456, '升级保留了原有账户数据');
     assert(row.broker === null, '老账号的 broker 为 NULL（表示还没选过券商）');
+    assert(row.milestones === null, '老账号的 milestones 为 NULL（由登录/恢复时按当前权益初始化）');
     db4.close();
   }
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });

@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const admin = require('./admin');
+const milestones = require('./milestones');
 const { logger } = require('./logger');
 
 const CLIENT_DIR = path.join(__dirname, '..', '..', 'Client');
@@ -20,23 +21,27 @@ const STATIC_FILES = {
 };
 
 /**
- * 券商图标：`/img/broker-<key>.png`（1024 原图，登录卡片墙 / 我的券商卡用）与
- * `/img/broker-<key>-96.png`（96px 缩略图，五档 / 逐笔 / 排行榜这些高频小位置用——
- * 原图 262KB~990KB，十档盘口每帧都要画几十个 12px 图标，用原图是纯浪费）。
+ * 图片资源白名单，两类：
+ * ① 券商图标 `/img/broker-<key>.png`（1024 原图，登录卡片墙 / 我的券商卡用）与
+ *    `/img/broker-<key>-96.png`（96px 缩略图，五档 / 逐笔 / 排行榜这些高频小位置用——
+ *    原图 262KB~990KB，十档盘口每帧都要画几十个 12px 图标，用原图是纯浪费）；
+ * ② 股神猫头像 `/img/egg-cat-<key>-96.png`（彩蛋演出用，**只有** 96px——横幅里显示
+ *    32~40px，原图 850KB 是纯浪费）。
  *
- * **按券商 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
+ * **按 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
  * 也不能走出指定目录（避免 `../` 穿越）。图标文件缺失时不注册，请求落到 404，
  * 前端只会看到空图标而不会报错。
  */
-const BROKER_ICONS = new Map();
-for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
-  for (const [suffix, size] of [['', 'lg'], ['-96', 'sm']]) {
-    const name = `broker-${key}${suffix}.png`;
-    if (fs.existsSync(path.join(CLIENT_DIR, 'img', name))) {
-      BROKER_ICONS.set(`/img/${name}`, { file: path.join('img', name), type: 'image/png', size });
-    }
-  }
+const IMG_ASSETS = new Map();
+function registerImg(name, size) {
+  if (!fs.existsSync(path.join(CLIENT_DIR, 'img', name))) return;
+  IMG_ASSETS.set(`/img/${name}`, { file: path.join('img', name), type: 'image/png', size });
 }
+for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
+  registerImg(`broker-${key}.png`, 'lg');
+  registerImg(`broker-${key}-96.png`, 'sm');
+}
+for (const key of milestones.MASCOT_KEYS) registerImg(`egg-cat-${key}-96.png`, 'sm');
 
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。
 const SECURITY_HEADERS = {
@@ -458,9 +463,9 @@ function createServer(game) {
         return;
       }
 
-      // ---- 券商图标（白名单，见 BROKER_ICONS）----
-      if (req.method === 'GET' && BROKER_ICONS.has(p)) {
-        const spec = BROKER_ICONS.get(p);
+      // ---- 图片资源（白名单，见 IMG_ASSETS：券商图标 + 股神猫头像）----
+      if (req.method === 'GET' && IMG_ASSETS.has(p)) {
+        const spec = IMG_ASSETS.get(p);
         fs.readFile(path.join(CLIENT_DIR, spec.file), (err, buf) => {
           if (err) {
             res.writeHead(404, withSecurity({ 'Content-Type': 'text/plain; charset=utf-8' }));

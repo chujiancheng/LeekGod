@@ -14,6 +14,7 @@ const { IndexFeed } = require('./indexfeed');
 const { DayCycle } = require('./daycycle');
 const flow = require('./flow');
 const broker = require('./broker');
+const milestones = require('./milestones');
 
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
@@ -64,6 +65,8 @@ class Game {
       market.priceOf = (stockId) => this.marketOf(stockId).lastPrice;
       // 跨股票找市场：强平撤单要把委托交回它所属股票的市场（见 Market.cancelAny）
       market.marketOf = (stockId) => this.markets.get(stockId);
+      // 强平落地通知（彩蛋 C02 首次爆仓）：market 只负责上报，判定与状态在 game/milestones
+      market.onLiquidate = (acc, now) => this.onLiquidate(acc, now);
       this.markets.set(stock.id, market);
       this.npcs.set(stock.id, new NpcManager(market, null, this.store));
     }
@@ -203,6 +206,8 @@ class Game {
       acc.freeReselectUsed = !!row.free_reselect_used;
       acc.couponUsedDay = row.coupon_used_day == null ? null : row.coupon_used_day;
       acc.freeInterestDay = row.free_interest_day == null ? null : row.free_interest_day;
+      // 彩蛋里程碑：NPC 恒为 null（不判不落盘），只有玩家有状态
+      acc.milestones = acc.isNPC ? null : milestones.parse(safeParseJson(row.milestones, null));
       this.store.put(acc);
       byName.set(acc.name, acc);
     }
@@ -297,6 +302,13 @@ class Game {
     const idxSnap = snap.markets?.get(this.index.stockId);
     this.index.applyState(idxSnap && idxSnap.state, idxSnap && idxSnap.prices);
     flow.restoreFlow(this.index, idxSnap && idxSnap.state, idxSnap && idxSnap.bars);
+
+    // 彩蛋水位线必须在**行情恢复之后**才能初始化（权益要取到各股价格）。
+    // 老档没有 milestones 列（版本 4 及更早）、新号还没结过盘——`peakEquity` 一律取
+    // **当时的权益**：取 0 会让老玩家一进来就"回撤 100%"（方案 §4.3）
+    for (const acc of this.store.players()) {
+      milestones.initPeak(acc.milestones, r2(this.equityOf(acc)));
+    }
     this.index.update(this.markets, Date.now());
 
     // 融券池聚合值从账户挂借量 + shortInterest 重建（挂借量已随 accounts 恢复）
@@ -597,7 +609,13 @@ class Game {
         .settleDay(now, { cancelOrders: opts.cancelOrders, day: completedDay }).canceled;
     }
     this.index.settleDay(now, { day: completedDay });
-    if (completedDay >= 1) this._daySettled = completedDay;
+    // 彩蛋硬门槛一律挂在**收盘结算**上（方案 §2.1）：一天一个数、顺序确定、重启可复现。
+    // 走 settleDay 而不是 onPhaseChange，是为了让 tick 跨过收盘竞价的兜底路径
+    // （ensureDaySettled）也能判一次——只挂定时路径会漏
+    if (completedDay >= 1) {
+      this.evaluateMilestones(now, completedDay);
+      this._daySettled = completedDay;
+    }
     if (opts.meta) this.persist?.setMeta('day_settled', String(this._daySettled));
     logger.info(
       `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：当日已定格成一根日线，` +
@@ -644,6 +662,82 @@ class Game {
   /** 语义同 ensureDaySettled（续跑入口保留旧名） */
   catchUpDay(now = Date.now()) {
     this.ensureDaySettled(now);
+  }
+
+  // ---------- 彩蛋（里程碑，见 Doc/彩蛋玩法方案.md） ----------
+
+  /**
+   * 风险度（%）=（空头市值 + 融资负债 + 做空欠息）/ 权益 × 100。
+   *
+   * **单一落点**：`serializeAccount` 下发给客户端的 `marginUsage` 与彩蛋 C00/C01 的
+   * 判定读的是同一个函数。两边各算一遍必然差几分，然后玩家会追问"我明明 95% 了为什么没弹"。
+   * 判定用 `equity` 也由调用方传入（就是 `stateFor` 下发的那个数，见 `equityOf`）。
+   */
+  marginUsageOf(acc, equity = this.equityOf(acc)) {
+    const shortValue = r2(acc.totalShortMV((sid) => this.priceOf(sid)));
+    const riskDebt = r2(acc.totalFinanceDebt() + acc.totalLendInterestDebt());
+    return milestones.marginUsageOf(r2(equity), shortValue, riskDebt);
+  }
+
+  /**
+   * 收盘彩蛋评估：只遍历**玩家**账户（NPC 那 3160 个一个都不扫，逐 tick 标脏是项目禁忌）。
+   * 判定内核只读账户快照，不回写任何交易状态——彩蛋挂了也不能影响一次撮合。
+   * @param {number} day 刚收盘的那个交易日号
+   */
+  evaluateMilestones(now, day) {
+    if (!config.milestones || !config.milestones.enabled) return 0;
+    let fired = 0;
+    for (const acc of this.store.players()) {
+      if (!acc.milestones) continue;
+      // 权益与 stateFor 同函数同取整：`equityOf` + r2，与 serializeAccount 的 equity 逐位相等
+      const equity = r2(this.equityOf(acc));
+      const events = milestones.evaluateClose(acc.milestones, {
+        equity,
+        marginUsage: this.marginUsageOf(acc, equity),
+        day,
+        now,
+      });
+      // **无论有没有发事件都要标脏**：评估本身会原地更新 `peakEquity` / `maxDrawdown` /
+      // `dayEvaluated` / `liqDay`，不落盘的话重启后水位线会退回旧值（真实峰值被后来的
+      // 收盘价重新锚低，B2 族从此漏判）。只遍历玩家，NPC 一个都不碰
+      this.persist?.touch(acc);
+      if (!events.length) continue;
+      fired += events.length;
+      for (const ev of events) {
+        logger.info(
+          `[我是股神] 彩蛋 ${acc.name} 触发 ${ev.id}「${ev.title}」` +
+            `（第 ${day} 个交易日收盘，权益 ¥${Math.round(equity)}，${ev.rarity}）`
+        );
+      }
+    }
+    return fired;
+  }
+
+  /**
+   * 强平落地（C 族 C02「天台初体验」）：由 `Market.maybeLiquidate` 通过 `onLiquidate`
+   * 钩子上报。这条是事件驱动的，不走收盘判定——爆仓可能发生在一天里的任何时刻。
+   */
+  onLiquidate(acc, now = Date.now()) {
+    if (!config.milestones || !config.milestones.enabled) return;
+    if (!acc || acc.isNPC || !acc.milestones) return;
+    try {
+      const equity = r2(this.equityOf(acc));
+      const events = milestones.onLiquidation(acc.milestones, {
+        equity,
+        day: this.dayNumber(now),
+        now,
+      });
+      if (!events.length) return;
+      this.persist?.touch(acc);
+      for (const ev of events) {
+        logger.info(`[我是股神] 彩蛋 ${acc.name} 触发 ${ev.id}「${ev.title}」（强制平仓落地）`);
+      }
+    } catch (e) {
+      // 彩蛋是观测层：它挂了也绝不能让异常穿回撮合路径——钩子的调用链是
+      // `execute` → `maybeLiquidate`（market.js），而 execute 跑在撮合循环里，
+      // 异常断在循环中间会留下撤不掉的幽灵单。这里吞掉并记一条账，交易照常
+      logger.error(`[我是股神] 强平彩蛋上报异常（已忽略，不影响撮合）：${(e && e.message) || e}`);
+    }
   }
 
   /** 刷新排行榜与各股票的前十大股东缓存 */
@@ -772,6 +866,9 @@ class Game {
     }
 
     const acc = this.store.createOrGet(name);
+    // 彩蛋水位线：第一次见到这个账户（新号，或老档升级上来还没初始化过的）就用当前权益
+    // 锚住——留成 null/0 会立刻算成"回撤 100%"
+    milestones.initPeak(acc.milestones, r2(this.equityOf(acc)));
     if (needBroker) {
       const r = this.assignBroker(acc, brokerKey, { initial: true });
       if (!r.ok) return { ok: false, needBroker: true, error: r.error };
@@ -1208,6 +1305,8 @@ class Game {
           grid: config.auto.grid,
           ma: config.auto.ma,
         },
+        // 彩蛋开关（客户端据此决定要不要渲染里程碑卡；文案与判定全在服务端）
+        milestones: { enabled: !!config.milestones.enabled, tone: config.milestones.tone },
       },
       players: stats.players,
       // 券商榜：总榜在 players 里，这里给按券商聚合的一份（§5.3）
@@ -1383,7 +1482,6 @@ class Game {
       side: t.side,
     }));
 
-    const riskDebt = r2(debt + lendDebt);
     return {
       name: acc.name,
       cash: r2(acc.cash),
@@ -1401,14 +1499,19 @@ class Game {
       shortValue,
       longPnl: r2(positions.reduce((a, p) => a + p.long.pnl, 0)),
       shortPnl: r2(positions.reduce((a, p) => a + p.short.pnl, 0)),
-      // 风险度 = （空头市值 + 融资负债 + 做空欠息）/ 权益
-      marginUsage: riskDebt > 0 && equity > 0 ? r2(((shortValue + riskDebt) / equity) * 100) : 0,
+      // 风险度 = （空头市值 + 融资负债 + 做空欠息）/ 权益。走单一落点，与彩蛋 C00/C01 判定同源
+      marginUsage: this.marginUsageOf(acc, equity),
       orders,
       orderHistory,
       trades,
       liquidations: (acc.liquidations || []).slice(0, 5),
       auto: this.auto.serializeAll(acc.name, now),
       broker: this.serializeBroker(acc, now),
+      // 彩蛋：已获得的称号 / 下一档发家线的进度 / 最近若干条待播事件（客户端按 seq 去重）
+      events: milestones.summary(acc.milestones, {
+        equity,
+        initialCash: config.account.initialCash,
+      }),
       // 追保预警（§7 彩蛋）：跌破维持线但还没到强平线时给一条通知，
       // 文案随券商风格变（钟信=正式公函体、天疯=没有这一档，破线即全平）
       marginCall: this.marginCallFor(acc, now),

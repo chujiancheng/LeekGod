@@ -10,10 +10,11 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 5：彩蛋里程碑（accounts 加 milestones 列，仅玩家写）
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -52,7 +53,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   free_reselect_used INTEGER NOT NULL DEFAULT 0,
   -- 每日免息券：今天这张用掉没有 / 今天是否利息全免（都按交易日号）
   coupon_used_day    INTEGER,
-  free_interest_day  INTEGER
+  free_interest_day  INTEGER,
+  -- 彩蛋里程碑（JSON）：{seq, fired[], titles[], peakEquity, maxDrawdown, drawdownArmed, dayEvaluated}
+  -- 与券商那几列同规矩：**只对玩家写入**，NPC 一律 NULL（逐 tick 标脏是项目禁忌）
+  milestones         TEXT
 );
 
 -- 按股票的账户明细：融券挂借与各类利息累计（都已经是「按股票」的口径）
@@ -227,10 +231,27 @@ ALTER TABLE trades ADD COLUMN counter_broker TEXT;
 `;
 
 /**
+ * 版本 4 → 5 的**原地升级**：彩蛋里程碑一个 JSON 列。
+ * 同样是可空新列，正在跑的那一局能原地升上来。老玩家的 `milestones` 为 NULL，
+ * 由 `Game.applySnapshot` 在行情恢复之后把 `peakEquity` 初始化成**当时的权益**
+ * （初始化成 0 会让老玩家一进来就"回撤 100%"）。
+ */
+const MIGRATION_5 = `
+ALTER TABLE accounts ADD COLUMN milestones TEXT;
+`;
+
+// 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
+// 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5 };
+
+// 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
+const MIN_MIGRATABLE = 3;
+
+/**
  * 打开（必要时创建）数据库并保证表结构就绪。
  *
  * 版本 2 及更早**直接拒绝启动**（那几次改的是主键与非空列，ALTER 补不出来，
- * 报错里给出删档指引）；版本 3 走 MIGRATION_4 原地升级到 4。
+ * 报错里给出删档指引）；版本 3 / 4 逐级走 MIGRATIONS 原地升级到当前版本。
  */
 function openDatabase(file) {
   const dir = path.dirname(path.resolve(file));
@@ -244,18 +265,24 @@ function openDatabase(file) {
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
   if (!row) {
     db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
-  } else if (Number(row.value) === 3) {
-    const from = Number(row.value);
-    db.exec(MIGRATION_4);
-    db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
-    logger.info(`[我是股神] 存档表结构已从版本 ${from} 原地升级到 ${SCHEMA_VERSION}（新增券商与席位列，数据保留）`);
-  } else if (Number(row.value) !== SCHEMA_VERSION) {
+    return db;
+  }
+  const from0 = Number(row.value);
+  if (from0 === SCHEMA_VERSION) return db;
+  if (!Number.isFinite(from0) || from0 < MIN_MIGRATABLE || !MIGRATIONS[from0 + 1]) {
     db.close();
     throw new Error(
       `存档表结构版本为 ${row.value}，当前代码期望 ${SCHEMA_VERSION}：` +
         `旧存档无法直接读取。确认不需要旧数据后，删除存档文件重开新局。`
     );
   }
+  let from = from0;
+  while (from < SCHEMA_VERSION) {
+    db.exec(MIGRATIONS[from + 1]);
+    from += 1;
+  }
+  db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
+  logger.info(`[我是股神] 存档表结构已从版本 ${from0} 原地升级到 ${SCHEMA_VERSION}（数据保留）`);
   return db;
 }
 

@@ -78,6 +78,9 @@
     return fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
   }
   function setIdentity(name, tok) {
+    // 换号 = 换一条彩蛋事件流：水位（gushen_event_seq）必须跟着清，否则新账号的
+    // seq 从 0 起、本地旧水位却还在，新事件全被 `e.seq > lastEggSeq` 挡掉
+    if ((name || '') !== me) resetEggStream();
     me = name || '';
     token = tok || '';
     if (me) localStorage.setItem('gushen_name', me);
@@ -214,6 +217,194 @@
       el.style.transition = 'opacity .3s';
       setTimeout(() => el.remove(), 320);
     }, 2600);
+  }
+
+  // ---------- 彩蛋（里程碑，见 Doc/彩蛋玩法方案.md） ----------
+  // 判定与文案**全在服务端**（权益口径只有一处，前端重算必然漂移），这里只负责演出：
+  // 服务端每帧在 account.events 里带最近若干条事件，客户端靠 `seq` 去重后串行播放。
+  const EGG_SEQ_KEY = 'gushen_event_seq';
+  const EGG_RARITY = ['common', 'rare', 'epic', 'legend'];
+  // P0 不做全屏过场（L3）/ 全服广播（L4），统一降级成横幅 + 更长展示时间；
+  // 等级仍按服务端下发的值走，P1 接上全屏时不用改判定
+  const EGG_SHOW_MS = { L1: 2600, L2: 4200, L3: 6000, L4: 8000 };
+  const EGG_BANNER_H = 72; // 横幅高 66（见 style.css）+ 6 间隔：toast 容器让到它下沿之外
+  let lastEggSeq = null; // null = 还没从 localStorage 读过
+  let eggQueue = [];
+  let eggBusy = false;
+  // 横幅自动收起的定时器句柄：手动点「收起」时必须一起撤掉，否则它会在几秒后
+  // 把**下一条**横幅提前掐掉并推进队列（一条压一条，后面的全被截短）
+  let eggTimer = null;
+
+  function eggSeqStored() {
+    const raw = localStorage.getItem(EGG_SEQ_KEY);
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /**
+   * 换账号 / 开新局 = 换一条事件流，水位必须跟着清。
+   * 这个键是**跨账号共用**的：不清的话新账号的 seq 从 0 重新开始，而本地还留着旧账号的
+   * `lastSeq`（比如 12），`e.seq > lastEggSeq` 永远不成立——彩蛋横幅与 L1 toast 会
+   * 一条都不播，直到新账号攒够 13 个事件。同名的 `gushen_stock` / `gushen_chart`
+   * 是纯展示偏好，可以跨账号留；水位不行。
+   */
+  function resetEggStream() {
+    lastEggSeq = null;
+    eggQueue = [];
+    localStorage.removeItem(EGG_SEQ_KEY);
+  }
+
+  /**
+   * 收下发下来的彩蛋事件。
+   * **刷新不重播**：`lastSeq` 落 localStorage；首次进入（没有那个键）= 从当前 seq 起步，
+   * 不补播历史——否则新玩家一进页面会被一堆陈年横幅糊脸。
+   */
+  function pumpEggs(info) {
+    if (lastEggSeq === null) {
+      lastEggSeq = eggSeqStored();
+      if (lastEggSeq === null) {
+        lastEggSeq = info.seq || 0;
+        localStorage.setItem(EGG_SEQ_KEY, String(lastEggSeq));
+        return;
+      }
+    }
+    // 服务端 seq 比本地还小 = 开新局（存档被换掉）等水位回退：同样按"新事件流"处理。
+    // 不能继续拿旧水位比，否则新账号的事件全被挡在门外（换号那次由 resetEggStream 兜）
+    if (Number.isFinite(info.seq) && info.seq < lastEggSeq) {
+      lastEggSeq = info.seq;
+      localStorage.setItem(EGG_SEQ_KEY, String(lastEggSeq));
+      return;
+    }
+    const fresh = (info.events || []).filter((e) => e && Number.isFinite(e.seq) && e.seq > lastEggSeq);
+    if (!fresh.length) return;
+    // 同一帧来多条时按稀有度降序排队，避免几个横幅叠在一起
+    fresh.sort((a, b) => EGG_RARITY.indexOf(b.rarity) - EGG_RARITY.indexOf(a.rarity) || a.seq - b.seq);
+    for (const e of fresh) eggQueue.push(e);
+    lastEggSeq = Math.max(lastEggSeq, ...fresh.map((e) => e.seq));
+    localStorage.setItem(EGG_SEQ_KEY, String(lastEggSeq));
+    pumpEggQueue();
+  }
+
+  /** 串行播放队列：L1 直接 toast 掉不占横幅位，其余排队等横幅空出来 */
+  function pumpEggQueue() {
+    if (eggBusy) return;
+    while (eggQueue.length && eggQueue[0].level === 'L1') toast(eggQueue.shift().text, 'egg');
+    if (!eggQueue.length) return;
+    showEggBanner(eggQueue.shift());
+  }
+
+  /**
+   * 彩蛋横幅的落点（px）。
+   * 默认 60（顶栏下沿），但顶部那三条状态横幅——停牌 / 交易日 / 追保——在**文档流**里，
+   * 占的正是这块位置：它们可见时把横幅排到它们下面。改的是 fixed 元素的 `top`，不引起
+   * 重排（图表不会跳），也不会盖住追保预警这种必须被看见的提示。
+   */
+  function eggBannerTop() {
+    let bottom = 0;
+    for (const id of ['haltBanner', 'dayBanner', 'marginCallBanner']) {
+      const node = $(id);
+      if (!node || node.hidden || !node.getBoundingClientRect) continue;
+      const r = node.getBoundingClientRect();
+      if (r && r.bottom > bottom) bottom = r.bottom;
+    }
+    return Math.max(60, Math.round(bottom) + 8);
+  }
+
+  function showEggBanner(ev) {
+    const el = $('eggBanner');
+    if (!el) return;
+    eggBusy = true;
+    const av = $('eggAvatar');
+    if (av) av.src = '/img/egg-cat-' + (ev.mascot || 'smug') + '-96.png';
+    const head = $('eggHead');
+    if (head) head.textContent = `第 ${ev.day} 天 · ${ev.title}`;
+    const txt = $('eggText');
+    if (txt) txt.textContent = ev.text;
+    // 稀有度 + 族决定配色（CSS 类，不用内联 style —— CSP 禁内联）
+    el.className = 'egg-banner ' + (ev.rarity || 'common') + ' ' + (ev.kind || 'wealth');
+    // 位置同样走 CSSOM：横幅让开状态横幅，toast 再让到横幅下沿之外
+    // （否则第一条 toast 会被完全盖住——包括 pumpEggQueue 刚 toast 的 L1 事件
+    //   和玩家的成交 / 爆仓提醒）
+    const top = eggBannerTop();
+    el.style.top = top + 'px';
+    const tw = $('toastWrap');
+    if (tw) tw.style.top = top + EGG_BANNER_H + 'px';
+    el.hidden = false;
+    clearTimeout(eggTimer);
+    eggTimer = setTimeout(hideEggBanner, EGG_SHOW_MS[ev.level] || EGG_SHOW_MS.L2);
+  }
+
+  function hideEggBanner() {
+    const el = $('eggBanner');
+    if (el) {
+      el.hidden = true;
+      el.style.top = '';
+    }
+    clearTimeout(eggTimer);
+    eggTimer = null;
+    const tw = $('toastWrap');
+    if (tw) tw.style.top = '';
+    eggBusy = false;
+    pumpEggQueue();
+  }
+
+  /** 主页「股神里程碑」卡：当前称号 + 下一档进度条 + 已获得称号 */
+  function renderEggCard() {
+    const el = $('eggCard');
+    if (!el) return;
+    const eggs = state && state.account && state.account.events;
+    const on = !!(state && state.rules && state.rules.milestones && state.rules.milestones.enabled);
+    if (!eggs || !on) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    const titles = eggs.titles || [];
+    const cur = eggs.title;
+    const pr = eggs.progress;
+    const rar = { common: '普通', rare: '稀有', epic: '史诗', legend: '传说' };
+
+    let progressHtml = '<div class="egg-note">十二档全部达成——你已经封神。</div>';
+    if (pr) {
+      const pct = Math.max(2, Math.min(100, Math.round((pr.pct || 0) * 100)));
+      progressHtml = `
+        <div class="egg-goal">
+          <label>下一档「${esc(pr.title)}」 <span class="pfull">${fmtAmount(pr.equity)}</span></label>
+          <i class="mb-bar"><b data-w="${pct}"></b></i>
+          <span class="egg-need">${
+            pr.reached ? '已达门槛，等收盘结算确认' : `还差 ${fmtAmount(pr.need)}`
+          }</span>
+        </div>`;
+    }
+    const chips = titles.length
+      ? titles
+          .slice()
+          .reverse()
+          .map((t) => `<span class="egg-chip ${esc(t.rarity || 'common')}">${esc(t.title)}</span>`)
+          .join('')
+      : '<span class="empty">还没有称号——先活过今天收盘。</span>';
+
+    el.innerHTML = `
+      <div class="panel-title">
+        <span>股神里程碑</span>
+        <span class="panel-sub">回撤 <b>${(Math.max(0, eggs.drawdown || 0) * 100).toFixed(1)}%</b> · 历史最大 <b>${(Math.max(0, eggs.maxDrawdown || 0) * 100).toFixed(1)}%</b></span>
+      </div>
+      <div class="egg-top">
+        ${
+          cur
+            ? `<span class="egg-cur ${esc(cur.rarity || 'common')}">${esc(cur.title)}</span>
+               <span class="egg-cur-sub">当前称号 · ${esc(rar[cur.rarity] || '普通')}</span>`
+            : '<span class="egg-cur-sub">暂无称号</span>'
+        }
+        <span class="egg-cur-sub">峰值权益 ${fmtAmount(eggs.peakEquity || 0)} · 已获称号 ${titles.length} 个</span>
+      </div>
+      ${progressHtml}
+      <div class="egg-titles">${chips}</div>
+    `;
+    el.querySelectorAll('.mb-bar b[data-w]').forEach((n) => {
+      n.style.width = Math.max(2, Math.min(100, Number(n.dataset.w) || 0)) + '%';
+    });
   }
 
   // ---------- 登录 ----------
@@ -674,6 +865,8 @@
       toast('触发强制平仓！请关注保证金风险', 'err');
     }
     lastLiquidations = liqCount;
+    // 彩蛋事件（服务端下发最近若干条，这里按 seq 去重后串行播放）
+    if (s.account && s.account.events) pumpEggs(s.account.events);
 
     if (activeView === 'trade') {
       drawChart();
@@ -2032,6 +2225,7 @@
 
     renderIndexCard();
     renderMyBroker();
+    renderEggCard();
 
     // 市场概览：全部按市场维度统计，与任何单只股票解耦
     let up = 0;
@@ -3757,6 +3951,12 @@
   }
 
   // ---------- 启动 ----------
+  /** 彩蛋横幅的收起按钮：点掉立刻播下一条 */
+  function bindEggs() {
+    const el = $('eggClose');
+    if (el) el.addEventListener('click', hideEggBanner);
+  }
+
   function init() {
     bindLogin();
     bindViewNav();
@@ -3772,6 +3972,7 @@
     bindCrosshair();
     bindChartMode();
     bindTransfer();
+    bindEggs();
     renderChartMode();
     setInterval(tickUI, 200);
     // 券商卡片墙在**登录之前**就要渲染，所以先拉公开的 /api/brokers，再决定要不要弹登录

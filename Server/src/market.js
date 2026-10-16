@@ -1610,6 +1610,11 @@ class Market {
       if (account.broker && !account.isNPC) {
         broker.statsOf(account, account.broker).liquidations += 1;
       }
+      // 强平落地通知（彩蛋 C02 首次爆仓）：这里只上报，判定与状态全在 game/milestones。
+      // market 不认识彩蛋——它只提供一个事件源，且这条通知绝不改变本函数的任何结果。
+      // （异常隔离在钩子内部：`Game.onLiquidate` 自己吞异常。这里是撮合链上的一环，
+      // 异常穿回去会打断 `execute` 所在的撮合循环、留下撤不掉的幽灵单）
+      this.onLiquidate?.(account, now);
     }
     return events.length > 0;
   }
