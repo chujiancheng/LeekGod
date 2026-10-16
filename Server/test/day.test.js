@@ -548,5 +548,53 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
   assert(Math.abs(n1.delta - m1.delta * 3) < 1e-9, `夜间步进是上午的 3 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * 3).toFixed(6)}）`);
 }
 
+// ============================================================
+console.log('\n[18] 盘后消息：作用期跨夜，次日开盘竞价仍驱动情绪与公允价值');
+{
+  const g = new Game();
+  for (const s of config.stocks) {
+    g.npcs.get(s.id).init(g.startedAt);
+    g.markets.get(s.id).priceHistory.push({ t: g.startedAt, price: g.markets.get(s.id).lastPrice });
+  }
+  g.index.update(g.markets, g.startedAt);
+
+  // 锚进 day1 夜间（580s 起，已走 2s），强制当晚出一条盘后消息
+  const anchor = Date.now() - P.night - 2000;
+  g.day.reanchor(anchor);
+  g.news.nextAt = 0;
+  g.tick();
+  assert(g._dayState.phase.key === 'night', 'tick 定位到夜间休市段');
+  const n = g.lastNews;
+  assert(!!n && n.session === '盘后', `夜间消息带「盘后」标签（${n && n.session}）`);
+
+  // 作用期被抬到次日开盘竞价结束：60s 墙钟会在夜间结束前就让消息过期
+  const st = g.day.locate(n.t);
+  const openAuction = g.day.phases.find((p) => p.auction === 'open');
+  const auctionEnd = st.dayEndsAt + openAuction.ms;
+  assert(n.until === auctionEnd, `作用期 = 次日开盘竞价结束（until=${n.until}，竞价末=${auctionEnd}）`);
+  assert(n.until > n.t + config.news.durationMs, `比 60s 墙钟长（自然过期 ${n.t + config.news.durationMs} < until）——否则隔夜迁移吃不到它`);
+
+  // 次日开盘竞价中段：消息仍 active，情绪与公允推力都还在（这就是「影响次日开盘」）
+  const inAuction = st.dayEndsAt + 15000;
+  assert(g.news.active.some((x) => x.id === n.id && x.until > inAuction), '开盘竞价中段消息仍生效');
+  const senti = g.news.sentiment(n.scope, inAuction, n.stockId);
+  assert(Math.abs(senti) > 0.01, `竞价中段情绪非零（${senti.toFixed(3)}）`);
+  const drift = g.news.fvDrift(inAuction, n.stockId);
+  assert(Math.abs(drift) > 1e-6, `竞价中段公允推力非零（${drift.toExponential(2)}）`);
+  // 竞价结束那一刻恰好过期，不拖进盘中
+  assert(g.news.sentiment(n.scope, auctionEnd, n.stockId) === 0, '竞价结束即过期（不拖进盘中）');
+
+  // 换阶段重排在 Game 层生效：下午排出的远期倒计时不会吞掉整个夜间
+  g.day.reanchor(Date.now() - P.afternoon - 5000);
+  g.tick();
+  assert(g.news.nextAtPhase === 'afternoon', `阶段登记切到下午（${g.news.nextAtPhase}）`);
+  g.news.nextAt = Date.now() + 999999;
+  g.day.reanchor(Date.now() - P.night - 1000);
+  g.tick();
+  const gap = g.news.nextAt - Date.now();
+  assert(g.news.nextAtPhase === 'night', `阶段登记切到夜间（${g.news.nextAtPhase}）`);
+  assert(gap > 0 && gap <= config.news.phaseRules.night.maxIntervalMs, `夜间倒计时被拉回盘后节奏（${gap}ms ∈ (${config.news.phaseRules.night.minIntervalMs}, ${config.news.phaseRules.night.maxIntervalMs}]）`);
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed ? 1 : 0);

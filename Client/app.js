@@ -786,6 +786,7 @@
             <span class="ntime">${fmtTime(n.t)}</span>
             <span class="ntype">${esc(n.type)}</span>
             ${newsTag(n)}
+            ${n.session && n.session !== '盘中' ? `<span class="nsess">${esc(n.session)}</span>` : ''}
             <span class="ntext">${esc(n.text)}</span>
           </li>`
       )

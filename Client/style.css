@@ -708,6 +708,11 @@ input { font: inherit; color: inherit; }
   border: 1px solid var(--line); border-radius: 4px; padding: 0 5px;
 }
 .news-list .nstock.idx { color: var(--gold, #f0b429); }
+/* 消息的时段标签：盘前 / 午间 / 盘后（盘中不渲染） */
+.news-list .nsess {
+  flex: none; font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px;
+}
 .news-filter { display: flex; gap: 6px; padding: 8px 12px 0; }
 .idx-badge {
   margin-left: 6px; font-size: 10px; color: var(--muted);

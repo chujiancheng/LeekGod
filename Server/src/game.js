@@ -408,11 +408,22 @@ class Game {
     if (!halted) {
       // 消息方向偏置取全市场平均阶段：10 只股票各自的牛熊互相对冲，
       // 大盘消息（全体 scope）代表的是「整个市场」的方向，用均值最合理。
-      // **休市也照发**：盘后公告正是隔夜跳空的燃料，停掉它"天"就没有夜了
+      // **休市也照发**：盘后公告正是隔夜跳空的燃料，停掉它"天"就没有夜了。
+      // 产出节奏与 scope 分布按阶段走（config.news.phaseRules）：盘前/盘后密集、
+      // 午休保底一条、收盘竞价不发；盘后个股消息改走公告文案池。
       let bias = 0;
       for (const npc of this.npcs.values()) bias += npc.regime * config.news.regimeBias;
       bias /= this.npcs.size;
-      const news = this.news.maybeEmit(now, bias);
+      const phaseKey = dayState ? dayState.phase.key : null;
+      // 盘后消息把作用期抬到**次日开盘竞价结束**：60s 墙钟会在夜间（40s）结束前
+      // 就让消息过期，隔夜公允价值迁移与次日竞价的情绪就全吃不到它了。
+      // 夜间是当天最后一段，dayEndsAt 即次日开盘竞价的起点。
+      let untilFloor = 0;
+      if (phaseKey === 'night') {
+        const openAuction = this.day.phases.find((p) => p.auction === 'open');
+        if (openAuction) untilFloor = dayState.dayEndsAt + openAuction.ms;
+      }
+      const news = this.news.maybeEmit(now, bias, { phaseKey, untilFloor });
       if (news) this.lastNews = news;
     }
 

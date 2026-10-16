@@ -81,6 +81,7 @@ src = src.replace(
   init();
   globalThis.__day = {
     renderDay, renderClock, gameClockNow, fmtClockMs, dayInfo,
+    renderNews, newsRowsHtml,
     setState: (v) => { state = v; },
     setDrift: (ms) => { lastStateAt = Date.now() - ms; },
     el: (id) => $('id'.replace('id', id)),
@@ -317,6 +318,25 @@ console.log('\n[7] 连续竞价：横幅与提示都收起');
   assert(api.el('auctionStrip').hidden === true, '连续竞价不显示虚拟成交价条');
   assert(api.el('dayChip').className === 'day-chip', `徽标回到常态（${api.el('dayChip').className}）`);
   assert(api.el('dayLeft').textContent === '3 分 50 秒', `倒计时 ${api.el('dayLeft').textContent}`);
+}
+
+console.log('\n[8] 消息行：盘前/午间/盘后带时段标签，盘中与老数据不带');
+{
+  const st = mkState(AUCTION_DAY, null);
+  st.news = [
+    { id: 'N1', t: Date.now(), dir: 1, type: '利好', scope: '全体', stockId: null, stockName: null, text: '盘后公告正文', session: '盘后' },
+    { id: 'N2', t: Date.now(), dir: -1, type: '利空', scope: '机构', stockId: '600001', stockName: '大米集团', text: '盘中消息正文', session: '盘中' },
+    { id: 'N3', t: Date.now(), dir: 1, type: '利好', scope: '全体', stockId: null, stockName: null, text: '盘前消息正文', session: '盘前' },
+    { id: 'N4', t: Date.now(), dir: 1, type: '利好', scope: '全体', stockId: null, stockName: null, text: '无 session 的老数据' },
+  ];
+  api.setState(st);
+  api.renderNews();
+  const html = api.el('newsList').innerHTML;
+  assert(html.includes('class="nsess">盘后</span>'), '盘后消息带「盘后」标签');
+  assert(html.includes('class="nsess">盘前</span>'), '盘前消息带「盘前」标签');
+  assert((html.match(/class="nsess"/g) || []).length === 2, `时段标签只渲染 2 个（盘中与老数据不带，实际 ${(html.match(/class="nsess"/g) || []).length}）`);
+  assert(html.includes('大盘') && html.includes('大米集团'), '标的标签仍正常（大盘 / 个股）');
+  assert(html.includes('npos') && html.includes('nneg'), '利好/利空着色类仍在');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

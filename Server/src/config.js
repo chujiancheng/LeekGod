@@ -534,6 +534,21 @@ module.exports = {
     // 0.2 → 牛市阶段 70% 消息利好、熊市阶段 70% 利空，让消息面与走势互相印证
     regimeBias: 0.2,
     tapeSize: 200, // 客户端消息列表保留条数
+    // 按交易日阶段覆盖产出节奏与 scope 分布（key 对应 day.phases[].key）。
+    // 没配的阶段回退到上面的 min/max + 三 scope 均匀抽；换阶段时节奏重新排队
+    // （news.js maybeEmit），不跨阶段沿用上一段排出的倒计时。
+    //   盘前（开盘竞价 30s）：隔夜重磅密集落地，8~16s 一条、以「全体」隔夜宏观为主
+    //   盘中（上午/下午）    ：默认 20~60s、均匀抽
+    //   午休（40s）          ：18~35s 保底一条午间公告，scope 偏机构
+    //   收盘竞价（20s）      ：不配规则 → 重排队后首个候选 ≥20s 落在段外，恒无新消息
+    //                         （尾盘的张力交给竞价机制本身，不加消息料）
+    //   盘后（夜间 40s）     ：8~15s 公告密集、偏机构；个股消息改走「盘后公告」文案池，
+    //                         作用期由 game.tick 抬到次日开盘竞价结束（untilFloor）
+    phaseRules: {
+      auction: { minIntervalMs: 8000, maxIntervalMs: 16000, scopeWeights: { 全体: 0.6, 机构: 0.25, 散户: 0.15 } },
+      lunch: { minIntervalMs: 18000, maxIntervalMs: 35000, scopeWeights: { 全体: 0.35, 机构: 0.45, 散户: 0.2 } },
+      night: { minIntervalMs: 8000, maxIntervalMs: 15000, scopeWeights: { 全体: 0.3, 机构: 0.5, 散户: 0.2 } },
+    },
   },
 
   // 玩家自动化交易（服务端主循环每 tick 驱动，玩家下线照常执行）

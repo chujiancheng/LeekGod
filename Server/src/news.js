@@ -610,6 +610,51 @@ const STOCK_TEMPLATES = {
 
 const SCOPES = ['机构', '散户', '全体'];
 
+// 盘后（夜间）专属文案池：真实市场盘后发的就是公告——业绩、回购、减持、立案、重组。
+// 只用于**个股**盘后消息（正文加【简称】前缀套到具体股票）；大盘盘后消息仍走
+// TEMPLATES 的「全体」池（隔夜宏观口径本来就是夜里读的）。与其它池一样要求池内无重复。
+const ANNOUNCE_TEMPLATES = {
+  positive: [
+    '披露盈利预喜公告，上半年净利润同比大幅增长',
+    '披露股份回购方案，拟回购不超过 5% 股份予以注销',
+    '控股股东承诺未来十二个月内不减持',
+    '与全球头部云厂商签署多年期算力服务协议',
+    '董事会通过高派息方案，股息率创上市以来新高',
+    '中标国家级智算中心项目，合同金额可观',
+    '主要股东连续三日增持，持股比例上升',
+    '获调入港股通标的名单，南向资金可直接买入',
+    '披露股权激励计划，行权目标锚定收入高增速',
+    '核心产品通过关键资质认证，海外订单可期',
+    '公布股份奖励计划，向核心员工授予限制性股份',
+    '披露重组进展公告，交易对价与方案落地',
+  ],
+  negative: [
+    '披露盈利预警，上半年净利润同比明显下滑',
+    '披露减持计划，大股东拟减持不超过 3% 股份',
+    '因涉嫌信息披露违法违规，被证监会立案调查',
+    '筹划的重大资产重组宣告终止',
+    '计提大额商誉减值准备，影响本期损益',
+    '收到交易所问询函，要求说明关联交易事项',
+    '主要股东所持股份被司法冻结',
+    '披露配售公告，折让约 8% 定增募资',
+    '核心产品降价促销，市场担忧毛利率承压',
+    '被海外监管机构列入观察名单，业务面临不确定性',
+    '披露对外担保逾期公告，涉及金额较大',
+    '审计机构对年报出具保留意见',
+  ],
+};
+
+// 阶段 key → 消息所属时段（客户端消息列表的「盘前 / 午间 / 盘后」标签）。
+// 盘中三段（上午/下午/收盘竞价）统一标「盘中」，客户端不额外渲染标签。
+const SESSION_OF_PHASE = {
+  auction: '盘前',
+  morning: '盘中',
+  lunch: '午间',
+  afternoon: '盘中',
+  closeAuction: '盘中',
+  night: '盘后',
+};
+
 // 各 scope 消息对公允价值的直接定价权重（与 sentiment 的 scope 语义对齐）
 const SCOPE_FV_WEIGHT = { 全体: 1, 机构: 0.5, 散户: 0.5 };
 
@@ -630,34 +675,45 @@ class NewsSystem {
     this.tape = [];
     this.seq = 0;
     this.nextAt = Date.now() + this.randInterval();
-    this.active = []; // [{dir, scope, power, until, stockId}]
+    this.nextAtPhase = null; // nextAt 是按哪个阶段排的（null = 还没登记过阶段）
+    this.active = []; // [{dir, scope, power, until, stockId, session}]
     this.recentByPool = new Map(); // 池 key -> 最近用过的文案，去重按池独立
   }
 
-  randInterval() {
-    const { minIntervalMs, maxIntervalMs } = config.news;
-    return minIntervalMs + Math.floor(Math.random() * (maxIntervalMs - minIntervalMs));
+  /**
+   * 下一条消息的间隔。配了阶段规则（config.news.phaseRules）的阶段用它自己的节奏，
+   * 否则回退到全局 20~60s。
+   * @param {string|null} phaseKey 交易日阶段 key；null（没配时钟）走全局节奏
+   */
+  randInterval(phaseKey = null) {
+    const rule = phaseKey ? config.news.phaseRules && config.news.phaseRules[phaseKey] : null;
+    const min = (rule && rule.minIntervalMs) || config.news.minIntervalMs;
+    const max = (rule && rule.maxIntervalMs) || config.news.maxIntervalMs;
+    return min + Math.floor(Math.random() * Math.max(1, max - min));
   }
 
   /**
-   * 取文案。个股消息优先用该股票的专属池（STOCK_TEMPLATES，按原型公司的业务写），
-   * 没配专属池的股票回退到按 scope 分的通用池。
-   *
-   * 去重按「池」独立记录，而不是扫磁带里最近若干条文本——个股文案带【简称】前缀，
-   * 且十只股票各有池子，混在一个窗口里比会让每只股票实际能用的文案变少。
-   *
-   * @param {'机构'|'散户'|'全体'} scope
-   * @param {number} dir 1 利好 / -1 利空
-   * @param {{id:string,name:string,alias:string}|null} stock 个股消息的目标股票；大盘消息传 null
+   * 按阶段的 scope 权重抽取消息归属：盘前以「全体」隔夜宏观为主、
+   * 午休与盘后偏「机构」（公告/公告解读），盘中均匀抽（没配规则时恒均匀）。
+   * @param {string|null} phaseKey
    */
-  pickText(scope, dir, stock = null) {
-    const key = dir > 0 ? 'positive' : 'negative';
-    const own = stock ? STOCK_TEMPLATES[stock.name] : null;
-    const ownPool = own && own[scope] ? own[scope][key] : null;
-    const pooled = ownPool && ownPool.length;
-    const pool = pooled ? ownPool : TEMPLATES[scope][key];
-    const poolKey = pooled ? `${stock.name}|${scope}|${key}` : `*|${scope}|${key}`;
+  pickScope(phaseKey = null) {
+    const rule = phaseKey ? config.news.phaseRules && config.news.phaseRules[phaseKey] : null;
+    const w = rule && rule.scopeWeights;
+    if (!w) return pick(SCOPES);
+    let total = 0;
+    for (const s of SCOPES) total += w[s] || 0;
+    if (total <= 0) return pick(SCOPES);
+    let r = Math.random() * total;
+    for (const s of SCOPES) {
+      r -= w[s] || 0;
+      if (r <= 0) return s;
+    }
+    return SCOPES[SCOPES.length - 1]; // 浮点误差兜底
+  }
 
+  /** 从池里抽一条文案并记入该池的去重窗口（REPEAT_GUARD 内不重复） */
+  drawFrom(pool, poolKey) {
     const recent = new Set(this.recentByPool.get(poolKey) || []);
     const fresh = pool.filter((text) => !recent.has(text));
     const text = pick(fresh.length ? fresh : pool);
@@ -671,6 +727,35 @@ class NewsSystem {
   }
 
   /**
+   * 取文案。个股消息优先用该股票的专属池（STOCK_TEMPLATES，按原型公司的业务写），
+   * 没配专属池的股票回退到按 scope 分的通用池。
+   *
+   * 去重按「池」独立记录，而不是扫磁带里最近若干条文本——个股文案带【简称】前缀，
+   * 且十只股票各有池子，混在一个窗口里比会让每只股票实际能用的文案变少。
+   *
+   * @param {'机构'|'散户'|'全体'} scope
+   * @param {number} dir 1 利好 / -1 利空
+   * @param {{id:string,name:string,alias:string}|null} stock 个股消息的目标股票；大盘消息传 null
+   * @param {string|null} session 所属时段（盘前/盘中/午间/盘后）；「盘后」的个股消息走公告池
+   */
+  pickText(scope, dir, stock = null, session = null) {
+    const key = dir > 0 ? 'positive' : 'negative';
+
+    // 盘后（夜间）的个股消息一律走「盘后公告」池：这个时段真实市场发的就是公告，
+    // 与哪家公司无关的通用公告正文加【简称】前缀即可；大盘消息仍走「全体」池。
+    if (session === '盘后' && stock) {
+      return this.drawFrom(ANNOUNCE_TEMPLATES[key], `公告|${key}`);
+    }
+
+    const own = stock ? STOCK_TEMPLATES[stock.name] : null;
+    const ownPool = own && own[scope] ? own[scope][key] : null;
+    const pooled = ownPool && ownPool.length;
+    const pool = pooled ? ownPool : TEMPLATES[scope][key];
+    const poolKey = pooled ? `${stock.name}|${scope}|${key}` : `*|${scope}|${key}`;
+    return this.drawFrom(pool, poolKey);
+  }
+
+  /**
    * 每 tick 调用，按计划产出消息
    *
    * 多股票下消息分两种：
@@ -679,23 +764,39 @@ class NewsSystem {
    *   只影响那一只的情绪与公允价
    * 这只是语义归属，不影响 power/until/衰减等既有机制。
    *
+   * 阶段感知（config.news.phaseRules）：
+   * - **换阶段重新排队**：上一段排出的倒计时可能整段吞掉新阶段（下午末尾排出的
+   *   +60s 会把 40 秒的夜间整个错过），所以进入新阶段就按它自己的节奏重排；
+   *   首次调用只登记阶段不重排（构造时已排过队）。
+   * - **untilFloor**：作用期下限。盘后消息由调用方抬到次日开盘竞价结束——
+   *   否则 60s 墙钟会在夜间结束前就过期，隔夜公允价值迁移与次日竞价的情绪
+   *   全都吃不到它，「盘后公告影响次日开盘」就不成立。
+   *
    * @param {number} now
    * @param {number} [dirBias] 概率偏移：p(利好) = 0.5 + dirBias。
    *   调用方传 regime × regimeBias（如 0.2 → 牛市 70% 利好）
+   * @param {{phaseKey?: string|null, untilFloor?: number}} [opts] 当前交易日阶段与作用期下限
    */
-  maybeEmit(now, dirBias = 0) {
+  maybeEmit(now, dirBias = 0, opts = {}) {
+    const phaseKey = opts.phaseKey || null;
+    const untilFloor = opts.untilFloor || 0;
+    if (this.nextAtPhase !== null && phaseKey !== this.nextAtPhase) {
+      this.nextAt = now + this.randInterval(phaseKey);
+    }
+    this.nextAtPhase = phaseKey;
     if (now < this.nextAt) return null;
-    this.nextAt = now + this.randInterval();
+    this.nextAt = now + this.randInterval(phaseKey);
 
     const pPositive = Math.max(0, Math.min(1, 0.5 + dirBias));
     const dir = Math.random() < pPositive ? 1 : -1;
-    const scope = pick(SCOPES);
+    const scope = this.pickScope(phaseKey);
     const power = 0.3 + Math.random() * 0.5;
+    const session = phaseKey ? SESSION_OF_PHASE[phaseKey] || null : null;
     // 全体 = 大盘消息（不带股票）；机构/散户 = 个股消息，随机挂一只
     const stock = scope === '全体' || !this.stocks.length ? null : pick(this.stocks);
     const text = stock
-      ? `【${stock.alias}】${this.pickText(scope, dir, stock)}`
-      : this.pickText(scope, dir);
+      ? `【${stock.alias}】${this.pickText(scope, dir, stock, session)}`
+      : this.pickText(scope, dir, null, session);
     this.seq += 1;
     const news = {
       id: 'N' + this.seq,
@@ -707,7 +808,8 @@ class NewsSystem {
       stockId: stock ? stock.id : null,
       stockName: stock ? stock.name : null,
       text,
-      until: now + config.news.durationMs,
+      session, // 盘前 / 盘中 / 午间 / 盘后（客户端标签；无时钟时为 null）
+      until: Math.max(now + config.news.durationMs, untilFloor),
     };
     this.tape.unshift(news);
     if (this.tape.length > config.news.tapeSize) this.tape.length = config.news.tapeSize;
@@ -784,4 +886,4 @@ class NewsSystem {
   }
 }
 
-module.exports = { NewsSystem, TEMPLATES, STOCK_TEMPLATES };
+module.exports = { NewsSystem, TEMPLATES, STOCK_TEMPLATES, ANNOUNCE_TEMPLATES };

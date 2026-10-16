@@ -3,7 +3,7 @@
  */
 const { Game, ACTIONS } = require('../src/game');
 const config = require('../src/config');
-const { NewsSystem, TEMPLATES, STOCK_TEMPLATES } = require('../src/news');
+const { NewsSystem, TEMPLATES, STOCK_TEMPLATES, ANNOUNCE_TEMPLATES } = require('../src/news');
 
 // 涨跌停是**日频机制**（区间以昨收为基准，价格一天最多走 ±10%）。本文件验的是撮合 /
 // 风控 / 快照 / 消息本身，用例里按盘口 ±0.05 打价是常态，开着涨跌停会把它们拦在门外。
@@ -604,6 +604,120 @@ console.log('\n[15] 个股消息文案：每只股票走自己的专属池');
       new Set(TEMPLATES['全体'].negative).size === TEMPLATES['全体'].negative.length,
     '大盘池内无重复文案'
   );
+}
+
+console.log('\n[16] 消息按「天」分段：节奏 / scope 权重 / 盘后公告池 / 作用期下限');
+{
+  const phaseLen = Object.fromEntries(config.day.phases.map((p) => [p.key, p.ms]));
+  const rules = config.news.phaseRules;
+  const NOW = 10000000;
+
+  // ① 阶段规则与阶段长度自洽：段内保底有消息、收盘竞价刻意不发
+  assert(!!(rules && rules.auction && rules.lunch && rules.night), '盘前/午休/盘后各有阶段规则');
+  assert(rules.auction.maxIntervalMs < phaseLen.auction, '盘前节奏上限 < 竞价段长（30s 内必出，隔夜重磅落地）');
+  assert(rules.night.maxIntervalMs < phaseLen.night, '盘后节奏上限 < 夜间段长（40s 内必出，盘后公告保底）');
+  assert(rules.lunch.minIntervalMs < phaseLen.lunch, '午休节奏下限 < 午休段长（40s 内保底一条午间公告）');
+  assert(!rules.closeAuction, '收盘竞价不配规则（尾盘不发消息，张力交给竞价机制）');
+  assert(config.news.minIntervalMs >= phaseLen.closeAuction, `全局节奏下限(${config.news.minIntervalMs}ms) ≥ 收盘竞价段长(${phaseLen.closeAuction}ms)（重排队后段内恒无新消息）`);
+
+  // ② 换阶段重新排队：上一段排出的远期倒计时不能整段吞掉新阶段
+  const sys = new NewsSystem(config.stocks);
+  sys.nextAtPhase = 'afternoon';
+  sys.nextAt = NOW + 500000; // 假设下午末尾排出了一条 500s 后的倒计时
+  const r = sys.maybeEmit(NOW, 0, { phaseKey: 'night' });
+  assert(r === null, '换阶段当帧不产出（按盘后节奏重排队）');
+  const gap = sys.nextAt - NOW;
+  assert(gap >= rules.night.minIntervalMs && gap <= rules.night.maxIntervalMs, `重排后的间隔落在盘后窗口（${gap}ms ∈ [${rules.night.minIntervalMs}, ${rules.night.maxIntervalMs}]）`);
+  assert(gap < phaseLen.night, `重排后首个候选落在夜间段内（${gap}ms < ${phaseLen.night}ms）`);
+
+  // ③ 首次调用只登记阶段、不重排（构造时已排过队）；不传阶段则与旧版完全一致
+  const sys2 = new NewsSystem(config.stocks);
+  sys2.nextAt = 0;
+  const r2 = sys2.maybeEmit(NOW, 0, { phaseKey: 'morning' });
+  assert(!!r2 && r2.session === '盘中', '首次调用不重排、立即产出（session=盘中）');
+  const sys3 = new NewsSystem(config.stocks);
+  sys3.nextAt = 0;
+  const r3 = sys3.maybeEmit(NOW, 0);
+  assert(!!r3 && r3.session === null, '不传阶段（时钟关闭）session 为空，行为与旧版一致');
+  const sys3b = new NewsSystem(config.stocks);
+  sys3b.nextAt = 0;
+  assert(sys3b.maybeEmit(NOW, 0, { phaseKey: 'auction' }).session === '盘前', '开盘竞价 → session=盘前');
+
+  // ④ scope 权重：盘前偏全体（隔夜宏观）、盘后偏机构（公告）、盘中均匀
+  const sampleScopes = (phaseKey, n) => {
+    const s = new NewsSystem(config.stocks);
+    const cnt = { 机构: 0, 散户: 0, 全体: 0 };
+    for (let i = 0; i < n; i++) {
+      s.nextAt = 0;
+      const m = s.maybeEmit(NOW + i, 0, { phaseKey });
+      if (m) cnt[m.scope] += 1;
+    }
+    return cnt;
+  };
+  const share = (c, k) => (c['机构'] + c['散户'] + c['全体'] ? c[k] / (c['机构'] + c['散户'] + c['全体']) : 0);
+  const nPre = sampleScopes('auction', 600);
+  assert(share(nPre, '全体') > 0.5 && share(nPre, '全体') < 0.7, `盘前「全体」占比 ${share(nPre, '全体').toFixed(2)} ∈ (0.5, 0.7)（隔夜宏观为主）`);
+  const nPost = sampleScopes('night', 600);
+  assert(share(nPost, '机构') > 0.4 && share(nPost, '机构') < 0.6, `盘后「机构」占比 ${share(nPost, '机构').toFixed(2)} ∈ (0.4, 0.6)（公告偏机构）`);
+  const nMid = sampleScopes(null, 900);
+  assert(
+    ['机构', '散户', '全体'].every((k) => share(nMid, k) > 0.26 && share(nMid, k) < 0.41),
+    `盘中/无时钟均匀抽（机构 ${share(nMid, '机构').toFixed(2)} / 散户 ${share(nMid, '散户').toFixed(2)} / 全体 ${share(nMid, '全体').toFixed(2)}）`
+  );
+
+  // ⑤ 盘后个股消息走「盘后公告」池（带【简称】前缀），大盘消息仍走「全体」池
+  const sys4 = new NewsSystem(config.stocks);
+  const bad = [];
+  const byId = new Map(config.stocks.map((s) => [s.id, s]));
+  let stockN = 0;
+  let macroN = 0;
+  for (let i = 0; i < 400; i++) {
+    sys4.nextAt = 0;
+    const m = sys4.maybeEmit(NOW + i * 1000, 0, { phaseKey: 'night' });
+    if (!m) continue;
+    if (m.session !== '盘后') bad.push(`session=${m.session}`);
+    if (m.stockId) {
+      stockN += 1;
+      const s = byId.get(m.stockId);
+      const key = m.dir > 0 ? 'positive' : 'negative';
+      if (!m.text.startsWith(`【${s.alias}】`)) bad.push(`缺前缀: ${m.text}`);
+      if (!ANNOUNCE_TEMPLATES[key].includes(m.text.replace(`【${s.alias}】`, ''))) bad.push(`不在公告池: ${m.text}`);
+    } else {
+      macroN += 1;
+      if (!TEMPLATES['全体'][m.dir > 0 ? 'positive' : 'negative'].includes(m.text)) bad.push(`盘后大盘消息不在全体池: ${m.text}`);
+      if (m.text.includes('【')) bad.push(`大盘消息带了前缀: ${m.text}`);
+    }
+  }
+  assert(bad.length === 0, `盘后消息文案归属正确（违规 ${bad.length} 条${bad.length ? '：' + bad.slice(0, 3).join('；') : ''}）`);
+  assert(stockN > 100 && macroN > 50, `盘后个股/大盘消息都有产出（个股 ${stockN} / 大盘 ${macroN}）`);
+
+  // ⑥ 公告池质量：12+12、池内无重复、与既有全部文案池零重叠
+  const ann = [...ANNOUNCE_TEMPLATES.positive, ...ANNOUNCE_TEMPLATES.negative];
+  assert(ANNOUNCE_TEMPLATES.positive.length === 12 && ANNOUNCE_TEMPLATES.negative.length === 12, `公告池 12+12（实际 ${ANNOUNCE_TEMPLATES.positive.length}+${ANNOUNCE_TEMPLATES.negative.length}）`);
+  assert(new Set(ann).size === ann.length, '公告池内无重复');
+  const others = [];
+  for (const scope of ['全体', '机构', '散户']) {
+    others.push(...TEMPLATES[scope].positive, ...TEMPLATES[scope].negative);
+  }
+  for (const s of config.stocks) {
+    for (const scope of ['机构', '散户']) {
+      others.push(...STOCK_TEMPLATES[s.name][scope].positive, ...STOCK_TEMPLATES[s.name][scope].negative);
+    }
+  }
+  const othersSet = new Set(others);
+  const leaked = ann.filter((t) => othersSet.has(t));
+  assert(leaked.length === 0, `公告池与既有文案池零重叠（${others.length} 条既有文案，越池 ${leaked.length} 条${leaked.length ? '：' + leaked.slice(0, 3).join('；') : ''}）`);
+
+  // ⑦ untilFloor：盘后消息作用期抬到次日开盘竞价结束，其余照旧 60s
+  const sys5 = new NewsSystem(config.stocks);
+  const floor = NOW + 68000;
+  sys5.nextAt = 0;
+  assert(sys5.maybeEmit(NOW, 0, { phaseKey: 'night', untilFloor: floor }).until === floor, 'untilFloor 生效：作用期被抬到竞价结束');
+  sys5.nextAt = 0;
+  assert(sys5.maybeEmit(NOW, 0, { phaseKey: 'night', untilFloor: NOW + 1000 }).until === NOW + config.news.durationMs, 'untilFloor 早于自然过期时按 60s 走');
+  const sys6 = new NewsSystem(config.stocks); // 换阶段会重排 nextAt（覆盖 nextAt=0），所以另起一个实例
+  sys6.nextAt = 0;
+  assert(sys6.maybeEmit(NOW, 0, { phaseKey: 'auction' }).until === NOW + config.news.durationMs, '盘前不传 floor 时作用期仍是 60s');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
