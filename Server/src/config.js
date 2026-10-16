@@ -125,6 +125,7 @@ module.exports = {
       deposit: { limit: 10, windowMs: 60000 },
       state: { limit: 240, windowMs: 60000 },
       holders: { limit: 60, windowMs: 60000 }, // 股东占比走势（点击前十名时按需拉取）
+      daily: { limit: 60, windowMs: 60000 }, // 日线（切到日线模式 / 换股票时按需拉取）
       admin: { limit: 10, windowMs: 60000 },
     },
     // SSE 长连接上限
@@ -665,6 +666,7 @@ module.exports = {
   market: {
     tradeTapeSize: 500, // 逐笔成交保留条数
     priceHistorySize: 10300, // 分时价格序列（tick 级，约 2 小时 @ 700ms）
+    dailyBarsKeep: 260, // 日线（K 线）保留根数：内存与存档同一个上限，约 45 小时的游戏时间
     depthLevels: 5, // 五档盘口
   },
 };

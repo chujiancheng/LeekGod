@@ -208,6 +208,7 @@ function createServer(game) {
     deposit: new RateLimiter(rl.deposit),
     state: new RateLimiter(rl.state),
     holders: new RateLimiter(rl.holders),
+    daily: new RateLimiter(rl.daily),
     admin: new RateLimiter(rl.admin),
   };
 
@@ -283,6 +284,19 @@ function createServer(game) {
           return json(res, 401, { ok: false, error: '请先登录' });
         }
         return json(res, 200, game.sparksFor());
+      }
+
+      // ---- 日线（K 线图）：切到日线模式 / 换股票时按需拉该标的的已收盘日线 ----
+      if (p === '/api/daily' && req.method === 'GET') {
+        if (rl.enabled && !limiters.daily.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        const r = game.dailyFor(url.searchParams.get('stock'), Number(url.searchParams.get('limit')) || 120);
+        return json(res, r.ok ? 200 : 400, r);
       }
 
       // ---- 某只股票的前十大股东（含两层变动）：进股东 tab / 切股票时拉，5 秒刷新 ----

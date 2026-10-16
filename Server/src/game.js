@@ -12,6 +12,7 @@ const { NpcManager, normalizeNpcType } = require('./npc');
 const { AutoManager } = require('./auto');
 const { IndexFeed } = require('./indexfeed');
 const { DayCycle } = require('./daycycle');
+const flow = require('./flow');
 
 const NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
 
@@ -60,6 +61,10 @@ class Game {
 
     this.index = new IndexFeed(this.stocks);
     this.markets.set(this.index.stockId, this.index); // 指数也进 markets：取价、落盘、广播一视同仁
+    // 指数与个股共用同一套日线/资金记账（flow.js），所以也要有时钟与落盘句柄：
+    // 时钟用来判断「当日数据属于哪一天」，句柄用来把定格的日线写进 daily_bars
+    this.index.journal = opts.persist || null;
+    this.index.dayCycle = this.day;
 
     this.auto = new AutoManager(this.markets, this.stocksById, this.store);
     this.persist = opts.persist || null;
@@ -250,6 +255,8 @@ class Game {
       market.shortInterest = m.short_interest;
       market.orderSeq = Math.max(market.orderSeq, m.order_seq);
       market.priceHistory = mk.prices.map((p) => ({ t: p.t, price: p.price, vol: p.vol }));
+      // 当日内外盘累计（外盘+内盘要等于当日成交量，不恢复就会对不上账）与已收盘的日线
+      flow.restoreFlow(market, m, mk.bars);
       market.trades = mk.tape.map((t) => ({
         seq: t.trade_seq,
         t: t.t,
@@ -262,6 +269,7 @@ class Game {
     // 指数断点：点位直接读存档，分时与成分由价格推出
     const idxSnap = snap.markets?.get(this.index.stockId);
     this.index.applyState(idxSnap && idxSnap.state, idxSnap && idxSnap.prices);
+    flow.restoreFlow(this.index, idxSnap && idxSnap.state, idxSnap && idxSnap.bars);
     this.index.update(this.markets, Date.now());
 
     // 融券池聚合值从账户挂借量 + shortInterest 重建（挂借量已随 accounts 恢复）
@@ -535,25 +543,30 @@ class Game {
   }
 
   /**
-   * 日终结算：收盘价定格为新昨收，今开/最高/最低/成交量额归零，活动委托全部作废。
+   * 日终结算：每只标的（含指数）当日定格成一根日线，收盘价定格为新昨收，
+   * 今开/最高/最低/成交量额归零，活动委托全部作废。
    * `_daySettled` 记的是**哪一天的收盘已经滚进昨收**：
    * 夜间结算时是今天；次日盘中补结时是昨天（今天还没收盘，不能记成今天，
    * 否则今晚的日终结算会被跳过）。
    */
   settleDay(now = Date.now(), opts = {}) {
+    const st = this.day.ok ? this.day.locate(now) : null;
+    const completedDay = st ? (st.phase.key === 'night' ? st.day : st.day - 1) : 0;
+    // 指数的量额与内外盘是**成分股合计**，必须在成分股被清零之前重算一遍：
+    // 否则指数那根日线的量额会落成 0，收盘竞价那批成交更会整个丢掉
+    this.index.recompute(this.markets);
     let canceled = 0;
     for (const stock of this.stocks) {
-      canceled += this.markets.get(stock.id).settleDay(now, { cancelOrders: opts.cancelOrders }).canceled;
+      canceled += this.markets
+        .get(stock.id)
+        .settleDay(now, { cancelOrders: opts.cancelOrders, day: completedDay }).canceled;
     }
-    this.index.settleDay();
-    const st = this.day.ok ? this.day.locate(now) : null;
-    if (st) {
-      this._daySettled = st.phase.key === 'night' ? st.day : st.day - 1;
-    }
+    this.index.settleDay(now, { day: completedDay });
+    if (completedDay >= 1) this._daySettled = completedDay;
     if (opts.meta) this.persist?.setMeta('day_settled', String(this._daySettled));
     logger.info(
-      `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：昨收已滚动到各股收盘价，` +
-        `${canceled} 笔未成交委托当日作废`
+      `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：当日已定格成一根日线，` +
+        `昨收已滚动到各股收盘价，${canceled} 笔未成交委托当日作废`
     );
   }
 
@@ -1364,6 +1377,26 @@ class Game {
     if (!stockId) return { ok: false, error: '未知标的' };
     const market = this.markets.get(stockId);
     return { ok: true, stockId, priceHistory: market.priceHistory };
+  }
+
+  /**
+   * 某只标的（股票或指数）的**已收盘日线**，K 线图按需拉取（切到日线模式 / 换股票时）。
+   *
+   * 只回已收盘的：当日那根要到收盘结算才定格（`settleDay`），此刻还没落盘，
+   * 由客户端拿实时行情自己拼一根「正在走」的——这样它每帧都在动，不需要额外推送。
+   * `today` 告诉客户端今天是第几个交易日，用来把重复的那根剔掉。
+   */
+  dailyFor(stockIdRaw, limit = 120) {
+    const stockId = this.resolveMarketId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知标的' };
+    const market = this.markets.get(stockId);
+    const n = Math.max(1, Math.min(Number(limit) || 120, config.market.dailyBarsKeep || 260));
+    return {
+      ok: true,
+      stockId,
+      today: this.day.ok ? this.day.locate(Date.now()).day : null,
+      bars: market.dailyBars.slice(-n),
+    };
   }
 
   /**

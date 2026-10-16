@@ -7,6 +7,7 @@
 const config = require('./config');
 const { OrderBook } = require('./orderbook');
 const { r2 } = require('./store');
+const flow = require('./flow');
 
 const ACTIONS = {
   BUY_OPEN: 'buy_open', // 买入开多
@@ -32,6 +33,8 @@ class Market {
     this.turnover = 0; // 成交额
     this.trades = []; // 逐笔成交
     this.priceHistory = []; // 分时序列 [{t, price}]
+    // 资金流向（当日累计：外盘=主动买 / 内盘=主动卖）与已收盘的日线，见 flow.js
+    flow.initFlow(this);
     this.orderSeq = 0;
     this.shortInterest = 0; // 未平空单总量（虚拟流通增量）
     // 融券池：挂借总量 / 已借出 / 开单中占用。可借 = 总挂借 − 已借出 − 开单占用。
@@ -387,14 +390,18 @@ class Market {
 
   /**
    * 日终结算（收盘集合竞价结束 → 夜间那一步由 Game 调用一次）：
+   * - **当日定格成一根日线**（K 线图的数据来源，见 flow.js）
    * - 收盘价定格为新「昨收」，涨跌幅基准随之滚动到「今日」
-   * - 今开 / 最高 / 最低 / 成交量 / 成交额归零，等次日开盘竞价的成交价来填「今开」
+   * - 今开 / 最高 / 最低 / 成交量 / 成交额 / 内外盘归零，等次日开盘竞价的成交价来填「今开」
    * - **委托当日作废**：全部活动委托撤掉（真实市场收盘后未成交委托自动失效），
    *   冻结资金与仓位预留一并退回。不撤的话昨天的挂单会带着昨天的价格活到今天，
    *   玩家看到的盘口与自己的委托表都对不上。
+   * @param {{cancelOrders?:boolean, day?:number}} [opts] day = 本次结算的是第几个交易日
    */
   settleDay(now = Date.now(), opts = {}) {
     const cancelOrders = opts.cancelOrders !== false;
+    // 先定格当日日线：此刻今开/高低/成交量额还都是「今天」的，归零之后就再也拼不出来了
+    flow.recordDailyBar(this, this.settleDayNo(now, opts), now);
     this.prevClose = this.lastPrice;
     this.open = this.lastPrice;
     this.high = this.lastPrice;
@@ -402,6 +409,8 @@ class Market {
     this.volume = 0;
     this.turnover = 0;
     this.dayTradeCount = 0;
+    // 当日内外盘随成交量额一起清零，新的一天重新累计
+    flow.resetDayFlow(this);
     let canceled = 0;
     if (cancelOrders) {
       for (const o of [...this.book.orders.values()]) {
@@ -411,6 +420,18 @@ class Market {
       }
     }
     return { prevClose: this.prevClose, canceled };
+  }
+
+  /**
+   * 本次结算的是第几个交易日。优先用调用方显式给的 `day`——补结算发生在停机之后时，
+   * 时钟推出来的「今天」并不是要结的那一天（见 Game.settleDay）；显式给 0 表示
+   * 「没有已收盘的交易日」（比如白天补结算时昨天还没结束），那就**不记日线**，
+   * 不能退回去拿「今天」顶替，否则会把盘中数据当成一根已收盘的 K 线。
+   * 完全没给 `day` 时（孤立单测直接调 settleDay）才从交易日时钟推。
+   */
+  settleDayNo(now, opts = {}) {
+    if (opts.day !== undefined) return Number(opts.day) || 0;
+    return this.dayCycle && this.dayCycle.ok ? this.dayCycle.locate(now).day : 0;
   }
 
   // ---------- 停牌（手动运营开关） ----------
@@ -1117,6 +1138,8 @@ class Market {
     if (price < this.low) this.low = price;
     this.volume += qty;
     this.turnover += price * qty;
+    // 内外盘：主动买进外盘、主动卖进内盘，净流入 = 外盘额 − 内盘额
+    flow.addTrade(this, aggressorSide, price, qty);
     this.trades.unshift({
       seq: this.trades.length ? this.trades[0].seq + 1 : 1,
       t: now,
@@ -1538,6 +1561,8 @@ class Market {
       changePct,
       volume: this.volume,
       turnover: this.turnover,
+      // 当日内外盘与资金净流入（外盘额 − 内盘额），客户端盘口与日线图都吃它
+      flow: flow.flowSnapshot(this),
       lotSize: this.stock.lotSize,
       floatShares: this.stock.floatShares,
       depth,

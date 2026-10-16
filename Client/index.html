@@ -160,12 +160,42 @@
       <main class="main">
         <section class="panel chart-panel">
           <div class="panel-title">
-            <span>分时走势</span>
+            <!-- 分时（tick 级走势）与日线（K 线）共用一块画布，只切画法不切数据源：
+                 分时吃 /api/history，日线吃 /api/daily + 实时行情现拼的当日那根 -->
+            <span class="chart-modes" id="chartModes">
+              <button class="chart-mode on" type="button" data-mode="minute">分时</button>
+              <button class="chart-mode" type="button" data-mode="day">日线</button>
+            </span>
             <span class="panel-sub" id="chartSub">均价与价格 · 成交量 · MACD(12,26,9)</span>
           </div>
           <div class="chart-wrap">
             <canvas id="chart"></canvas>
             <div class="chart-tip" id="chartTip" hidden></div>
+          </div>
+          <!-- 资金指标：外盘=主动买、内盘=主动卖，净流入 = 外盘成交额 − 内盘成交额（口径见服务端 flow.js） -->
+          <div class="flow-strip" id="flowStrip">
+            <div class="flow-row">
+              <div class="flow-cell">
+                <label>外盘<span class="fc-tag">主动买</span></label>
+                <b class="up" id="flowOutVol">--</b><i id="flowOutAmt">--</i>
+              </div>
+              <div class="flow-cell">
+                <label>内盘<span class="fc-tag">主动卖</span></label>
+                <b class="down" id="flowInVol">--</b><i id="flowInAmt">--</i>
+              </div>
+              <div class="flow-cell">
+                <label>资金净流入</label>
+                <b id="flowNet">--</b><i id="flowNetSub">外盘额 − 内盘额</i>
+              </div>
+              <div class="flow-cell">
+                <label>外盘占比</label>
+                <b id="flowPct">--</b><i id="flowPctSub">--</i>
+              </div>
+            </div>
+            <div class="flow-bar" id="flowBar">
+              <span class="fb-out" id="flowBarOut"></span>
+              <span class="fb-in" id="flowBarIn"></span>
+            </div>
           </div>
         </section>
 

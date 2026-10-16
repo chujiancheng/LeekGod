@@ -82,8 +82,12 @@ src = src.replace(
   globalThis.__day = {
     renderDay, renderClock, gameClockNow, fmtClockMs, dayInfo,
     renderNews, newsRowsHtml,
+    renderFlow, renderChartMode, onState,
     setState: (v) => { state = v; },
     setDrift: (ms) => { lastStateAt = Date.now() - ms; },
+    setChartMode: (m) => { chartMode = m; },
+    dayLoadedSize: () => dayLoaded.size,
+    chartModeOf: () => chartMode,
     el: (id) => $('id'.replace('id', id)),
   };
 })();
@@ -337,6 +341,77 @@ console.log('\n[8] 消息行：盘前/午间/盘后带时段标签，盘中与�
   assert((html.match(/class="nsess"/g) || []).length === 2, `时段标签只渲染 2 个（盘中与老数据不带，实际 ${(html.match(/class="nsess"/g) || []).length}）`);
   assert(html.includes('大盘') && html.includes('大米集团'), '标的标签仍正常（大盘 / 个股）');
   assert(html.includes('npos') && html.includes('nneg'), '利好/利空着色类仍在');
+}
+
+console.log('\n[9] 资金指标条：外盘/内盘/净流入/占比与占比条');
+{
+  const st = mkState(AUCTION_DAY, null);
+  st.markets[0].flow = { outerVol: 600, outerAmt: 12060, innerVol: 400, innerAmt: 7960, net: 4100, outerPct: 60.24 };
+  api.setState(st);
+  api.renderFlow();
+  assert(api.el('flowOutVol').textContent === '600股', `外盘量 ${api.el('flowOutVol').textContent}`);
+  assert(api.el('flowOutAmt').textContent === '1.21万元', `外盘额 ${api.el('flowOutAmt').textContent}`);
+  assert(api.el('flowInVol').textContent === '400股', `内盘量 ${api.el('flowInVol').textContent}`);
+  assert(api.el('flowInAmt').textContent === '7960.00元', `内盘额 ${api.el('flowInAmt').textContent}`);
+  assert(api.el('flowNet').textContent === '+4100.00元', `净流入带正号 ${api.el('flowNet').textContent}`);
+  assert(api.el('flowNet').className === 'up', `净流入红字（${api.el('flowNet').className}）`);
+  assert(api.el('flowPct').textContent === '60.24%', `外盘占比 ${api.el('flowPct').textContent}`);
+  assert(api.el('flowPct').className === 'up', '外盘占比 >50% 走红字');
+  assert(api.el('flowPctSub').textContent === '总成交额 2.00万元', `占比副标题 ${api.el('flowPctSub').textContent}`);
+  assert(api.el('flowBarOut').style.width === '60.24%', `占比条外盘宽 ${api.el('flowBarOut').style.width}`);
+  assert(api.el('flowBarIn').style.width === '39.76%', `占比条内盘宽 ${api.el('flowBarIn').style.width}`);
+
+  // 净流出：绿字 + 内盘占优
+  st.markets[0].flow = { outerVol: 100, outerAmt: 2000, innerVol: 900, innerAmt: 9000, net: -7000, outerPct: 18.18 };
+  api.setState(st);
+  api.renderFlow();
+  assert(api.el('flowNet').textContent === '-7000.00元', `净流出带负号 ${api.el('flowNet').textContent}`);
+  assert(api.el('flowNet').className === 'down', '净流出绿字');
+  assert(api.el('flowPct').className === 'down', '外盘占比 <50% 走绿字');
+
+  // 当日一笔都没成交：占比无意义，显示 --（不能报 0% 或 50%）
+  st.markets[0].flow = { outerVol: 0, outerAmt: 0, innerVol: 0, innerAmt: 0, net: 0, outerPct: null };
+  api.setState(st);
+  api.renderFlow();
+  assert(api.el('flowPct').textContent === '--', `无成交时占比 ${api.el('flowPct').textContent}`);
+  assert(api.el('flowPctSub').textContent === '当日暂无成交', `无成交提示「${api.el('flowPctSub').textContent}」`);
+  assert(api.el('flowBarOut').style.width === '50%', '占比条各占一半');
+
+  // 老服务端（没有 flow 段）不能报错，保持上一帧的画面即可
+  delete st.markets[0].flow;
+  api.setState(st);
+  api.renderFlow();
+  assert(api.el('flowNet').textContent === '+0.00元', '老服务端（无 flow 段）保持上一帧、不抛错');
+}
+
+console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
+{
+  const calls = [];
+  sandbox.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+  };
+  const dailyCalls = () => calls.filter((u) => u.includes('/api/daily')).length;
+
+  api.setChartMode('day');
+  // 第 14 天盘中：第一次进日线模式 → 拉一次
+  api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'morning', label: '上午连续竞价', auction: null }, null));
+  assert(dailyCalls() === 1, `盘中首帧拉一次日线（${dailyCalls()} 次）`);
+  assert(api.el('chartSub').textContent === '日线 · 蜡烛 + 成交量 + MA5/MA10', `日线副标题 ${api.el('chartSub').textContent}`);
+  // 同一帧反复推：不能再拉（缓存有效）
+  api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'morning', label: '上午连续竞价', auction: null }, null));
+  assert(dailyCalls() === 1, `同一阶段不重复拉（${dailyCalls()} 次）`);
+  // 进入夜间：当日那根刚收盘定格 → 必须重拉，否则夜间会用归零的行情拼出假 K 线
+  api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'night', label: '休市结算', trading: false, auction: null }, null));
+  assert(dailyCalls() === 2, `进入夜间重拉一次（${dailyCalls()} 次）`);
+  // 跨天：新的一天多一根 → 再拉
+  api.onState(mkState({ ...AUCTION_DAY, day: 15, phase: 'auction', label: '开盘集合竞价' }, null));
+  assert(dailyCalls() === 3, `跨天重拉一次（${dailyCalls()} 次）`);
+  // 分时模式不吃日线：切回分时后不再请求
+  api.setChartMode('minute');
+  api.onState(mkState({ ...AUCTION_DAY, day: 16, phase: 'auction', label: '开盘集合竞价' }, null));
+  assert(dailyCalls() === 3, `分时模式不拉日线（${dailyCalls()} 次）`);
+  api.setChartMode('day');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

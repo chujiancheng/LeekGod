@@ -1,5 +1,5 @@
 /**
- * 持久化：账号 / 持仓 / 活动委托 / 成交流水 / 令牌 / 行情断点
+ * 持久化：账号 / 持仓 / 活动委托 / 成交流水 / 令牌 / 行情断点 / 日线
  *
  * 写入模型：游戏主循环每秒调一次 commit()，把该 tick 的全部变更放进**一个事务**提交，
  * 因此不存在"钱改了一半"的中间态。任何改动资金或持仓的路径都必须调 touch(account)，
@@ -16,6 +16,7 @@ const { r2 } = require('./store');
 const ORDER_HISTORY_KEEP = 100; // 每个账户保留的已完结委托行数（与内存 orderHistory 一致）
 const TAPE_KEEP = 500; // 逐笔成交恢复条数（与 config.market.tradeTapeSize 一致）
 const PRICE_KEEP_MS = 2 * 60 * 60 * 1000; // 分时序列保留窗口，与 priceHistorySize 同为 2 小时
+const DAILY_KEEP = config.market.dailyBarsKeep || 260; // 日线恢复根数（与内存上限一致）
 const PRUNE_EVERY_TICKS = 300;
 
 class Persister {
@@ -28,6 +29,7 @@ class Persister {
     this.pendingOrders = new Map(); // orderId -> order，本 tick 状态有变化的委托
     this.pendingAuto = new Map(); // strategyId -> strategy，本 tick 有变化的自动交易策略
     this.autoRemovals = new Set(); // 本 tick 删除的策略 id
+    this.pendingBars = []; // 本 tick 定格的日线（每个交易日结算时每只标的至多一根）
     this.liveOrders = new Map(); // orderId -> 账户名，当前在册的活动委托
     this.tickCount = 0;
     this.sweepCursor = 0;
@@ -70,13 +72,29 @@ class Persister {
       `),
       upsertMarket: db.prepare(`
         INSERT INTO market_state
-          (stock_id, last_price, prev_close, open, high, low, volume, turnover, short_interest, order_seq, trade_seq, updated_at)
+          (stock_id, last_price, prev_close, open, high, low, volume, turnover, short_interest, order_seq, trade_seq,
+           outer_vol, outer_amt, inner_vol, inner_amt, updated_at)
         VALUES
-          (@stock_id, @last_price, @prev_close, @open, @high, @low, @volume, @turnover, @short_interest, @order_seq, @trade_seq, @updated_at)
+          (@stock_id, @last_price, @prev_close, @open, @high, @low, @volume, @turnover, @short_interest, @order_seq, @trade_seq,
+           @outer_vol, @outer_amt, @inner_vol, @inner_amt, @updated_at)
         ON CONFLICT(stock_id) DO UPDATE SET
           last_price = @last_price, prev_close = @prev_close, open = @open, high = @high, low = @low,
           volume = @volume, turnover = @turnover, short_interest = @short_interest,
-          order_seq = @order_seq, trade_seq = @trade_seq, updated_at = @updated_at
+          order_seq = @order_seq, trade_seq = @trade_seq,
+          outer_vol = @outer_vol, outer_amt = @outer_amt, inner_vol = @inner_vol, inner_amt = @inner_amt,
+          updated_at = @updated_at
+      `),
+      // 日线：每个交易日结算时记下的那根 K 线（同一天重复结算走覆盖，不追加第二根）
+      upsertBar: db.prepare(`
+        INSERT INTO daily_bars
+          (stock_id, day, open, high, low, close, volume, turnover, outer_vol, outer_amt, inner_vol, inner_amt, settled_at)
+        VALUES
+          (@stock_id, @day, @open, @high, @low, @close, @volume, @turnover, @outer_vol, @outer_amt, @inner_vol, @inner_amt, @settled_at)
+        ON CONFLICT(stock_id, day) DO UPDATE SET
+          open = @open, high = @high, low = @low, close = @close,
+          volume = @volume, turnover = @turnover,
+          outer_vol = @outer_vol, outer_amt = @outer_amt, inner_vol = @inner_vol, inner_amt = @inner_amt,
+          settled_at = @settled_at
       `),
       upsertPrice: db.prepare('INSERT OR REPLACE INTO prices (stock_id, t, price, vol) VALUES (?, ?, ?, ?)'),
       prunePrices: db.prepare('DELETE FROM prices WHERE t < ?'),
@@ -118,6 +136,8 @@ class Persister {
       `),
       allSessions: db.prepare('SELECT token, account FROM sessions'),
       marketState: db.prepare('SELECT * FROM market_state WHERE stock_id = ?'),
+      // 某只标的最近若干根日线（新到旧，读取侧再反转成时间升序）
+      recentBars: db.prepare('SELECT * FROM daily_bars WHERE stock_id = ? ORDER BY day DESC LIMIT ?'),
       recentPrices: db.prepare('SELECT t, price, vol FROM prices WHERE stock_id = ? ORDER BY t DESC LIMIT ?'),
       recentTape: db.prepare(`
         SELECT trade_seq, t, price, qty, side FROM trades
@@ -151,6 +171,15 @@ class Persister {
   /** 记录一笔成交（一笔撮合两个方向各调一次） */
   recordTrade(rec) {
     this.pendingTrades.push(rec);
+  }
+
+  /**
+   * 定格了一根日线（flow.recordDailyBar 调）。
+   * 与成交流水一样是本 tick 的追加数据，跟行情一起进同一个事务。
+   */
+  barChanged(stockId, bar) {
+    if (!stockId || !bar) return;
+    this.pendingBars.push({ stockId, bar });
   }
 
   /** 自动交易策略有变化（新建 / 触发 / 启停） */
@@ -237,6 +266,10 @@ class Persister {
         short_interest: m.shortInterest,
         order_seq: m.orderSeq,
         trade_seq: m.trades.length ? m.trades[0].seq : 0,
+        outer_vol: m.outerVol || 0,
+        outer_amt: m.outerAmt || 0,
+        inner_vol: m.innerVol || 0,
+        inner_amt: m.innerAmt || 0,
         updated_at: now,
       });
       const h = m.priceHistory;
@@ -252,6 +285,26 @@ class Persister {
       this.st.setMeta.run('halt', halt);
       this.lastHalt = halt;
     }
+
+    // 本 tick 定格的日线：每个交易日收盘结算时每只标的（含指数）至多一根
+    for (const { stockId, bar } of this.pendingBars) {
+      this.st.upsertBar.run({
+        stock_id: stockId,
+        day: bar.day,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+        turnover: bar.turnover,
+        outer_vol: bar.outerVol,
+        outer_amt: bar.outerAmt,
+        inner_vol: bar.innerVol,
+        inner_amt: bar.innerAmt,
+        settled_at: bar.t,
+      });
+    }
+    this.pendingBars.length = 0;
 
     this.sweep(allAccounts);
 
@@ -400,13 +453,14 @@ class Persister {
     const auto = this.st.allAuto.all();
 
     // 逐只读行情：market_state 一行 + prices 一路分时（升序，对齐 market.priceHistory）
-    // + 逐笔（新到旧，对齐 market.trades）
+    // + 逐笔（新到旧，对齐 market.trades）+ 日线（升序，对齐 market.dailyBars）
     const markets = new Map();
     for (const id of stockIds) {
       markets.set(id, {
         state: this.st.marketState.get(id) || null,
         prices: this.st.recentPrices.all(id, config.market.priceHistorySize).reverse(),
         tape: this.st.recentTape.all(id, TAPE_KEEP),
+        bars: this.st.recentBars.all(id, DAILY_KEEP).reverse(),
       });
     }
     // 只要有任意一只存在行情断点就算续跑（本轮新增的股票可能是空的）

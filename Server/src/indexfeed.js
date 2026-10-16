@@ -11,6 +11,7 @@
  */
 const config = require('./config');
 const { r2 } = require('./store');
+const flow = require('./flow');
 
 class IndexFeed {
   /**
@@ -37,21 +38,42 @@ class IndexFeed {
     this.orderSeq = 0;
     this.trades = []; // 指数无逐笔，保持空数组以对齐 Market 接口
     this.priceHistory = [];
+    // 资金流向：指数自己没有成交，内外盘按成分股加总（在 update 里逐 tick 重算）；
+    // 日线与个股同口径，收盘结算时按当日成分股合计的成交额定格一根
+    flow.initFlow(this);
     this.haltUntil = 0;
     this.haltReason = '';
     this.components = []; // 最近一次合成的成分明细（客户端展示权重与贡献）
   }
 
   /**
-   * 每 tick 用各股最新价重算点位。
+   * 每 tick 用各股最新价重算点位，并把点位追加进分时序列。
    * @param {Map<string, import('./market').Market>} markets
    * @param {number} now
    */
   update(markets, now) {
+    const v = this.recompute(markets);
+    const h = this.priceHistory;
+    h.push({ t: now, price: v, vol: 0 });
+    if (h.length > config.market.priceHistorySize) h.splice(0, h.length - config.market.priceHistorySize);
+  }
+
+  /**
+   * 只重算、不推分时点，返回新点位。
+   *
+   * 与 update 拆开是为了日终结算：指数的量额与内外盘是**成分股合计**，而成分股会在
+   * 同一轮结算里被清零——必须先重算（拿到当日真实合计）再让成分股归零，
+   * 否则落进日线的那根指数 K 线量额全是 0。
+   */
+  recompute(markets) {
     let cap = 0;
     let volume = 0;
     let turnover = 0;
     let shortInterest = 0;
+    let outerVol = 0;
+    let outerAmt = 0;
+    let innerVol = 0;
+    let innerAmt = 0;
     this.components = [];
     const rows = [];
     for (const s of this.stocks) {
@@ -63,6 +85,11 @@ class IndexFeed {
       volume += m.volume;
       turnover += m.turnover;
       shortInterest += m.shortInterest;
+      // 指数的高低量额与内外盘一样，都是成分股的合计（指数没有自己的成交）
+      outerVol += m.outerVol || 0;
+      outerAmt += m.outerAmt || 0;
+      innerVol += m.innerVol || 0;
+      innerAmt += m.innerAmt || 0;
       rows.push({ stock: s, m, price, mv });
     }
     // 权重按**当前**总市值算（合计 100%），指数涨了权重合计就还是 100%——
@@ -79,15 +106,16 @@ class IndexFeed {
     this.volume = volume;
     this.turnover = turnover;
     this.shortInterest = shortInterest;
+    this.outerVol = outerVol;
+    this.outerAmt = outerAmt;
+    this.innerVol = innerVol;
+    this.innerAmt = innerAmt;
 
     const v = this.roundPrice((this.base * cap) / this.baseCap);
     this.lastPrice = v;
     if (v > this.high) this.high = v;
     if (v < this.low) this.low = v;
-
-    const h = this.priceHistory;
-    h.push({ t: now, price: v, vol: 0 });
-    if (h.length > config.market.priceHistorySize) h.splice(0, h.length - config.market.priceHistorySize);
+    return v;
   }
 
   /** 指数点位保留两位小数（与个股的「分」同精度） */
@@ -96,17 +124,29 @@ class IndexFeed {
   }
 
   /**
-   * 日终结算：收盘点位定格为新「昨收」，今开/最高/最低归零到收盘点位，
-   * 成交量额清零。指数的涨跌幅因此从「相对开服基点」变成「相对昨日收盘」——
-   * 这正是引入「天」之后玩家想看的东西。
+   * 日终结算：当日定格成一根指数日线（与个股同口径，量额是成分股合计），
+   * 收盘点位定格为新「昨收」，今开/最高/最低归零到收盘点位，成交量额与内外盘清零。
+   * 指数的涨跌幅因此从「相对开服基点」变成「相对昨日收盘」——这正是引入「天」之后玩家想看的东西。
+   *
+   * ⚠️ 调用方必须**先 `recompute(markets)` 再结算成分股**，否则这里拿到的量额是上一 tick 的
+   * 合计（收盘竞价那批成交还没算进去），甚至已经被成分股清零。
    */
-  settleDay() {
+  settleDay(now = Date.now(), opts = {}) {
+    // 与 Market.settleDayNo 同一口径：显式给的 day 优先（0 = 没有已收盘的交易日，不记日线）
+    const day =
+      opts.day !== undefined
+        ? Number(opts.day) || 0
+        : this.dayCycle && this.dayCycle.ok
+          ? this.dayCycle.locate(now).day
+          : 0;
+    flow.recordDailyBar(this, day, now);
     this.prevClose = this.lastPrice;
     this.open = this.lastPrice;
     this.high = this.lastPrice;
     this.low = this.lastPrice;
     this.volume = 0;
     this.turnover = 0;
+    flow.resetDayFlow(this);
   }
 
   /** 与 Market.snapshot 同构的行情快照，客户端可像处理股票一样处理指数 */
@@ -126,6 +166,8 @@ class IndexFeed {
       changePct,
       volume: this.volume,
       turnover: this.turnover,
+      // 全部成分股加总的内外盘与净流入（指数自己没有成交）
+      flow: flow.flowSnapshot(this),
       depth: { bids: [], asks: [] },
       trades: [],
       band: null,

@@ -36,6 +36,14 @@
   let holdersAt = 0;
   // 消息过滤：all = 全部，index = 只大盘，个股 stockId
   let newsFilter = 'all';
+  // 图表模式：minute = 分时（tick 级走势），day = 日线（K 线）。选择记在本地，刷新后保持
+  let chartMode = localStorage.getItem('gushen_chart') === 'day' ? 'day' : 'minute';
+  // 日线：每只标的**已收盘**的 K 线（/api/daily 按需拉）。当日那根要到收盘结算才定格，
+  // 由客户端拿实时行情现拼，所以它每帧都在动、不需要额外推送
+  const dayBars = new Map(); // stockId -> [{day, open, high, low, close, volume, turnover, net}]
+  const dayLoaded = new Set(); // 已拉过日线的标的（与 histLoaded 同理，不能用 dayBars.has 判断）
+  // 「交易日号 + 是否已收盘结算」：跨天与进入夜间都要作废日线缓存（见 onState）
+  let lastDayKey = '';
 
   const ACTION_LABEL = {
     buy_open: '买入开多',
@@ -172,11 +180,14 @@
     priceDirty = false;
     loadHistory(stockId);
     loadHolders(stockId, true);
+    if (chartMode === 'day') loadDaily(stockId);
     renderStockTabs();
     if (activeView === 'trade') {
       renderHeader();
       renderDepth();
       renderTape();
+      renderFlow();
+      renderChartMode();
       renderOrderPanel();
       renderPositions();
       renderHolders();
@@ -255,10 +266,13 @@
         loadHistory(activeStockId);
         loadHolders(activeStockId, true);
       }
+      if (chartMode === 'day') loadDaily(activeStockId); // 日线同理：只在真要看的时候拉
       renderStockTabs();
       renderHeader();
       renderDepth();
       renderTape();
+      renderFlow();
+      renderChartMode();
       renderPositions();
       renderHolders();
       renderLending();
@@ -295,6 +309,7 @@
         ensureStock();
         loadHistory(activeStockId);
         loadSparks();
+        if (chartMode === 'day') loadDaily(activeStockId);
       })
       .catch(() => toast('状态加载失败', 'err'));
   }
@@ -413,12 +428,25 @@
     }
     if (s.index) appendPoint(histories, s.index.stockId, s.serverTime, s.index.last, 0);
 
+    // 日线缓存作废的时机有两个：**跨天**（图里要多一根）与**进入夜间**（当日那根刚刚收盘定格）。
+    // 少作废一次，夜间就会拿已经归零的实时行情（成交量额清零、开高低都等于收盘价）
+    // 拼出一根假的当日 K 线，把服务端刚落下的那根真 K 线盖掉
+    const dayNo = s.day && s.day.day ? s.day.day : 0;
+    const dayKey = dayNo ? dayNo + (s.day.phase === 'night' ? ':settled' : ':open') : '';
+    if (dayKey && dayKey !== lastDayKey) {
+      lastDayKey = dayKey;
+      dayLoaded.clear();
+      if (chartMode === 'day') loadDaily(activeStockId);
+    }
+
     renderHeader();
     renderStockTabs();
     renderHalt();
     renderDay();
     renderDepth();
     renderTape();
+    renderFlow();
+    renderChartMode();
     renderAssets();
     renderPositions();
     renderOrders();
@@ -573,6 +601,71 @@
       </div>`;
     });
     $('tape').innerHTML = rows.join('') || '<div class="tape-row"><span class="time">暂无成交</span></div>';
+  }
+
+  // ---------- 资金指标条（内外盘 / 净流入） ----------
+  /**
+   * 内外盘与资金净流入。口径与服务端 flow.js 一致：
+   * 外盘 = 主动买成交、内盘 = 主动卖成交，净流入 = 外盘成交额 − 内盘成交额。
+   * 数值都从 state.markets[].flow 来（指数是成分股合计），老服务端没有这一段时保持 --。
+   */
+  function renderFlow() {
+    const m = curMarket();
+    const f = m && m.flow;
+    if (!f) return;
+    $('flowOutVol').textContent = fmtVol(f.outerVol);
+    $('flowOutAmt').textContent = fmtAmount(f.outerAmt);
+    $('flowInVol').textContent = fmtVol(f.innerVol);
+    $('flowInAmt').textContent = fmtAmount(f.innerAmt);
+    const net = $('flowNet');
+    net.textContent = (f.net >= 0 ? '+' : '-') + fmtAmount(Math.abs(f.net));
+    net.className = cls(f.net);
+    const total = (f.outerAmt || 0) + (f.innerAmt || 0);
+    const pct = f.outerPct == null ? null : Number(f.outerPct);
+    $('flowPct').textContent = pct == null ? '--' : pct.toFixed(2) + '%';
+    $('flowPct').className = pct == null ? '' : pct >= 50 ? 'up' : 'down';
+    $('flowPctSub').textContent = total > 0 ? '总成交额 ' + fmtAmount(total) : '当日暂无成交';
+    // 占比条宽度：只动 CSSOM，不在 HTML 里写 style 属性（CSP 禁内联样式）
+    const barOut = $('flowBarOut');
+    const barIn = $('flowBarIn');
+    if (barOut && barIn) {
+      barOut.style.width = (pct == null ? 50 : pct) + '%';
+      barIn.style.width = (pct == null ? 50 : 100 - pct) + '%';
+    }
+  }
+
+  /** 图表模式按钮与副标题（分时 / 日线的画法、口径不同，副标题要说清） */
+  function renderChartMode() {
+    const wrap = $('chartModes');
+    if (wrap) {
+      wrap.querySelectorAll('.chart-mode').forEach((b) => {
+        b.classList.toggle('on', b.dataset.mode === chartMode);
+      });
+    }
+    const m = curMarket() || {};
+    const sub = $('chartSub');
+    if (!sub) return;
+    if (chartMode === 'day') {
+      sub.textContent = m.isIndex ? '大盘指数日线 · 蜡烛 + 成交量 + MA5/MA10' : '日线 · 蜡烛 + 成交量 + MA5/MA10';
+    } else {
+      sub.textContent = m.isIndex ? '大盘指数分时 · 成分股按流通市值加权' : '均价与价格 · 成交量 · MACD(12,26,9)';
+    }
+  }
+
+  function bindChartMode() {
+    const wrap = $('chartModes');
+    if (!wrap) return;
+    wrap.querySelectorAll('.chart-mode').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mode === 'day' ? 'day' : 'minute';
+        if (mode === chartMode) return;
+        chartMode = mode;
+        localStorage.setItem('gushen_chart', chartMode);
+        renderChartMode();
+        if (chartMode === 'day') loadDaily(activeStockId);
+        drawChart();
+      });
+    });
   }
 
   // ---------- 资产 ----------
@@ -1543,12 +1636,15 @@
     if (changed) {
       loadHistory(stockId);
       loadHolders(stockId, true);
+      if (chartMode === 'day') loadDaily(stockId);
     }
     setView('trade');
     renderStockTabs();
     renderHeader();
     renderDepth();
     renderTape();
+    renderFlow();
+    renderChartMode();
     renderOrderPanel();
     renderPositions();
     renderHolders();
@@ -2503,8 +2599,255 @@
       });
   }
 
-  // ---------- 分时图 ----------
+  // ---------- 分时 / 日线 ----------
   const canvas = () => $('chart');
+
+  /** 拉某只标的的已收盘日线（切到日线模式 / 换标的 / 跨天时各拉一次） */
+  function loadDaily(stockId) {
+    if (!stockId || dayLoaded.has(stockId)) return;
+    dayLoaded.add(stockId);
+    apiGet('/api/daily?stock=' + encodeURIComponent(stockId))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((res) => {
+        if (!res || !res.ok) {
+          dayLoaded.delete(stockId); // 失败允许下次再试
+          return;
+        }
+        dayBars.set(stockId, res.bars || []);
+        if (stockId === activeStockId && activeView === 'trade' && chartMode === 'day') drawChart();
+      })
+      .catch(() => {
+        dayLoaded.delete(stockId);
+      });
+  }
+
+  /**
+   * 日线序列：已收盘的 K 线 + 当日那根。
+   * 当日那根用实时行情（今开/最高/最低/最新/成交量）现拼——服务端要等收盘结算才定格，
+   * 不现拼的话今天在图上是空的。今天已经结算过（盘口里已经有今天这根）就不再拼，
+   * 否则夜间那段会用归零后的行情盖掉刚收盘的那根真 K 线。
+   */
+  function daySeriesOf(m) {
+    const bars = (dayBars.get(m.stockId) || []).slice();
+    const today = state && state.day && state.day.day ? state.day.day : null;
+    if (!today || bars.some((b) => b.day === today)) return bars;
+    bars.push({
+      day: today,
+      open: m.open,
+      high: m.high,
+      low: m.low,
+      close: m.last,
+      volume: m.volume,
+      turnover: m.turnover,
+      net: m.flow ? m.flow.net : 0,
+      live: true,
+    });
+    return bars;
+  }
+
+  /** 日线图的几何布局：绘制与十字光标共用一套，避免两处坐标算法跑偏 */
+  function dayLayout(W, H, bars) {
+    const PAD_L = 8;
+    const PAD_R = 58;
+    const PAD_T = 14;
+    const PAD_B = 20;
+    const VOL_H = Math.max(24, Math.min(56, H * 0.18));
+    const priceH = H - PAD_T - PAD_B - VOL_H - 10;
+    const volTop = PAD_T + priceH + 10;
+    let lo = Infinity;
+    let hi = -Infinity;
+    let maxVol = 1;
+    for (const b of bars) {
+      lo = Math.min(lo, b.low);
+      hi = Math.max(hi, b.high);
+      maxVol = Math.max(maxVol, b.volume || 0);
+    }
+    const padP = Math.max((hi - lo) * 0.08, 0.02);
+    lo -= padP;
+    hi += padP;
+    const slot = (W - PAD_L - PAD_R) / Math.max(bars.length, 1);
+    return {
+      W, H, PAD_L, PAD_R, PAD_T, PAD_B, VOL_H, priceH, volTop, lo, hi, maxVol, slot,
+      // 蜡烛中心与价格轴映射
+      xc: (i) => PAD_L + slot * (i + 0.5),
+      y: (p) => PAD_T + ((hi - p) / (hi - lo)) * priceH,
+    };
+  }
+
+  /** 收盘价均线（MA），不足周期的点返回 null（不画） */
+  function movingAvg(bars, period) {
+    const out = new Array(bars.length).fill(null);
+    let sum = 0;
+    for (let i = 0; i < bars.length; i++) {
+      sum += bars[i].close;
+      if (i >= period) sum -= bars[i - period].close;
+      if (i >= period - 1) out[i] = sum / period;
+    }
+    return out;
+  }
+
+  /**
+   * 日线图：蜡烛 + 成交量 + MA5/MA10。
+   * 蜡烛按「收 ≥ 开」上色，与分时图同一套 A 股配色（涨红跌绿）；
+   * 最后一根是「正在走」的当日 K 线时，在收盘价上点一个空心圈作标记。
+   */
+  function drawDayChart(c, m) {
+    const ctx = c.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const W = c.width / dpr;
+    const H = c.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    const bars = daySeriesOf(m);
+    ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+    if (!bars.length) {
+      ctx.fillStyle = '#7d879b';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('暂无日线数据（收盘结算后每根 K 线落一笔）', W / 2, H / 2);
+      return;
+    }
+
+    const L = dayLayout(W, H, bars);
+    const n = bars.length;
+    const bw = Math.max(1.5, Math.min(L.slot * 0.68, 18));
+
+    // 网格 + 右侧价格标签
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const p = L.lo + ((L.hi - L.lo) * i) / 4;
+      const yy = L.y(p);
+      ctx.strokeStyle = 'rgba(30,38,54,.9)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(L.PAD_L, yy);
+      ctx.lineTo(W - L.PAD_R, yy);
+      ctx.stroke();
+      ctx.fillStyle = '#7d879b';
+      ctx.textAlign = 'left';
+      ctx.fillText(p.toFixed(2), W - L.PAD_R + 6, yy);
+    }
+
+    // 时间刻度（纵线，标签用交易日号，与顶栏「第 N 天」同一口径）
+    const ticks = Math.min(6, n);
+    ctx.textAlign = 'center';
+    for (let k = 0; k < ticks; k++) {
+      const i = Math.round(((n - 1) * k) / Math.max(1, ticks - 1));
+      const xx = L.xc(i);
+      ctx.strokeStyle = 'rgba(30,38,54,.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(xx, L.PAD_T);
+      ctx.lineTo(xx, L.volTop + L.VOL_H);
+      ctx.stroke();
+      ctx.fillStyle = '#7d879b';
+      ctx.fillText('第' + bars[i].day + '天', Math.min(Math.max(xx, L.PAD_L + 20), W - L.PAD_R - 22), H - L.PAD_B / 2 - 2);
+    }
+
+    // 蜡烛与成交量柱
+    for (let i = 0; i < n; i++) {
+      const b = bars[i];
+      const up = b.close >= b.open;
+      const color = up ? '#f0464b' : '#1fb978';
+      const x = L.xc(i);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, L.y(b.high));
+      ctx.lineTo(x, L.y(b.low));
+      ctx.stroke();
+      const yo = L.y(b.open);
+      const yc = L.y(b.close);
+      ctx.fillRect(x - bw / 2, Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)));
+      const vh = ((b.volume || 0) / L.maxVol) * L.VOL_H;
+      if (vh >= 0.5) {
+        ctx.fillStyle = up ? 'rgba(240,70,75,.55)' : 'rgba(31,185,120,.55)';
+        ctx.fillRect(x - bw / 2, L.volTop + (L.VOL_H - vh), bw, vh);
+      }
+    }
+
+    // MA5 / MA10
+    const ma5 = movingAvg(bars, 5);
+    const ma10 = movingAvg(bars, 10);
+    const drawMa = (arr, color) => {
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        if (arr[i] == null) continue;
+        const px = L.xc(i);
+        const py = L.y(arr[i]);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else ctx.lineTo(px, py);
+      }
+      if (!started) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    };
+    drawMa(ma5, '#f0b429');
+    drawMa(ma10, '#4c8dff');
+
+    // 当日未收盘的标记
+    const last = bars[n - 1];
+    if (last.live) {
+      ctx.beginPath();
+      ctx.arc(L.xc(n - 1), L.y(last.close), 3, 0, Math.PI * 2);
+      ctx.strokeStyle = '#dce3ef';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+
+    // 图例
+    ctx.textAlign = 'left';
+    ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillStyle = '#7d879b';
+    let lx = L.PAD_L + 4;
+    const maV = (arr) => (arr[n - 1] == null ? '--' : arr[n - 1].toFixed(2));
+    ctx.fillText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`, lx, L.PAD_T - 3);
+    lx += ctx.measureText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`).width + 12;
+    ctx.fillStyle = '#f0b429';
+    ctx.fillText('MA5 ' + maV(ma5), lx, L.PAD_T - 3);
+    lx += ctx.measureText('MA5 ' + maV(ma5)).width + 12;
+    ctx.fillStyle = '#4c8dff';
+    ctx.fillText('MA10 ' + maV(ma10), lx, L.PAD_T - 3);
+  }
+
+  /** 日线的十字光标：显示该根的开高低收、成交量与资金净流入 */
+  function dayCrosshair(m, rect, mx, my) {
+    const tip = $('chartTip');
+    const bars = daySeriesOf(m);
+    if (!bars.length) {
+      tip.hidden = true;
+      return;
+    }
+    const L = dayLayout(rect.width, rect.height, bars);
+    const i = Math.floor((mx - L.PAD_L) / L.slot);
+    if (i < 0 || i >= bars.length) {
+      tip.hidden = true;
+      return;
+    }
+    const b = bars[i];
+    // 涨跌幅相对**上一根收盘**（首根没有上一根时用自身开盘价兜底）
+    const prev = bars[i - 1] ? bars[i - 1].close : b.open;
+    const pct = prev ? ((b.close - prev) / prev) * 100 : 0;
+    const c = cls(b.close - prev);
+    tip.innerHTML =
+      `<span class="t">${esc('第 ' + b.day + ' 天' + (b.live ? '（未收盘）' : ''))}</span><br>` +
+      `开 <b>${fmtP(b.open)}</b> 高 <b>${fmtP(b.high)}</b><br>` +
+      `低 <b>${fmtP(b.low)}</b> 收 <b class="${c}">${fmtP(b.close)}</b> ` +
+      `<span class="${c}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br>` +
+      `<span class="t">成交量</span> ${fmtVol(b.volume || 0)}<br>` +
+      `<span class="t">成交额</span> ${fmtAmount(b.turnover || 0)} · <span class="t">净流入</span> ` +
+      `<b class="${cls(b.net)}">${(b.net >= 0 ? '+' : '-') + fmtAmount(Math.abs(b.net || 0))}</b>`;
+    tip.hidden = false;
+    const tw = tip.offsetWidth;
+    tip.style.left = Math.min(mx + 14, rect.width - tw - 6) + 'px';
+    tip.style.top = Math.min(my + 14, rect.height - 104) + 'px';
+  }
 
   /** MACD(12,26,9)：DIF=EMA12−EMA26，DEA=DIF 的 EMA9，柱=2×(DIF−DEA) */
   function computeMacd(pts, fast = 12, slow = 26, sig = 9) {
@@ -2561,6 +2904,11 @@
     if (!m) return;
     const c = canvas();
     if (c.width === 0) return;
+    if (chartMode === 'day') drawDayChart(c, m);
+    else drawMinuteChart(c, m);
+  }
+
+  function drawMinuteChart(c, m) {
     const ctx = c.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const W = c.width / dpr;
@@ -2568,10 +2916,6 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     // 指数没有均价/MACD 之外的量，但走势结构与个股一致，同一套画法即可
-    $('chartSub').textContent = m.isIndex
-      ? '大盘指数分时 · 成分股按流通市值加权'
-      : '均价与价格 · 成交量 · MACD(12,26,9)';
-
     const prev = m.prevClose;
     const pts = histOf(m.stockId);
     if (!pts.length) return;
@@ -2794,12 +3138,17 @@
     c.addEventListener('mousemove', (e) => {
       const m = curMarket();
       if (!state || !m) return;
-      const pts = histOf(m.stockId);
-      if (!pts.length) return;
       const rect = c.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
-      // 反解时间（与 drawChart 的 x 轴同一套域）
+      // 日线走自己那套（单根 K 线的开高低收），几何与 drawDayChart 同一份布局
+      if (chartMode === 'day') {
+        dayCrosshair(m, rect, mx, my);
+        return;
+      }
+      const pts = histOf(m.stockId);
+      if (!pts.length) return;
+      // 反解时间（与 drawMinuteChart 的 x 轴同一套域）
       const t0 = pts[0].t;
       const tLast = pts[pts.length - 1].t;
       const minSpan = 5 * 60 * 1000;
@@ -2881,6 +3230,8 @@
     bindLending();
     bindHolders();
     bindCrosshair();
+    bindChartMode();
+    renderChartMode();
     setInterval(tickUI, 200);
     if (me) {
       apiPost('/api/login', { name: me })

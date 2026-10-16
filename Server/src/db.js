@@ -9,8 +9,9 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
+// 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -125,7 +126,32 @@ CREATE TABLE IF NOT EXISTS market_state (
   short_interest INTEGER NOT NULL,
   order_seq      INTEGER NOT NULL,
   trade_seq      INTEGER NOT NULL,
+  -- 当日资金流向（外盘=主动买 / 内盘=主动卖，见 flow.js）。必须落盘：
+  -- 不恢复的话重启后「外盘 + 内盘」会小于当日成交量，盘口资金与成交对不上账
+  outer_vol      INTEGER NOT NULL DEFAULT 0,
+  outer_amt      REAL NOT NULL DEFAULT 0,
+  inner_vol      INTEGER NOT NULL DEFAULT 0,
+  inner_amt      REAL NOT NULL DEFAULT 0,
   updated_at     INTEGER NOT NULL
+);
+
+-- 日线（K 线）：每个交易日收盘结算时定格一根，个股与大盘指数各一套序列（stock_id 区分）。
+-- 一行即为图上的一根蜡烛，量额与内外盘都是当日合计（指数是成分股合计）。
+CREATE TABLE IF NOT EXISTS daily_bars (
+  stock_id   TEXT NOT NULL,
+  day        INTEGER NOT NULL,
+  open       REAL NOT NULL,
+  high       REAL NOT NULL,
+  low        REAL NOT NULL,
+  close      REAL NOT NULL,
+  volume     INTEGER NOT NULL,
+  turnover   REAL NOT NULL,
+  outer_vol  INTEGER NOT NULL DEFAULT 0,
+  outer_amt  REAL NOT NULL DEFAULT 0,
+  inner_vol  INTEGER NOT NULL DEFAULT 0,
+  inner_amt  REAL NOT NULL DEFAULT 0,
+  settled_at INTEGER NOT NULL,
+  PRIMARY KEY (stock_id, day)
 );
 
 -- 分时序列（客户端分时图的历史）。多股票后每只股票一条独立序列，
@@ -159,7 +185,8 @@ CREATE INDEX IF NOT EXISTS idx_auto_account ON auto_strategies(account);
  * 打开（必要时创建）数据库并保证表结构就绪。
  *
  * 版本 2 起不再做增量列迁移：多股票把 prices 的主键、融券记账的表都换了，
- * 这类改动无法用 ALTER 补出来，旧档只能开新局（版本不匹配时直接拒绝启动）。
+ * 版本 3 又在 market_state 上加了资金流向列，这类改动无法用 ALTER 补出来，
+ * 旧档只能开新局（版本不匹配时直接拒绝启动，报错里给出删档指引）。
  */
 function openDatabase(file) {
   const dir = path.dirname(path.resolve(file));

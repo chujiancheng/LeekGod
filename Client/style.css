@@ -325,6 +325,40 @@ input { font: inherit; color: inherit; }
 }
 .chart-tip .t { color: var(--muted); }
 
+/* 分时 / 日线切换：放在图表标题左侧，取代原来的「分时走势」标题 */
+.chart-modes {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+}
+.chart-mode {
+  border: 0; background: transparent; color: var(--muted);
+  padding: 3px 12px; border-radius: 5px; font-size: 12px; letter-spacing: 0;
+}
+.chart-mode:hover { color: var(--ink); }
+.chart-mode.on { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+
+/* ---------- 资金指标条（内外盘 / 净流入） ---------- */
+.flow-strip {
+  flex: none; padding: 7px 12px 8px;
+  border-top: 1px solid var(--line);
+}
+.flow-row { display: flex; gap: 18px; }
+.flow-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.flow-cell label { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 5px; }
+.flow-cell b { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.flow-cell i { color: var(--muted); font-size: 10.5px; font-style: normal; font-variant-numeric: tabular-nums; }
+.fc-tag {
+  padding: 0 4px; border-radius: 3px; font-size: 9.5px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+/* 内外盘占比条：外盘红、内盘绿，宽度由 renderFlow 按占比写入 */
+.flow-bar {
+  display: flex; height: 3px; margin-top: 6px; border-radius: 2px;
+  overflow: hidden; background: var(--panel-2);
+}
+.flow-bar .fb-out { background: var(--red); }
+.flow-bar .fb-in { background: var(--green); }
+
 /* ---------- 五档 ---------- */
 .depth-panel { flex: none; }
 .depth-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -852,8 +886,14 @@ input { font: inherit; color: inherit; }
     flex-direction: column;
     overflow: visible;
   }
-  .chart-panel { height: 300px; flex: none; }
-  .chart-wrap { height: 258px; flex: none; }
+  .chart-panel { height: 376px; flex: none; }
+  /* 画布 + 资金指标条都要在面板内放得下：258 → 238，把省出的高度留给指标条 */
+  .chart-wrap { height: 238px; flex: none; }
+  .flow-strip { padding: 6px 8px 8px; }
+  .flow-row { flex-wrap: nowrap; gap: 10px; }
+  .flow-cell { flex: 1 1 0; }
+  .flow-cell b { font-size: 12px; }
+  .flow-cell i { font-size: 10px; }
   .right-col {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
