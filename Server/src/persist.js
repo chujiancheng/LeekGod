@@ -41,15 +41,15 @@ class Persister {
     this.st = {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
-          (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
+          (name, is_npc, role, nick, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
            broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day,
            milestones)
         VALUES
-          (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
+          (@name, @is_npc, @role, @nick, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
            @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day,
            @milestones)
         ON CONFLICT(name) DO UPDATE SET
-          is_npc = @is_npc, role = @role, cash = @cash, order_frozen = @order_frozen,
+          is_npc = @is_npc, role = @role, nick = @nick, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
           initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
           broker = @broker, broker_changed_at = @broker_changed_at, broker_since_day = @broker_since_day,
@@ -394,6 +394,9 @@ class Persister {
       name: acc.name,
       is_npc: isNpc,
       role: acc.role,
+      // 昵称只对玩家有意义：NPC 的叫法是账户名派生的（§11.4.1），落盘一份等于多出一份
+      // 与账户名冗余的副本，还让 NPC 逐 tick 有变化可写（项目禁忌）
+      nick: isNpc ? null : acc.nick || null,
       cash,
       order_frozen: orderFrozen,
       short_margin: acc.shortMargin,

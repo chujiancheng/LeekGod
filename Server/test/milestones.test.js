@@ -7,7 +7,7 @@
  *   ⑤ 结算兜底路径也判硬门槛                ⑥ 回撤单调 + rearm
  *   ⑦ 不污染消息池                          ⑧ 判定不在逐 tick 路径上
  *   ⑨ 刷新不重播（前端，见 Client/test/client-day.test.js）
- *   ⑩ 落盘往返与版本 4 → 5 原地升级
+ *   ⑩ 落盘往返与版本 4 → 6 原地升级
  *
  * 与其它服务端测试同口径：关掉涨跌停（用例按盘口打价是常态）。
  */
@@ -239,7 +239,7 @@ let token = '';
 const g = new Game();
 {
   g.day.reanchor(Date.now() - 590000); // 锚进第 1 天的夜间（580~620s）→ 收盘结算会做掉第 1 天
-  const lr = g.login('eggTester', 'zhaoshang');
+  const lr = g.onboard('eggTester', 'eggTester', 'zhaoshang');
   assert(lr.ok && !!lr.token, '登录成功');
   token = lr.token;
   const acc = g.store.get('eggTester');
@@ -303,7 +303,7 @@ console.log('\n[9] 补结算路径：停机跨过好几天，回来也要判一�
 {
   const g2 = new Game();
   g2.day.reanchor(Date.now() - 590000);
-  g2.login('eggJump', 'zhongxin');
+  g2.onboard('eggJump', 'eggJump', 'zhongxin');
   const acc = g2.store.get('eggJump');
   acc.cash = r2(acc.cash + 6000000); // 700 万 → A01~A05
   g2._daySettled = 0; // 假装从没结过（模拟停机数天）
@@ -324,7 +324,7 @@ console.log('\n[10] 落盘：只有玩家写 milestones；重启后水位线与�
   const g3 = new Game({ persist: p });
   p.startRound(Date.now()); // 不写 meta 的话 loadAll 判不出「续跑」，重启取不到账户
   g3.day.reanchor(Date.now() - 590000);
-  g3.login('eggSave', 'haitong');
+  g3.onboard('eggSave', 'eggSave', 'haitong');
   const acc = g3.store.get('eggSave');
   const npc = new Account('大米·散户1', true, 'small');
   npc.cash = 5000000;
@@ -365,7 +365,7 @@ console.log('\n[11] 收盘评估必须标脏：没发事件的收盘，水位线
   const g8 = new Game({ persist: p });
   p.startRound(Date.now());
   g8.day.reanchor(Date.now() - 590000);
-  g8.login('eggPeak', 'zhaoshang');
+  g8.onboard('eggPeak', 'eggPeak', 'zhaoshang');
   const acc = g8.store.get('eggPeak');
   acc.cash = r2(acc.cash + 50000); // 105 万：创了新高，但一档都够不着（A01 要 110 万）
 
@@ -395,7 +395,7 @@ console.log('\n[12] 老档兼容：milestones 为 NULL 的档也能起，水位�
   const g5 = new Game({ persist: p });
   p.startRound(Date.now());
   g5.day.reanchor(Date.now() - 590000);
-  g5.login('eggOld', 'dongfeng');
+  g5.onboard('eggOld', 'eggOld', 'dongfeng');
   const acc = g5.store.get('eggOld');
   acc.cash = r2(acc.cash + 2000000); // 300 万
   p.commit({ now: Date.now(), markets: [...g5.markets.values()], allAccounts: g5.store.all() });
@@ -424,7 +424,7 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
 {
   const g7 = new Game();
   g7.day.reanchor(Date.now() - 590000);
-  g7.login('eggNews', 'huatai');
+  g7.onboard('eggNews', 'eggNews', 'huatai');
   const acc = g7.store.get('eggNews');
   acc.cash = r2(acc.cash + 9000000);
   const tapeBefore = g7.news.tape.length;
@@ -438,14 +438,14 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
     g7.news.tape.every((n) => !texts.includes(n.text)),
     '磁带里不出现任何彩蛋文案'
   );
-  const st = g7.stateFor(g7.login('eggNews', 'huatai').token);
+  const st = g7.stateFor(g7.onboard('eggNews', 'eggNews', 'huatai').token);
   assert((st.news || []).every((n) => !texts.includes(n.text)), 'stateFor 下发的消息列表里也没有彩蛋条目');
 }
 
 // ============================================================
-console.log('\n[14] 存档版本 4 → 5：原地升级补出 milestones 列');
+console.log('\n[14] 存档版本 4 → 6：逐级原地升级补出 milestones 与 nick 列');
 {
-  assert(SCHEMA_VERSION === 5, `当前版本是 5（${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 6, `当前版本是 6（${SCHEMA_VERSION}）`);
   const FILE = tmpFile('v4');
   rmDb(FILE);
   const db = new Database(FILE);
@@ -473,10 +473,11 @@ console.log('\n[14] 存档版本 4 → 5：原地升级补出 milestones 列');
   assert(!err && !!up, `版本 4 的档被原地升级而不是拒绝：${err}`);
   if (up) {
     const v = up.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert(Number(v.value) === 5, `版本号写成 5（${v.value}）`);
-    const row = up.prepare('SELECT cash, milestones FROM accounts WHERE name = ?').get('老玩家');
+    assert(Number(v.value) === 6, `版本号写成 6（${v.value}）`);
+    const row = up.prepare('SELECT cash, milestones, nick FROM accounts WHERE name = ?').get('老玩家');
     assert(row.cash === 888, '原数据无损');
     assert(row.milestones === null, '新增的 milestones 列为 NULL');
+    assert(row.nick === null, '新增的 nick 列为 NULL（登录时补昵称）');
     up.close();
   }
   rmDb(FILE);

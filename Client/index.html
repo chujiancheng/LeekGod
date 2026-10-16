@@ -8,23 +8,42 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- 登录：昵称 + 券商卡片墙，两步合一（一次提交 POST /api/login {name, broker}） -->
+  <!-- 登录：**两步**。第一步只用账号登录（账号是身份凭据，ASCII、唯一、不可改）；
+       账号没开过户才进第二步：起昵称（中文可用）+ 选券商开户，一次提交 POST /api/onboard -->
   <div id="loginOverlay" class="overlay">
     <div class="login-card login-card-wide">
       <div class="login-logo">我是股神</div>
       <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
-      <input id="loginName" type="text" maxlength="16" placeholder="昵称：3~16 位，字母开头，仅英文 / 数字 / _ / -" autocomplete="off">
-      <div class="nick-hint" id="nickHint"></div>
-      <div class="broker-pick">
-        <div class="broker-pick-head">
-          <span>选择你的券商<span class="bp-note">开户后 1 个交易日内可免费重选 1 次</span></span>
-          <span class="panel-sub" id="brokerWeeklyHint"></span>
-        </div>
-        <div class="broker-wall" id="brokerWall"></div>
+
+      <!-- 第一步：账号 -->
+      <div id="loginStep1">
+        <input id="loginAccount" type="text" maxlength="16" placeholder="账号：3~16 位，字母开头，仅英文 / 数字 / _ / -" autocomplete="off">
+        <div class="nick-hint" id="accountHint"></div>
+        <button id="loginBtn">登录</button>
+        <div class="login-hint">账号是登录用的，全程不可改；昵称和券商在开户那一步填</div>
       </div>
-      <button id="loginBtn">开户并进入市场</button>
-      <div class="login-hint">初始资金 10 万，开户礼按券商不同 · 佣金 / 额度 / 券源 / 通道全看券商</div>
-      <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息 · 再次输入同一昵称回到原账户</div>
+
+      <!-- 第二步：开户（昵称 + 券商），只对没开过户的账号出现 -->
+      <div id="loginStep2" hidden>
+        <div class="account-chip">
+          账号 <b id="onboardAccount">--</b>
+          <span class="panel-sub">没开过户，先开个户</span>
+          <button class="ghost-btn" id="onboardBackBtn" type="button">换账号</button>
+        </div>
+        <input id="loginNick" type="text" maxlength="12" placeholder="昵称：2~12 个字符，中文 / 英文 / 数字" autocomplete="off">
+        <div class="nick-hint" id="nickHint"></div>
+        <div class="broker-pick">
+          <div class="broker-pick-head">
+            <span>选择你的券商<span class="bp-note">开户后 1 个交易日内可免费重选 1 次</span></span>
+            <span class="panel-sub" id="brokerWeeklyHint"></span>
+          </div>
+          <div class="broker-wall" id="brokerWall"></div>
+        </div>
+        <button id="onboardBtn">开户并进入市场</button>
+        <div class="login-hint">初始资金 10 万，开户礼按券商不同 · 佣金 / 额度 / 券源 / 通道全看券商</div>
+        <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息 · 昵称之后随时能改</div>
+      </div>
+
       <div class="login-hint err" id="loginErr" hidden></div>
     </div>
   </div>
@@ -63,6 +82,9 @@
           <i id="dayLeft">--</i>
         </span>
         <span class="clock" id="clock">--:--:--</span>
+        <!-- 身份：给人看的是昵称，账号放在 title 里（账号才是登录凭据） -->
+        <span class="who" id="whoName" title="账号">--</span>
+        <button class="ghost-btn" id="nickBtn" title="改昵称">改昵称</button>
         <button class="ghost-btn" id="themeBtn" title="切换主题">主题 · 深夜终端</button>
         <button class="ghost-btn" id="switchBtn" title="切换账号">换号</button>
       </div>
@@ -532,6 +554,18 @@
       <button id="themeConfirmBtn">就用这套，开市！</button>
       <!-- 点主题卡即生效并落盘（setTheme 保存），所以这里只是关闭，不是「不改」 -->
       <button class="deposit-cancel" id="themeCloseBtn">关闭</button>
+    </div>
+  </div>
+
+  <!-- 改昵称弹窗：昵称只是展示名，随时可改、不要求唯一（重名靠账号区分） -->
+  <div id="nickOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card nick-card">
+      <div class="deposit-title">改昵称</div>
+      <div class="login-sub">账号 <b id="nickAccount">--</b> 不变 · 昵称 2~12 个字符，中文也行</div>
+      <input id="nickInput" type="text" maxlength="12" placeholder="新昵称" autocomplete="off">
+      <div class="nick-hint" id="nickEditHint"></div>
+      <button id="nickSaveBtn">保存</button>
+      <button class="deposit-cancel" id="nickCancelBtn">取消</button>
     </div>
   </div>
 

@@ -243,6 +243,7 @@ function createServer(game) {
     order: new RateLimiter(rl.order),
     deposit: new RateLimiter(rl.deposit),
     state: new RateLimiter(rl.state),
+    write: new RateLimiter(rl.write),
     holders: new RateLimiter(rl.holders),
     daily: new RateLimiter(rl.daily),
     admin: new RateLimiter(rl.admin),
@@ -280,9 +281,26 @@ function createServer(game) {
       if (p === '/api/login' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.login)) return;
         const body = await readBody(req);
-        // 首次登录必须一并提交券商（§9 D2）。响应里的 needBroker=true 告诉客户端
-        // 「还差一步选券商」，前端据此把卡片墙亮出来而不是当普通失败处理
-        const r = game.login(body.name, body.broker);
+        // **只认账号**（§3.2）。账号还没开完户时响应里带 needOnboard=true，
+        // 客户端据此切到「填昵称 + 选券商」那一步，而不是当普通失败处理。
+        // 这里不会建号——建号只发生在 /api/onboard
+        const r = game.login(body.account);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 开户（首次登录的最后一步）：账号 + 昵称 + 券商，成功后直接发令牌进市场 ----
+      if (p === '/api/onboard' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.login)) return;
+        const body = await readBody(req);
+        const r = game.onboard(body.account, body.nick, body.broker);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 改昵称：昵称只是展示名，随时可改、不要求唯一（§3.2） ----
+      if (p === '/api/nick' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.write)) return;
+        const body = await readBody(req);
+        const r = game.setNickFor(bearerToken(req), body.nick);
         return json(res, r.ok ? 200 : 400, r);
       }
 

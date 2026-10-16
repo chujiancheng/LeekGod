@@ -5,7 +5,11 @@
   'use strict';
 
   // ---------- 状态 ----------
-  let me = localStorage.getItem('gushen_name') || '';
+  // me = **账号**（登录凭据，服务端各表引用的键，用于"我是哪一行"的判定）；
+  // myNick = 昵称（展示名，随时可改，所以不能拿它当身份）。
+  // 旧键 gushen_name 是"账号与昵称还没分家"时留下的，读一次兜底，免得老浏览器卡在登录页
+  let me = localStorage.getItem('gushen_account') || localStorage.getItem('gushen_name') || '';
+  let myNick = localStorage.getItem('gushen_nick') || '';
   let token = localStorage.getItem('gushen_token') || '';
   let state = null;
   // 分时：每只股票一条独立序列（切股票时拉该股全量，之后靠 SSE 每帧追加）。
@@ -259,14 +263,24 @@
     if (token) headers.authorization = 'Bearer ' + token;
     return fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
   }
-  function setIdentity(name, tok) {
+  /**
+   * 记录身份。第一个参数是**账号**（身份），第二个是昵称（展示名）。
+   * 只有账号变化才重置彩蛋水位——改昵称不该把事件流从头开始播。
+   */
+  function setIdentity(account, nick, tok) {
     // 换号 = 换一条彩蛋事件流：水位（gushen_event_seq）必须跟着清，否则新账号的
     // seq 从 0 起、本地旧水位却还在，新事件全被 `e.seq > lastEggSeq` 挡掉
-    if ((name || '') !== me) resetEggStream();
-    me = name || '';
+    const next = account || '';
+    if (next !== me) resetEggStream();
+    me = next;
+    myNick = nick || next;
     token = tok || '';
-    if (me) localStorage.setItem('gushen_name', me);
-    else localStorage.removeItem('gushen_name');
+    if (me) localStorage.setItem('gushen_account', me);
+    else localStorage.removeItem('gushen_account');
+    if (myNick) localStorage.setItem('gushen_nick', myNick);
+    else localStorage.removeItem('gushen_nick');
+    // 老键不再写，但清掉它，避免下次启动又从一个过期的账号名兜底进来
+    localStorage.removeItem('gushen_name');
     if (token) localStorage.setItem('gushen_token', token);
     else localStorage.removeItem('gushen_token');
   }
@@ -594,9 +608,13 @@
     });
   }
 
-  // ---------- 登录 ----------
-  // 昵称规则与服务端 broker.NICK_RE 一致：3~16 位、字母开头、仅 ASCII
-  const NICK_RE = /^[A-Za-z][A-Za-z0-9_-]{2,15}$/;
+  // ---------- 登录 / 开户 ----------
+  // 账号（登录凭据）与昵称（展示名）是两套规则，客户端这两条只做**软提示**，
+  // 最终判定以服务端为准（broker.validateAccount / validateNick）
+  const ACCOUNT_RE = /^[A-Za-z][A-Za-z0-9_-]{2,15}$/;
+  const NICK_RE = /^[\p{L}\p{N}_-]{2,12}$/u;
+  const ACCOUNT_HINT = '账号需 3~16 位、字母开头，仅英文 / 数字 / _ / -';
+  const NICK_HINT = '昵称需 2~12 个字符，中文 / 英文 / 数字 / _ / -';
 
   /** 拉券商展示元数据（公开接口，登录前就要有）。失败时静默——登录仍可提交 */
   function loadBrokers() {
@@ -739,75 +757,142 @@
     el.textContent = `本周之星：${brokerMeta[w.key].name}（佣金减半 · 额度 +0.5×）`;
   }
 
-  function bindLogin() {
-    // 输入时实时校验昵称，避免提交后才被打回
-    const nameEl = $('loginName');
-    nameEl.addEventListener('input', () => {
-      const v = nameEl.value.trim();
-      const hint = $('nickHint');
-      if (!v) {
-        hint.textContent = '';
-        hint.classList.remove('bad');
-        return;
-      }
-      // 已存在的账号可能是老档里的中文名（服务端会放行），所以这里只做**软提示**：
-      // 最终判定以服务端为准，避免把老账号的玩家挡在门外
-      const ok = NICK_RE.test(v);
-      hint.textContent = ok ? '' : '新账号需 3~16 位、字母开头，仅英文 / 数字 / _ / -';
-      hint.classList.toggle('bad', !ok);
-    });
+  /** 登录弹层切到第几步：1 = 输账号，2 = 开户（填昵称 + 选券商） */
+  function showLoginStep(step, account, nick) {
+    const step2 = step === 2;
+    $('loginStep1').hidden = step2;
+    $('loginStep2').hidden = !step2;
+    $('loginErr').hidden = true;
+    if (step2) {
+      $('onboardAccount').textContent = account || '';
+      $('loginNick').value = nick || '';
+      loadBrokers(); // 卡片墙的数据源（公开接口，登录前就能读）
+      $('loginNick').focus();
+    } else {
+      $('loginAccount').value = account || '';
+      $('loginAccount').focus();
+    }
+  }
 
-    const doLogin = (retried) => {
-      const name = nameEl.value.trim();
-      const err = $('loginErr');
-      err.hidden = true;
-      if (!name) {
-        toast('请输入昵称', 'err');
-        return;
-      }
-      if (!NICK_RE.test(name) && !retried) {
-        // 仍可能是老档的中文账号：让服务端裁决（它认识这个账号就放行）
-        err.hidden = false;
-        err.textContent = '昵称需 3~16 位、字母开头，仅英文 / 数字 / _ / -（老账号不受此限）';
-        return;
-      }
-      // 输入名字即进入：同名永远回到同一个账户。首次开户要一并提交券商（服务端强制）
-      const body = { name };
-      if (pickedBroker) body.broker = pickedBroker;
-      apiPost('/api/login', body)
-        .then((r) => r.json())
-        .then((res) => {
-          if (!res.ok) {
-            if (res.needBroker) {
-              err.hidden = false;
-              err.textContent = res.error || '请选择一家券商开户';
-              return;
-            }
-            // 老账号带中文名：把昵称规则放过去，用服务端认得的名字重试一次
-            if (!retried && /昵称/.test(res.error || '')) {
-              doLogin(true);
-              return;
-            }
-            err.hidden = false;
-            err.textContent = res.error || '登录失败';
-            return;
-          }
-          setIdentity(res.name, res.token);
+  /** 弹回登录页（首次进入 / 换号 / 登录态失效都走这里），停在第一步 */
+  function showLogin(account) {
+    $('loginOverlay').classList.remove('hidden');
+    showLoginStep(1, account == null ? me : account);
+  }
+
+  /**
+   * 登录（第一步）：拿账号换令牌。
+   * 两条成功路径之外的唯一分支是 `needOnboard`——账号还没开过户，直接切到开户那一步，
+   * 不让玩家再从第一步重输一遍。返回服务端响应，调用方只管展示错误文案。
+   */
+  function doLoginFlow(account) {
+    return apiPost('/api/login', { account })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res.ok) {
+          setIdentity(res.account, res.nick, res.token);
           enterApp();
           maybeFirstTheme(); // 首次登录弹一次主题选择（之后从顶栏「主题」随时换）
+          return res;
+        }
+        if (res.needOnboard) showLoginStep(2, res.account || account, res.nick || '');
+        return res;
+      });
+  }
+
+  /** 开户（第二步）：账号 + 昵称 + 券商一次提交，成功即进市场（等价于"首次登录"） */
+  function doOnboardFlow(account, nick, broker) {
+    return apiPost('/api/onboard', { account, nick, broker })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res.ok) {
+          setIdentity(res.account, res.nick, res.token);
+          enterApp();
+          maybeFirstTheme();
+        }
+        return res;
+      });
+  }
+
+  function bindLogin() {
+    const accEl = $('loginAccount');
+    const nickEl = $('loginNick');
+    const setHint = (el, msg) => {
+      el.textContent = msg;
+      el.classList.toggle('bad', !!msg);
+    };
+    const fail = (msg) => {
+      const err = $('loginErr');
+      err.hidden = false;
+      err.textContent = msg;
+    };
+
+    // 两条规则都只做**软提示**：最终判定在服务端（同一个账号在服务端眼里才是权威）
+    accEl.addEventListener('input', () => {
+      const v = accEl.value.trim();
+      setHint($('accountHint'), !v || ACCOUNT_RE.test(v) ? '' : ACCOUNT_HINT);
+    });
+    nickEl.addEventListener('input', () => {
+      const v = nickEl.value.trim();
+      setHint($('nickHint'), NICK_RE.test(v) ? '' : NICK_HINT);
+    });
+
+    /** 第一步：先本地卡一道明显不合法的输入，再交给服务端 */
+    const doLogin = () => {
+      const account = accEl.value.trim();
+      $('loginErr').hidden = true;
+      if (!account) {
+        toast('请输入账号', 'err');
+        return;
+      }
+      if (!ACCOUNT_RE.test(account)) {
+        fail(ACCOUNT_HINT);
+        return;
+      }
+      doLoginFlow(account)
+        .then((res) => {
+          if (!res.ok && !res.needOnboard) fail(res.error || '登录失败');
         })
         .catch(() => toast('网络异常，请重试', 'err'));
     };
-    $('loginBtn').addEventListener('click', () => doLogin(false));
-    nameEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doLogin(false);
+
+    const doOnboard = () => {
+      const account = $('onboardAccount').textContent.trim();
+      const nick = nickEl.value.trim();
+      $('loginErr').hidden = true;
+      if (!NICK_RE.test(nick)) {
+        fail(NICK_HINT);
+        return;
+      }
+      if (!pickedBroker) {
+        fail('请选择一家券商开户');
+        return;
+      }
+      doOnboardFlow(account, nick, pickedBroker)
+        .then((res) => {
+          if (!res.ok) fail(res.error || '开户失败');
+        })
+        .catch(() => toast('网络异常，请重试', 'err'));
+    };
+
+    $('loginBtn').addEventListener('click', doLogin);
+    accEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doLogin();
     });
+    nickEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doOnboard();
+    });
+    $('onboardBtn').addEventListener('click', doOnboard);
+    // 刚才账号输错了：退回第一步，把输入留在框里
+    $('onboardBackBtn').addEventListener('click', () => showLoginStep(1, accEl.value.trim()));
     $('switchBtn').addEventListener('click', () => {
       if (confirm('切换账号？当前账号将退出登录。')) {
-        setIdentity('', '');
+        setIdentity('', '', '');
         location.reload();
       }
     });
+    // 改昵称：昵称只是展示名，随时可改、不要求唯一，所以这里只校验格式
+    bindNickDialog();
     // 主题：顶栏常驻入口 + 选择弹窗
     $('themeBtn').addEventListener('click', openThemePicker);
     $('themeConfirmBtn').addEventListener('click', () => {
@@ -818,9 +903,82 @@
     $('themeCloseBtn').addEventListener('click', () => $('themeOverlay').classList.add('hidden'));
   }
 
+  /**
+   * 顶栏身份：显示**昵称**（给人看的），账号放进 title（那才是登录凭据）。
+   * 排行榜/股东榜上"我在哪一行"的判定永远用账号，不能用昵称——昵称可重名、可改。
+   */
+  function renderIdentity() {
+    const el = $('whoName');
+    if (!el) return;
+    el.textContent = myNick || me || '--';
+    el.title = me ? `账号：${me}（登录凭据，不可改）` : '';
+  }
+
+  /**
+   * 改昵称：只走格式校验 + 服务端写入。账号（me）与令牌都不动，彩蛋水位也不动——
+   * 换个展示名不该把事件流从头开始播。
+   */
+  function saveNick(nick) {
+    return apiPost('/api/nick', { nick })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res.ok) {
+          myNick = res.nick;
+          try { localStorage.setItem('gushen_nick', myNick); } catch (e) {}
+          renderIdentity();
+        }
+        return res;
+      });
+  }
+
+  /** 改昵称弹窗：昵称不唯一、不影响任何数值，所以这里只挡格式 */
+  function bindNickDialog() {
+    const input = $('nickInput');
+    const hint = $('nickEditHint');
+    const close = () => $('nickOverlay').classList.add('hidden');
+    const save = () => {
+      const v = input.value.trim();
+      if (!NICK_RE.test(v)) {
+        hint.textContent = NICK_HINT;
+        hint.classList.add('bad');
+        return;
+      }
+      saveNick(v)
+        .then((res) => {
+          if (!res.ok) {
+            hint.textContent = res.error || '改昵称失败';
+            hint.classList.add('bad');
+            return;
+          }
+          toast('昵称已改为「' + res.nick + '」');
+          close();
+        })
+        .catch(() => toast('网络异常，请重试', 'err'));
+    };
+    $('nickBtn').addEventListener('click', () => {
+      $('nickAccount').textContent = me || '--';
+      input.value = myNick || '';
+      hint.textContent = '';
+      hint.classList.remove('bad');
+      $('nickOverlay').classList.remove('hidden');
+      input.focus();
+    });
+    $('nickCancelBtn').addEventListener('click', close);
+    $('nickSaveBtn').addEventListener('click', save);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') save();
+    });
+    input.addEventListener('input', () => {
+      const ok = NICK_RE.test(input.value.trim());
+      hint.textContent = ok ? '' : NICK_HINT;
+      hint.classList.toggle('bad', !ok);
+    });
+  }
+
   function enterApp() {
     $('loginOverlay').classList.add('hidden');
     $('app').classList.remove('hidden');
+    renderIdentity();
     loadInitial();
     connectSSE();
     setView('home'); // 登录后先落到交易大厅
@@ -956,33 +1114,30 @@
     es.onerror = () => $('connDot').classList.add('off');
   }
 
-  /** 令牌失效（例如服务端重启）：用原名字重新登录一次 */
+  /** 令牌失效（例如服务端重启）：用原**账号**重新登录一次（昵称不参与身份） */
   function relogin() {
     if (relogging) return;
     relogging = true;
-    const body = { name: me };
-    const account = state && state.account;
-    // 带上自己已选的券商：老档升级上来的账号可能还没选过，那时服务端会要求补选
-    if (account && account.broker && account.broker.key) body.broker = account.broker.key;
-    apiPost('/api/login', body)
+    apiPost('/api/login', { account: me })
       .then((r) => r.json())
       .then((res) => {
         relogging = false;
         if (res.ok) {
-          setIdentity(res.name, res.token);
+          setIdentity(res.account, res.nick, res.token);
           toast('服务已重启，已自动重新登录', 'info');
           loadInitial();
           connectSSE();
           return;
         }
-        // 昵称不合法 / 需要补选券商：退回登录页（卡片墙就在那里）
+        // 账号没开完户（服务端换了库）/ 账号不合法：退回登录页，该开户就开户。
+        // 账号留在本地、只作废令牌，刷新后还能自动回到这一步
         toast(res.error || '登录状态已失效，请重新登录', 'err');
-        setIdentity('', '');
+        const account = me;
+        setIdentity(account, res.nick || myNick, '');
         es && es.close();
         $('app').classList.add('hidden');
-        $('loginOverlay').classList.remove('hidden');
-        loadBrokers();
-        $('loginName').value = me || '';
+        if (res.needOnboard) showLoginStep(2, res.account || account, res.nick || '');
+        else showLogin(account);
       })
       .catch(() => {
         relogging = false;
@@ -1000,6 +1155,12 @@
 
     state = s;
     lastStateAt = Date.now();
+    // 服务端是昵称的权威（别的标签页改过名 / 改名请求刚回来）：跟着它同步顶栏
+    if (s.account && s.account.nick && s.account.nick !== myNick) {
+      myNick = s.account.nick;
+      try { localStorage.setItem('gushen_nick', myNick); } catch (e) { /* 忽略 */ }
+      renderIdentity();
+    }
     $('connDot').classList.remove('off');
     ensureStock();
 
@@ -1559,7 +1720,8 @@
     const stock = marketList().find((m) => m.stockId === sid);
     const float = (stock && stock.floatShares) || 1;
     const sumQty = rows.reduce((s, h) => s + h.qty, 0);
-    const myRow = rows.find((h) => h.name === me);
+    // 「我」按**账号**认，不按昵称——昵称可重名、可改，用它比对会认错行
+    const myRow = rows.find((h) => h.account === me);
     const snap = data && data.holderSnapshot;
     $('holdersMeta').innerHTML = `
       <div class="item"><label>标的</label><span>${esc((stock && stock.name) || '--')}</span></div>
@@ -1576,10 +1738,10 @@
     $('holdersBody').innerHTML =
       rows
         .map((h, i) => {
-          const mine = h.name === me;
+          const mine = h.account === me;
           const roleCls = ROLE_CLS[h.role] || 'role-retail';
           const openCell = `<span class="${cls(h.change)}">${h.change > 0 ? '+' : ''}${fmtQty(h.change)} 股</span><span class="delta-sub ${cls(h.changePct)}">${h.changePct > 0 ? '+' : ''}${h.changePct.toFixed(2)}pp</span>`;
-          return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.name)}">
+          return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.account)}" data-nick="${esc(h.name)}">
             <td>${i + 1}</td>
             <td>${esc(h.name)}${mine ? '（我）' : ''}</td>
             <td><span class="tag ${roleCls}">${esc(ROLE_LABEL[h.role] || h.role)}</span></td>
@@ -1618,15 +1780,16 @@
   }
 
   // ---------- 股东占比走势弹窗 ----------
-  function openHolderChart(name) {
-    holderHistName = name;
+  /** @param {string} account 账号（身份键）。快照也按账号存，改名不会把曲线打断 */
+  function openHolderChart(account, nick) {
+    holderHistName = account;
     holderHist = null;
-    $('holderTitle').textContent = name + ' · 占比走势';
+    $('holderTitle').textContent = (nick || account) + ' · 占比走势';
     $('holderSub').textContent = '正在读取…';
     $('holderActions').innerHTML = '';
     $('holderOverlay').classList.remove('hidden');
     drawHolderHistory();
-    loadHolderHistory(name);
+    loadHolderHistory(account);
   }
 
   function closeHolderChart() {
@@ -1658,7 +1821,7 @@
   function holderSeries(name) {
     const list = (holderHist && holderHist.snapshots) || [];
     return list.map((s) => {
-      const r = (s.rows || []).find((x) => x.name === name) || null;
+      const r = (s.rows || []).find((x) => x.account === name) || null;
       return { t: s.t, action: s.action, qty: r ? r.qty : null, pct: r ? r.pct : null };
     });
   }
@@ -1797,7 +1960,7 @@
     // 表格每帧重写 innerHTML，事件挂在容器上做代理
     $('holdersBody').addEventListener('click', (e) => {
       const tr = e.target.closest('tr[data-holder]');
-      if (tr) openHolderChart(tr.dataset.holder);
+      if (tr) openHolderChart(tr.dataset.holder, tr.dataset.nick);
     });
     $('holderCloseBtn').addEventListener('click', closeHolderChart);
     $('holderOverlay').addEventListener('click', (e) => {
@@ -1979,7 +2142,7 @@
     const rows = (state.players || []).slice(0, limit || undefined);
     return rows
       .map((p, i) => {
-        const mine = p.name === me;
+        const mine = p.account === me; // 按账号认"我"，昵称可重名可改
         const b = p.broker ? brokerMeta[p.broker] : null;
         const tag = b
           ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
@@ -2409,13 +2572,14 @@
     const markets = marketList(state);
 
     const players = state.players || [];
-    const myIdx = players.findIndex((p) => p.name === me);
+    const myIdx = players.findIndex((p) => p.account === me);
     const pnl = (a.longPnl || 0) + (a.shortPnl || 0);
     const pos = positionsOf(a, markets);
     const heldStocks = new Set(pos.map((r) => r.stock.stockId)).size;
     const money = (v) => (v >= 0 ? '+' : '-') + '¥' + fmtMoney(Math.abs(v));
 
-    $('homeName').textContent = me;
+    // 主页招呼语用昵称；账号是登录凭据，只在顶栏的 title 里露出来
+    $('homeName').textContent = a.nick || myNick || me;
     // 加钱按钮跟随服务端开关（config.account.deposit.enabled）
     $('addCashBtn').hidden = !(state.rules.deposit && state.rules.deposit.enabled);
 
@@ -4177,28 +4341,28 @@
     // 券商卡片墙在**登录之前**就要渲染，所以先拉公开的 /api/brokers，再决定要不要弹登录
     loadBrokers();
     if (me) {
-      apiPost('/api/login', { name: me })
+      // 有账号就自动登录一次（令牌在服务端重启后会失效，所以这里始终走一次登录换新令牌）
+      const account = me;
+      apiPost('/api/login', { account })
         .then((r) => r.json())
         .then((res) => {
           if (res.ok) {
-            setIdentity(res.name, res.token);
+            setIdentity(res.account, res.nick, res.token);
             enterApp();
             maybeFirstTheme();
-          } else {
-            setIdentity('', '');
-            $('loginOverlay').classList.remove('hidden');
-            $('loginName').value = me;
-            loadBrokers();
-            $('loginName').focus();
-            if (res.error) toast(res.error, 'err');
+            return;
           }
+          // 该账号还没开户：直接停在开户那一步，别让玩家再从第一步输一遍。
+          // 账号仍然留在本地（只是令牌作废），刷新后还能自动回到这一步
+          const wasAccount = res.account || me;
+          setIdentity(wasAccount, res.nick || '', '');
+          if (res.needOnboard) showLoginStep(2, wasAccount, res.nick || '');
+          else showLogin(wasAccount);
+          if (res.error) toast(res.error, 'err');
         })
-        .catch(() => {
-          $('loginOverlay').classList.remove('hidden');
-        });
+        .catch(() => showLogin(account));
     } else {
-      $('loginOverlay').classList.remove('hidden');
-      $('loginName').focus();
+      showLogin('');
     }
   }
 

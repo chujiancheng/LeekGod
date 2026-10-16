@@ -44,7 +44,7 @@ N(g).step(g.startedAt);
 // 仿真若干 tick 让盘口成型
 for (let i = 0; i < 30; i++) g.tick();
 
-const lr = g.login('quantuser', 'zhaoshang');
+const lr = g.onboard('quantuser', 'quantuser', 'zhaoshang');
 assert(lr.ok && !!lr.token, '玩家登录成功');
 const token = lr.token;
 const acc = g.store.get('quantuser');
@@ -260,7 +260,7 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   const g1 = new Game({ persist: p1 });
   g1.start();
   g1.stop();
-  const login1 = g1.login('saveruser', 'zhaoshang');
+  const login1 = g1.onboard('saveruser', 'saveruser', 'zhaoshang');
   const acc1 = g1.store.get('saveruser');
   const cr = g1.auto.create(acc1, 'tps', { position: 'long', tp: 999, sl: 1 }, STOCK.id);
   const cr2 = g1.auto.create(acc1, 'grid', { stepPct: 3, qty: 100, maxLevels: 5 }, STOCK.id);
@@ -295,17 +295,17 @@ console.log('\n[8] 自动策略的锁仓口径按账户券商取');
   const lot = stock.lotSize;
   // 时刻显式指定：批次 ts = T − 6000，则 now − ts 恰好 6000ms，
   // 落在「滑泰 5 秒已解锁」与「基准 10 秒仍锁着」之间，两侧各验一次
-  const sellAt6s = (nick, brokerKey) => {
+  const sellAt6s = (account, brokerKey) => {
     const T = nextT();
     g.day.reanchor(T - 120000); // 锚回上午连续竞价，避免长跑后漂到休市被整体冻结
-    const lr = g.login(nick, brokerKey);
-    assert(lr.ok, `${brokerKey} 玩家 ${nick} 登录成功`);
-    const a = g.store.get(nick);
+    const lr = g.onboard(account, account, brokerKey);
+    assert(lr.ok, `${brokerKey} 玩家 ${account} 开户成功`);
+    const a = g.store.get(account);
     a.longPos(stock.id).lots.push({
       qty: lot, price: P(g).lastPrice, ts: T - 6000, reserved: 0, debt: 0, principal: 0,
     });
     const cr = g.auto.create(a, 'tps', { position: 'long', tp: 0.01, sl: 0, qty: 0 }, STOCK.id);
-    assert(cr.ok, `${nick} 止盈止损策略创建成功`);
+    assert(cr.ok, `${account} 止盈止损策略创建成功`);
     const s = g.auto.byId.get(cr.id);
     g.auto.step(T);
     return { acc: a, s };

@@ -67,7 +67,7 @@ g1.day.reanchor(Date.now() - 120000);
 g1.stop(); // 测试里手动 tick，不要 setInterval
 
 console.log('\n[2] 玩家下单产生持仓 / 空头 / 活动委托');
-const login = g1.login('tester', 'zhaoshang');
+const login = g1.onboard('tester', 'tester', 'zhaoshang');
 assert(login.ok, '玩家登录成功');
 const acc1 = g1.store.get('tester');
 assert(!!acc1, '账户已创建');
@@ -99,7 +99,7 @@ assert(r2res.ok, `远离盘口的买单被接受${r2res.ok ? '' : ': ' + r2res.e
 const restingId = r2res.ok ? r2res.order.id : '';
 
 // 开空：换一个只做空的玩家账户成交（tester已持多头，再卖开会撞同股多空互斥）
-const loginS = g1.login('shorteruser', 'zhaoshang');
+const loginS = g1.onboard('shorteruser', 'shorteruser', 'zhaoshang');
 assert(loginS.ok, '第二个玩家登录成功');
 const accS = g1.store.get('shorteruser');
 const sellPrice = P(g1).roundPrice(P(g1).lastPrice * 0.8);

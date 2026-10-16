@@ -124,6 +124,7 @@ module.exports = {
       order: { limit: 60, windowMs: 60000 },
       deposit: { limit: 10, windowMs: 60000 },
       state: { limit: 240, windowMs: 60000 },
+      write: { limit: 30, windowMs: 60000 }, // 改昵称这类轻量写操作（开户/登录有自己的 login 档）
       holders: { limit: 60, windowMs: 60000 }, // 股东占比走势（点击前十名时按需拉取）
       daily: { limit: 60, windowMs: 60000 }, // 日线（切到日线模式 / 换股票时按需拉取）
       admin: { limit: 10, windowMs: 60000 },

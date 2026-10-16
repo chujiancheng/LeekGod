@@ -8,7 +8,8 @@ const r2 = (v) => Math.round(v * 100) / 100;
 
 class Account {
   constructor(name, isNPC = false, role = null) {
-    this.name = name;
+    this.name = name; // 账号：登录凭据（唯一、不可改），也是存档里各表的 account 键
+    this.nick = null; // 昵称：展示名，开户时填、之后可改。null = 还没开完户
     this.isNPC = isNPC;
     this.role = role || (isNPC ? 'npc' : 'player'); // inst / hot / big / mid / small / player
     this.cash = config.account.initialCash;

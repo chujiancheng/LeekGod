@@ -439,31 +439,53 @@ function canTransfer(acc, targetKey, opts = {}) {
 }
 
 // ------------------------------------------------------------------
-// 昵称规则（§11.2）
+// 账号与昵称（§3.2 建号流程 / §11.2 命名规则）
 // ------------------------------------------------------------------
+// 两个概念必须分开，规则也完全不同：
+//   账号：登录凭据，玩家自填、**全程不可改**，所以必须 ASCII（进存档当主键、进日志、进 URL）、
+//         且唯一。规则：3~16 位、字母开头，仅英文 / 数字 / _ / -
+//   昵称：只给人看的展示名，开户时填、之后随时可改，**不要求唯一**（重名靠账号区分）。
+//         规则：2~12 个字符，中文也行（按码点计，不按字节）
+const ACCOUNT_RE = /^[A-Za-z][A-Za-z0-9_-]{2,15}$/;
+const NICK_RE = /^[\p{L}\p{N}_-]{2,12}$/u;
 
-const NICK_RE = /^[A-Za-z][A-Za-z0-9_-]{2,15}$/;
-const LEGACY_NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
+// 内部账户名。玩家账号若撞上它就会顶掉系统账户（市场里的兜底对手方），必须挡在这一步
+const RESERVED_ACCOUNTS = ['SYSTEM'];
 
 /**
- * 昵称校验。规则只在**新注册**时生效——老档里已有的中文账号照常放行，
- * 否则存量玩家会直接进不来（§11.2「存量兼容」）。
- * @param {string} name
+ * 账号校验。规则只在**新建账号**时生效——老档里已经存在的名字照常放行，
+ * 否则升级上来的存量玩家（名字可能是中文）会直接进不来。
+ * @param {string} account
  * @param {boolean} existing 是否已存在的账号
  */
-function validateNick(name, existing) {
-  const s = String(name || '');
+function validateAccount(account, existing) {
+  const s = String(account || '').trim();
+  if (!s) return { ok: false, error: '请输入账号' };
+  // 存量账号一律放行：名字是从库里查出来的，它必然是"建立那一刻合法"的
+  if (existing) return { ok: true, legacy: !ACCOUNT_RE.test(s) };
+  if (!ACCOUNT_RE.test(s)) {
+    return {
+      ok: false,
+      error: '账号需为 3~16 位、字母开头，只允许英文字母 / 数字 / 下划线 / 连字符',
+    };
+  }
+  if (RESERVED_ACCOUNTS.some((r) => r.toUpperCase() === s.toUpperCase())) {
+    return { ok: false, error: '这个账号名不可用，请换一个' };
+  }
+  return { ok: true, legacy: false };
+}
+
+/** 昵称校验：中文可用、可重名、可改，所以没有"唯一"与"存量放行"这回事 */
+function validateNick(nick) {
+  const s = String(nick || '').trim();
   if (!s) return { ok: false, error: '请填写昵称' };
-  // 存量账号一律放行：名字是从库里查出来的，它必然是「注册那一刻合法」的。
-  // 拿现在的规则去卡老账号会把带连字符、或中文的老玩家直接锁在门外。
-  if (existing) return { ok: true, legacy: !NICK_RE.test(s) };
   if (!NICK_RE.test(s)) {
     return {
       ok: false,
-      error: '昵称需为 3~16 位、字母开头，只允许英文字母 / 数字 / 下划线 / 连字符（不支持中文）',
+      error: '昵称需为 2~12 个字符，只允许中文 / 英文字母 / 数字 / 下划线 / 连字符',
     };
   }
-  return { ok: true, legacy: false };
+  return { ok: true };
 }
 
 // ------------------------------------------------------------------
@@ -713,11 +735,12 @@ module.exports = {
   interestWaived,
   glitchDelay,
   privilegeList,
-  // 转户 / 昵称
+  // 转户 / 账号与昵称
   canTransfer,
+  validateAccount,
   validateNick,
+  ACCOUNT_RE,
   NICK_RE,
-  LEGACY_NAME_RE,
   // NPC 归属 / 券商榜
   allocateNpcBrokers,
   groupBoard,

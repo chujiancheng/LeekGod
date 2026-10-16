@@ -98,18 +98,37 @@ console.log('\n[2] 盘口深度合理（五档不为空、买一<卖一）');
   assert(!!bid1 && !!ask1 && bid1.qty > 0 && ask1.qty > 0, '盘口数量为正');
 }
 
-console.log('\n[3] 玩家登录并从盘口买入');
+console.log('\n[3] 账号登录 + 开户（账号与昵称分家）+ 从盘口买入');
 let token = '';
 {
-  const lr = g.login('tester', 'zhaoshang');
-  assert(lr.ok && !!lr.token, '登录成功并签发会话令牌');
+  // ① 账号不存在时**只探测、不建号**：返回 needOnboard 让客户端去走开户那一步
+  const probe = g.login('tester');
+  assert(!probe.ok && probe.needOnboard, '未开户的账号登录返回 needOnboard');
+  assert(!g.store.get('tester'), '探测登录不会凭空建号');
+  const badAcc = g.login('bad name!!'); // 非法字符（含空格）
+  assert(!badAcc.ok && !badAcc.needOnboard, '非法账号被拒，且不会被当成"该去开户"');
+
+  // ② 开户：昵称 + 券商都合法才放行
+  assert(!g.onboard('tester', '股神小明', '').ok, '开户不选券商被拒');
+  assert(!g.onboard('tester', 'a', 'zhaoshang').ok, '一个字的昵称被拒（2~12 字符）');
+  const lr = g.onboard('tester', '股神小明', 'zhaoshang');
+  assert(lr.ok && !!lr.token, '开户成功并签发会话令牌');
+  assert(lr.account === 'tester' && lr.nick === '股神小明', '账号与昵称分开发回');
+  assert(g.store.get('tester').nick === '股神小明', '昵称落到了账户上');
+  assert(!g.onboard('tester', '另一个昵称', 'huatai').ok, '已开户的账号不能重复开户');
   token = lr.token;
-  const lr2 = g.login('bad name!!'); // 非法字符
-  assert(!lr2.ok, '非法账号被拒');
-  const lr3 = g.login('tester', 'zhaoshang'); // 同名再登
-  assert(lr3.ok && lr3.name === 'tester', '同名再登直接进入');
-  assert(g.accountFor(lr3.token) === g.accountFor(token), '同名两次登录指向同一账户');
+
+  // ③ 之后用**账号**登录即可（昵称不参与身份）
+  const lr2 = g.login('tester');
+  assert(lr2.ok && lr2.account === 'tester' && lr2.nick === '股神小明', '再次登录直接进入');
+  assert(g.accountFor(lr2.token) === g.accountFor(token), '同账号两次登录指向同一账户');
   assert(g.sessions.size <= 5, `同账户令牌数受上限约束 (${g.sessions.size})`);
+
+  // ④ 改昵称：账号不动，展示名跟着变
+  assert(!g.setNickFor(token, 'x').ok, '改昵称也走同一套 2~12 字符规则');
+  assert(g.setNickFor(token, '股神大神').ok, '合法昵称可直接改');
+  assert(g.store.get('tester').nick === '股神大神' && g.store.get('tester').name === 'tester', '改名只动昵称、不动账号');
+  g.setNickFor(token, '股神小明'); // 还原，后面的排行断言还在用
 
   const snap = bookOf(g);
   const ask1 = snap.depth.asks[0];
@@ -153,7 +172,8 @@ console.log('\n[4] 玩家挂单进入订单簿并与 NPC 成交');
 console.log('\n[5] 状态快照结构完整');
 {
   const st = g.stateFor(token);
-  assert(st.account && st.account.name === 'tester', '包含玩家账户');
+  assert(st.account && st.account.name === 'tester', '包含玩家账户（account.name = 账号）');
+  assert(st.account.nick === '股神小明', '账号段另带昵称（展示名）');
   assert(Array.isArray(st.markets) && st.markets.length === config.stocks.length, `包含全部 ${config.stocks.length} 只股票行情`);
   assert(st.markets.every((m) => m.depth && m.trades && m.name), '每只股票都带盘口与逐笔');
   assert(st.index && st.index.stockId === config.index.code, '包含大盘指数');
@@ -177,7 +197,11 @@ console.log('\n[5] 状态快照结构完整');
   assert(st.rules.brokers && st.rules.brokers.length === 6, '规则里带六家券商的展示元数据');
   assert(st.account.broker && st.account.broker.key === 'zhaoshang', '账户的券商信息已下发');
   assert(Array.isArray(st.rules.stocks) && st.rules.stocks.length === config.stocks.length, '规则里带股票清单');
-  assert(Array.isArray(st.players) && st.players.some((p) => p.name === 'tester'), '包含玩家排行');
+  assert(Array.isArray(st.players) && st.players.some((p) => p.account === 'tester'), '包含玩家排行');
+  assert(
+    st.players.every((p) => typeof p.account === 'string' && typeof p.name === 'string'),
+    '排行行同时带账号与展示名（昵称）'
+  );
   assert(typeof st.cooldownLeft === 'number', '包含冷却剩余时间');
   assert(Array.isArray(st.account.positions), '持仓按股票切片下发');
   assert(
@@ -235,8 +259,8 @@ console.log('\n[7] NPC 资金与持仓规模检查');
   P(g).lendTotal = 0;
   P(g).lendBorrowed = 0;
   P(g).lendReserved = 0;
-  const banLogin = g.login('nakeduser', 'zhaoshang');
-  const banAcc = g.store.get(banLogin.name);
+  const banLogin = g.onboard('nakeduser', 'nakeduser', 'zhaoshang');
+  const banAcc = g.store.get(banLogin.account);
   const { ACTIONS: MA } = require('../src/market');
   const ban = P(g).place(banAcc, {
     action: MA.SELL_OPEN,
@@ -463,14 +487,14 @@ console.log('\n[12] 机构聪明钱：公开消息对倒（利好出货 / 利空
 
 console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动');
 {
-  const lr = g.login('holderuser', 'zhaoshang');
+  const lr = g.onboard('holderuser', 'holderuser', 'zhaoshang');
   assert(lr.ok, '登录成功');
   const tk = lr.token;
 
   const base = g.lastHolderSnapshot('holderuser', STOCK.id);
   assert(!!base && base.action === 'login', '登录即留一份基线快照');
   assert(base.rows.length === 30, `单份快照保留 30 名股东 (实际 ${base.rows.length})`);
-  assert(JSON.stringify(base).indexOf('byName') === -1, '内部索引不进序列化结果');
+  assert(JSON.stringify(base).indexOf('byAccount') === -1, '内部索引不进序列化结果');
   // 登录时给每只股票各记一份基线，切到任意股票都有可比对的基线
   assert(
     config.stocks.every((s) => !!g.lastHolderSnapshot('holderuser', s.id)),
@@ -510,11 +534,11 @@ console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动
   // （这 60 tick 里前十大正好净变动为 0 就会命中，实测约 1/10），所以直接给榜首补一笔批次
   // 模拟他继续交易，再把两次快照对着比——变动的来源与机制无关，只关心基线有没有跟着动
   const topRow = st1.rows[0];
-  const topAcc = g.store.get(topRow.name);
+  const topAcc = g.store.get(topRow.account);
   topAcc.longPos(STOCK.id).lots.push({ qty: 100, price: STOCK.initPrice, ts: 0, reserved: 0, debt: 0, principal: 0 });
   g.refreshStats();
   const st2 = g.holdersFor(tk, STOCK.id);
-  const moved = st2.rows.find((h) => h.name === topRow.name);
+  const moved = st2.rows.find((h) => h.account === topRow.account);
   assert(moved && moved.qty === topRow.qty + 100, `榜首持股随成交变化（${topRow.qty} → ${moved && moved.qty}）`);
   assert(moved && moved.prevQty === topRow.prevQty, '基线取的是上次操作时的快照，不随行情重算');
   assert(moved && moved.dQty === topRow.dQty + 100, `「较上次操作」体现出这笔变动（${moved && moved.dQty} 股）`);
@@ -534,6 +558,31 @@ console.log('\n[13] 前十大股东：操作快照与「较上次操作」变动
   for (let i = 0; i < 40; i++) g.snapshotHolders(acc, 'order', STOCK.id);
   assert(g.holderHistoryFor(tk, STOCK.id).snapshots.length === 30, '快照环形缓冲封顶 30');
   assert(!g.holderHistoryFor('bogus-token', STOCK.id).ok, '无有效令牌不返回股东历史');
+}
+
+console.log('\n[13b] 股东榜的展示名走昵称、身份键走账号（改名不串行、重名不认错）');
+{
+  // 单独开一局：这里会把手里的流通盘全给一个玩家，不能污染 [13] 那局的市场状态
+  const g2 = new Game();
+  const big = g2.onboard('nickholder', '股神大户', 'zhaoshang');
+  const bigAcc = g2.store.get('nickholder');
+  bigAcc.longPos(STOCK.id).lots.push({
+    qty: STOCK.floatShares, price: STOCK.initPrice, ts: 0, reserved: 0, debt: 0, principal: 0,
+  });
+  g2.refreshStats();
+  const row = g2.holdersFor(big.token, STOCK.id).rows.find((h) => h.account === 'nickholder');
+  assert(!!row, '持股玩家进得了股东榜');
+  assert(row.name === '股神大户', `展示名是昵称（${row.name}）`);
+  assert(
+    !g2.holdersFor(big.token, STOCK.id).rows.some((h) => h.name === 'nickholder'),
+    '账号不再当作展示名下发（否则改名/重名会认错行）'
+  );
+  assert(!!row.account && row.account === 'nickholder', '行上另带账号（前端按它认"我"、按它取曲线）');
+  // 改名后：账号键不变、展示名跟着变——"较上次操作"不会因为改名整列变成新进
+  g2.setNick(bigAcc, '换了个名');
+  g2.refreshStats();
+  const row2 = g2.holdersFor(big.token, STOCK.id).rows.find((h) => h.account === 'nickholder');
+  assert(row2 && row2.name === '换了个名' && row2.prevQty === row.prevQty, '改名只换展示名，基线仍对得上原账号');
 }
 
 console.log('\n[15] 个股消息文案：每只股票走自己的专属池');
@@ -761,8 +810,8 @@ console.log('\n[17] 快照的锁仓口径 = 账户券商（rules / lockedUntil /
 {
   const stock0 = config.stocks[0];
   const lot = stock0.lotSize;
-  const seed = (nick, brokerKey) => {
-    const tk = g.login(nick, brokerKey).token;
+  const seed = (account, brokerKey) => {
+    const tk = g.onboard(account, account, brokerKey).token;
     const a = g.accountFor(tk);
     const ts = Date.now() - 6000; // 6000ms：滑泰（5s）已解锁、基准（10s）仍锁着
     a.longPos(stock0.id).lots.push({ qty: lot, price: P(g).lastPrice, ts, reserved: 0, debt: 0, principal: 0 });

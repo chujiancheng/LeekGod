@@ -189,6 +189,8 @@ class Game {
     const byName = new Map();
     for (const row of snap.accounts) {
       const acc = new Account(row.name, !!row.is_npc, row.role);
+      // 昵称：老档（版本 5 升级上来）为 NULL，表示"还没开完户"，下次登录时补填（§3.2）
+      acc.nick = row.nick || null;
       acc.cash = row.cash;
       acc.orderFrozen = row.order_frozen;
       acc.shortMargin = row.short_margin;
@@ -843,37 +845,93 @@ class Game {
   }
 
   /**
-   * 登录：输入账号名即进入，同名始终对应同一个账户（首次输入即创建）。
-   * 无密码设计；令牌仅用于把请求绑定到会话，不做账号独占。
-   *
-   * **首次登录必须一并选券商**（§9 D2）：不给"跳过用默认"——否则被默认的那家会被动成为
-   * 最大的一家。老档（升级前建的号）没有券商，这次登录也要求补选。
+   * 展示名：玩家看昵称，NPC 没有昵称（它的名字本来就是派生标签）→ 回落账户名。
+   * 排行榜 / 股东榜 / 席位榜这些"给人看"的地方统一走这里。
    */
-  login(name, brokerKey) {
-    name = String(name || '').trim();
+  static displayName(acc) {
+    if (!acc) return '';
+    return acc.nick || acc.name;
+  }
+
+  /**
+   * 登录：**只认账号**（§3.2）。账号与昵称分家后，名字不再是"输入即建号"的凭据，
+   * 所以这里分两种结果：
+   * - 账号已开户 → 发令牌进市场；
+   * - 账号不存在、或存在但没走完开户（老档升级上来）→ 返回 `needOnboard`，
+   *   让客户端把「填昵称 + 选券商」那一步亮出来。
+   *
+   * **不在这里静默建号**：账号是玩家自己填的登录凭据，打错一个字母不该凭空多出一个号，
+   * 更不该因此拿到一笔开户礼。建号只在 onboard 里发生。
+   */
+  login(account) {
+    const name = String(account || '').trim();
     const existing = this.store.get(name) || null;
-    const nick = broker.validateNick(name, !!existing);
-    if (!nick.ok) return { ok: false, error: nick.error };
+    const chk = broker.validateAccount(name, !!existing);
+    if (!chk.ok) return { ok: false, error: chk.error };
+    // NPC 账户名（`别名·标签N`）不会是 ASCII，但 SYSTEM 是——它已经被规则挡掉，
+    // 这里再兜一层：万一将来 NPC 换命名，也不至于让玩家顶掉系统账户
+    if (existing && existing.isNPC) return { ok: false, error: '这个账号名不可用，请换一个' };
+
+    if (!existing || !this.isOnboarded(existing)) {
+      return {
+        ok: false,
+        needOnboard: true,
+        account: name,
+        nick: existing && existing.nick ? existing.nick : '',
+        error: existing ? '该账号还没开完户，请填写昵称并选择券商' : '账号不存在，请先开户',
+      };
+    }
+    return this.startSession(existing, { isNew: false });
+  }
+
+  /** 开完户 = 有昵称 + 有券商。两者缺一都得回来补（老档升级上来时正好两样都缺） */
+  isOnboarded(acc) {
+    return !!(acc && acc.nick && acc.broker);
+  }
+
+  /**
+   * 开户（= 首次登录的最后一步）：账号 + 昵称 + 券商一次性落定，成功即进市场。
+   *
+   * 已开过户的账号不走这里——否则开户会变成一条"能把昵称和券商随手覆盖掉"的后门
+   * （改昵称走 setNick、换券商走 transferBroker，两者各有各的规则与成本）。
+   */
+  onboard(account, nick, brokerKey) {
+    const name = String(account || '').trim();
+    const existing = this.store.get(name) || null;
+    const accChk = broker.validateAccount(name, !!existing);
+    if (!accChk.ok) return { ok: false, error: accChk.error };
+    if (existing && existing.isNPC) return { ok: false, error: '这个账号名不可用，请换一个' };
+    if (existing && this.isOnboarded(existing)) {
+      return { ok: false, error: '该账号已经开过户了，直接登录即可' };
+    }
+    const nickChk = broker.validateNick(nick);
+    if (!nickChk.ok) return { ok: false, error: nickChk.error };
+    // 券商必选、不给"跳过用默认"（§9 D2）：被默认的那家会被动成为最大的一家
+    const key = String(brokerKey || '').trim();
+    if (!key) return { ok: false, needBroker: true, error: '请选择一家券商开户' };
+    if (!broker.has(key)) return { ok: false, needBroker: true, error: '券商不存在' };
     if (!existing && this.store.playerCount >= config.account.maxAccounts) {
       return { ok: false, error: '本局账号已达上限，请稍后再试' };
     }
 
-    const needBroker = !existing || !existing.broker;
-    if (needBroker) {
-      const key = String(brokerKey || '').trim();
-      if (!key) return { ok: false, needBroker: true, error: '请选择一家券商开户' };
-      if (!broker.has(key)) return { ok: false, needBroker: true, error: '券商不存在' };
-    }
-
     const acc = this.store.createOrGet(name);
+    acc.nick = String(nick).trim();
     // 彩蛋水位线：第一次见到这个账户（新号，或老档升级上来还没初始化过的）就用当前权益
     // 锚住——留成 null/0 会立刻算成"回撤 100%"
     milestones.initPeak(acc.milestones, r2(this.equityOf(acc)));
-    if (needBroker) {
-      const r = this.assignBroker(acc, brokerKey, { initial: true });
-      if (!r.ok) return { ok: false, needBroker: true, error: r.error };
-    }
-    // 新账户立刻纳入落盘范围，避免仅登录不下单的账号在重启后消失
+    const r = this.assignBroker(acc, key, { initial: true });
+    if (!r.ok) return { ok: false, needBroker: true, error: r.error };
+    logger.info(
+      `[我是股神] 新开户：账号 ${acc.name}（昵称 ${acc.nick}）→ ${r.key}` + (r.gift > 0 ? `，开户礼 ¥${r.gift}` : '')
+    );
+    return this.startSession(acc, { isNew: !existing });
+  }
+
+  /**
+   * 发令牌 + 记股东快照基线。登录与开户两条路都收口在这里，
+   * 免得将来其中一条漏掉"新账户要立刻纳入落盘范围"这一步（仅登录不下单的号会重启即消失）。
+   */
+  startSession(acc, opts = {}) {
     this.persist?.touch(acc);
     const t = this.newToken();
     this.sessions.set(t, acc.name);
@@ -882,8 +940,31 @@ class Game {
     // 登录即给每只股票各留一份基线快照：不动手也能在任一只股票上看到「较上次操作」的变动。
     // 快照按 (账号, 股票) 存，所以这里要逐只记，不能只记一只
     for (const stock of this.stocks) this.snapshotHolders(acc, 'login', stock.id);
-    if (!existing) this.refreshStats();
-    return { ok: true, name: acc.name, token: t, broker: acc.broker };
+    if (opts.isNew) this.refreshStats();
+    return {
+      ok: true,
+      account: acc.name,
+      nick: Game.displayName(acc),
+      token: t,
+      broker: acc.broker,
+    };
+  }
+
+  /**
+   * 改昵称：昵称只是展示名，所以**随时可改、不要求唯一**（§3.2）。
+   * 账号（acc.name）一动不动——它才是身份，改了会把所有持仓与流水都甩掉。
+   */
+  setNick(acc, nick) {
+    if (!acc) return { ok: false, error: '请先登录' };
+    const chk = broker.validateNick(nick);
+    if (!chk.ok) return { ok: false, error: chk.error };
+    const next = String(nick).trim();
+    if (next === acc.nick) return { ok: true, nick: next, unchanged: true };
+    const old = acc.nick;
+    acc.nick = next;
+    this.persist?.touch(acc);
+    logger.info(`[我是股神] ${acc.name} 改昵称：${old || '（未设）'} → ${next}`);
+    return { ok: true, nick: next };
   }
 
   /**
@@ -934,7 +1015,9 @@ class Game {
       ok: true,
       enabled: !!config.brokers.enabled,
       brokers: broker.describeAll(),
-      nickPattern: '3~16 位，字母开头，仅英文/数字/下划线/连字符',
+      // 登录页要按这两条规则实时校验，所以连文案一起公开（登录前读得到）
+      accountPattern: '3~16 位，字母开头，仅英文/数字/下划线/连字符',
+      nickPattern: '2~12 个字符，中文/英文/数字/下划线/连字符',
       weekly: broker.weeklyPick(this.dayNumber()),
       starLevels: (config.brokers.star || {}).levels || [],
       // 展示层的「本服已有 N 人开户」：只读真实占比，**不参与任何数值计算**（§9 D3）
@@ -965,6 +1048,15 @@ class Game {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
     return this.useCoupon(acc);
+  }
+
+  /** 改昵称（带令牌的入口）。改完广播一帧，排行榜/股东榜上的名字立刻跟着变 */
+  setNickFor(token, nick) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    const r = this.setNick(acc, nick);
+    if (r.ok && !r.unchanged) this.broadcast();
+    return r;
   }
 
 
@@ -1483,7 +1575,8 @@ class Game {
     }));
 
     return {
-      name: acc.name,
+      name: acc.name, // 账号：登录凭据，也是各表引用的键
+      nick: Game.displayName(acc), // 昵称：界面上给人看的就是它
       cash: r2(acc.cash),
       orderFrozen: r2(acc.orderFrozen),
       shortMargin: r2(acc.shortMargin),
@@ -1645,18 +1738,19 @@ class Game {
     };
   }
 
-  /** 玩家资产排行（组合口径：跨全部股票的总权益） */
+  /** 玩家资产排行（组合口径：跨全部股票的总权益）。展示名走昵称，账号另带一份供前端自行识别 */
   leaderboard(limit = 20) {
     const priceOf = (s) => this.markets.get(s).lastPrice;
     const all = this.store
       .players()
       .map((a) => ({
-        name: a.name,
+        account: a.name,
+        name: Game.displayName(a),
         equity: r2(a.equity(priceOf)),
         broker: a.broker || null,
         star: a.broker ? broker.starOf(a, a.broker) : 1,
       }))
-      .sort((x, y) => y.equity - x.equity);
+      .sort((x, y) => y.equity - x.equity || x.account.localeCompare(y.account));
     // 组内名次：同一家券商内部再排一次。这是**最有效的软分流**——冷门券商的组内名次
     // 天然更容易靠前，头部玩家的「争榜」动机于是把人往冷门赶（§5.3）
     const seen = new Map();
@@ -1699,7 +1793,8 @@ class Game {
       // NPC 的初始持股记录在账户上（每股一套 NPC 池，账户只属于一只股票）
       const base = acc.isNPC ? acc.initialLong || 0 : 0;
       rows.push({
-        name: acc.name,
+        account: acc.name, // 快照与"我"的判定都按账号走，昵称改名不影响
+        name: Game.displayName(acc),
         role, // inst / hot / big / mid / small / player
         qty,
         pct: r2((qty / total) * 100),
@@ -1707,7 +1802,7 @@ class Game {
         changePct: r2(((qty - base) / total) * 100),
       });
     }
-    rows.sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
+    rows.sort((a, b) => b.qty - a.qty || a.account.localeCompare(b.account));
     return rows.slice(0, limit);
   }
 
@@ -1726,16 +1821,19 @@ class Game {
   snapshotHolders(acc, action, stockId) {
     if (!acc) return null;
     const rows = this.computeTopHolders(stockId, HOLDER_SNAPSHOT_ROWS).map((r) => ({
-      name: r.name,
+      account: r.account,
+      name: r.name, // 记下当时的展示名，日后改名了曲线标签也还看得懂
       qty: r.qty,
       pct: r.pct,
     }));
     const snap = { t: Date.now(), tick: this.tickCount, action, stockId, rows };
     // 快照是不可变的，索引直接挂上去（不可枚举，不进 JSON）：
-    // 每 tick 每条 SSE 连接都要查一次，别再重复建 Map
-    const byName = new Map();
-    for (const r of rows) byName.set(r.name, r);
-    Object.defineProperty(snap, 'byName', { value: byName });
+    // 每 tick 每条 SSE 连接都要查一次，别再重复建 Map。
+    // **索引必须按账号**——按昵称的话玩家一改名，历史快照里那条就"查无此人"，
+    // 「较上次操作」会整列变成新进
+    const byAccount = new Map();
+    for (const r of rows) byAccount.set(r.account, r);
+    Object.defineProperty(snap, 'byAccount', { value: byAccount });
     const key = Game.snapKey(acc.name, stockId);
     let list = this._holderSnapshots.get(key);
     if (!list) {
@@ -1785,15 +1883,16 @@ class Game {
     const acc = this.accountFor(token);
     const rows = this.topHolders(stockId);
     const snap = acc ? this.lastHolderSnapshot(acc.name, stockId) : null;
-    const prev = snap ? snap.byName : null;
+    const prev = snap ? snap.byAccount : null;
     const list = acc ? this._holderSnapshots.get(Game.snapKey(acc.name, stockId)) || [] : [];
     return {
       ok: true,
       stockId,
       stockName: this.stocksById.get(stockId).name,
       rows: rows.map((h) => {
-        const p = prev ? prev.get(h.name) || null : null;
+        const p = prev ? prev.get(h.account) || null : null;
         return {
+          account: h.account,
           name: h.name,
           role: h.role,
           qty: h.qty,

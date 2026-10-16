@@ -110,6 +110,25 @@ const stubClearTimeout = (id) => {
   if (t) t.cleared = true;
 };
 
+// ---- 可编程 fetch：默认"什么都失败"，登录/开户的用例各自临时换脚本 ----
+let fetchCalls = [];
+let fetchHandler = () => Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+/** 让下一次（及后续）fetch 返回给定 JSON；同时记录请求，便于断言"没发请求"这类行为 */
+const scriptFetch = (responder) => {
+  fetchCalls = [];
+  fetchHandler = (url, opts) => {
+    fetchCalls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    const res = typeof responder === 'function' ? responder(url, opts) : responder;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(res) });
+  };
+};
+const resetFetch = () => {
+  fetchCalls = [];
+  fetchHandler = () => Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+};
+/** 等微任务队列把 then 链走完（fetch 桩是 resolve 的 Promise，两跳足够） */
+const flush = () => new Promise((r) => setImmediate(r));
+
 // ---- 把 app.js 真跑一遍，并在收尾前把内部函数挂到 globalThis 上 ----
 const srcPath = path.join(__dirname, '..', '..', 'Client', 'app.js');
 // 仓库里的源码是 CRLF，先归一化成 LF 再匹配 IIFE 收尾（vm 执行对换行不敏感）
@@ -156,6 +175,15 @@ src = src.replace(
     setChartMode: (m) => { chartMode = m; },
     dayLoadedSize: () => dayLoaded.size,
     chartModeOf: () => chartMode,
+    // 账号 / 昵称 / 登录开户
+    doLoginFlow, doOnboardFlow, showLoginStep, showLogin, renderIdentity, saveNick,
+    renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
+    identity: () => ({ account: me, nick: myNick, token }),
+    accountRe: () => String(ACCOUNT_RE),
+    nickRe: () => String(NICK_RE),
+    acctKey: () => localStorage.getItem('gushen_account'),
+    nickKey: () => localStorage.getItem('gushen_nick'),
+    legacyKey: () => localStorage.getItem('gushen_name'),
     el: (id) => $('id'.replace('id', id)),
   };
 })();
@@ -205,7 +233,8 @@ const sandbox = {
     this.addEventListener = () => {};
     this.close = () => {};
   },
-  fetch: () => Promise.resolve({ ok: false, json: () => Promise.resolve({}) }),
+  // fetch 可编程：登录/开户这两条链路的用例要按脚本给响应（默认一律失败，保证其它用例不受影响）
+  fetch: (url, opts) => fetchHandler(url, opts),
   devicePixelRatio: 1,
   addEventListener() {},
   removeEventListener() {},
@@ -459,12 +488,10 @@ console.log('\n[9] 资金指标条：外盘/内盘/净流入/占比与占比条'
 
 console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
 {
-  const calls = [];
-  sandbox.fetch = (url) => {
-    calls.push(String(url));
-    return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-  };
-  const dailyCalls = () => calls.filter((u) => u.includes('/api/daily')).length;
+  // 用可编程 fetch（只记录、不关心响应体），避免覆盖 sandbox.fetch 影响后面的用例
+  scriptFetch(() => ({ ok: false }));
+  const calls = fetchCalls;
+  const dailyCalls = () => calls.filter((c) => String(c.url).includes('/api/daily')).length;
 
   api.setChartMode('day');
   // 第 14 天盘中：第一次进日线模式 → 拉一次
@@ -485,6 +512,7 @@ console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
   api.onState(mkState({ ...AUCTION_DAY, day: 16, phase: 'auction', label: '开盘集合竞价' }, null));
   assert(dailyCalls() === 3, `分时模式不拉日线（${dailyCalls()} 次）`);
   api.setChartMode('day');
+  resetFetch();
 }
 
 // ---- 券商 UI：卡片墙 / 我的券商卡 / 席位 / 追保预警 / 提前消息 ----
@@ -983,5 +1011,101 @@ console.log('\n[16] 主题系统：切换 / 落盘 / 吉祥物换装 / 两个视
 }
 
 
-console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
-process.exit(failed ? 1 : 0);
+console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + 券商）→ 改昵称');
+(async () => {
+  // ---- 两条规则与服务端一致（账号 ASCII 唯一凭据；昵称中文可用、2~12 字符）----
+  assert(/A-Za-z/.test(api.accountRe()), `账号规则是 ASCII 那套（${api.accountRe()}）`);
+  assert(/\\p\{L\}|p\{L\}/.test(api.nickRe()), `昵称规则允许任意语言字母（${api.nickRe()}）`);
+
+  // ---- 两步切换：第一步输账号，第二步（开户）才亮昵称 + 券商 ----
+  api.showLoginStep(2, 'tester', '小明');
+  assert(api.el('loginStep1').hidden === true && api.el('loginStep2').hidden === false, '切到开户步骤后只显示第二步');
+  assert(api.el('onboardAccount').textContent === 'tester', `第二步顶部显示账号（${api.el('onboardAccount').textContent}）`);
+  assert(api.el('loginNick').value === '小明', '第二步预填昵称（老档可能已填过）');
+  api.showLogin('zhangsan');
+  assert(api.el('loginStep1').hidden === false && api.el('loginStep2').hidden === true, '退回第一步只显示第一步');
+  assert(api.el('loginAccount').value === 'zhangsan', '退回第一步保留刚输的账号');
+
+  // ---- 第一步：账号没开过户 → 服务端回 needOnboard，切到第二步，且**不写身份** ----
+  api.setIdentity('', '', '');
+  scriptFetch(() => ({ ok: false, needOnboard: true, account: 'tester', nick: '小明', error: '账号不存在，请先开户' }));
+  let res = null;
+  api.doLoginFlow('tester').then((r) => { res = r; });
+  await flush(); await flush();
+  assert(res && res.needOnboard === true, 'needOnboard 原样透出');
+  const loginCalls = fetchCalls.filter((c) => c.url === '/api/login');
+  assert(loginCalls.length === 1, `登录只打一次 /api/login（实际 ${loginCalls.length} 次）`);
+  assert(!fetchCalls.some((c) => c.url === '/api/onboard'), '需要开户时不偷偷建号（不打 /api/onboard）');
+  assert(loginCalls[0].body.account === 'tester' && loginCalls[0].body.name === undefined, '请求体只有 account（不再有 name/broker）');
+  assert(api.el('loginStep2').hidden === false, 'needOnboard 直接把界面切到开户步骤');
+  assert(api.el('onboardAccount').textContent === 'tester', '开户步骤用的是服务端回带的账号');
+  assert(api.identity().account === '' && api.acctKey() === null, '没开户前不写本地身份');
+
+  // ---- 第二步：昵称 + 券商开户成功 → 账号与昵称分别落盘，弹层收起 ----
+  scriptFetch(() => ({ ok: true, account: 'tester', nick: '股神小明', token: 'tok-1', broker: 'zhaoshang' }));
+  let done = null;
+  api.doOnboardFlow('tester', '股神小明', 'zhaoshang').then((r) => { done = r; });
+  await flush(); await flush();
+  assert(done && done.ok, '开户返回成功');
+  const onboardCalls = fetchCalls.filter((c) => c.url === '/api/onboard');
+  assert(onboardCalls.length === 1, `开户只打一次 /api/onboard（实际 ${onboardCalls.length} 次）`);
+  assert(
+    onboardCalls[0].body.account === 'tester' && onboardCalls[0].body.nick === '股神小明' && onboardCalls[0].body.broker === 'zhaoshang',
+    `开户请求体齐全（${JSON.stringify(onboardCalls[0].body)}）`
+  );
+  assert(api.identity().account === 'tester' && api.identity().nick === '股神小明', '账号与昵称分别记进身份');
+  assert(api.acctKey() === 'tester' && api.nickKey() === '股神小明', '两个键分别落 localStorage');
+  assert(api.legacyKey() === null, '旧键 gushen_name 被清掉（不再从旧账号名兜底）');
+  assert(api.el('loginOverlay').classList.contains('hidden'), '开户成功后登录弹层收起');
+  assert(api.el('whoName').textContent === '股神小明', `顶栏显示昵称（${api.el('whoName').textContent}）`);
+  assert(/tester/.test(api.el('whoName').title), '账号放在 title 里可查');
+
+  // ---- 改昵称：账号不动、令牌不动、只改展示名 ----
+  scriptFetch(() => ({ ok: true, nick: '股神大神' }));
+  let nickRes = null;
+  api.saveNick('股神大神').then((r) => { nickRes = r; });
+  await flush(); await flush();
+  assert(nickRes && nickRes.ok, '改昵称成功');
+  assert(fetchCalls[0].url === '/api/nick' && fetchCalls[0].body.nick === '股神大神', '改昵称只提交昵称');  assert(api.identity().account === 'tester' && api.identity().token === 'tok-1', '账号与令牌都没动');
+  assert(api.nickKey() === '股神大神' && api.el('whoName').textContent === '股神大神', '新昵称落盘并刷新顶栏');
+
+  // ---- 「我」的判定必须按账号：重名玩家不能把（我）标到别人那一行 ----
+  api.setState({
+    ...mkState(null),
+    players: [
+      { account: 'other', name: '股神大神', equity: 2000000, broker: 'zhaoshang', brokerRank: 1, star: 2 },
+      { account: 'tester', name: '股神大神', equity: 1000000, broker: 'zhaoshang', brokerRank: 2, star: 1 },
+    ],
+  });
+  const rank = api.rankRowsHtml();
+  const mineRows = rank.split('<tr').filter((r) => r.indexOf('row-mine') >= 0);
+  assert(mineRows.length === 1, `重名玩家下只有一行属于我（实际 ${mineRows.length} 行）`);
+  assert(mineRows[0].indexOf('other') === -1 && mineRows[0].indexOf('股神大神') >= 0, '高亮的是账号匹配的那一行（另一行的同名人没被标）');
+  assert(rank.split('（我）').length === 2, `（我）整张榜只出现一次（实际 ${rank.split('（我）').length - 1} 次）`);
+  assert(rank.indexOf('股神大神') >= 0, '展示的是昵称');
+  assert(rank.indexOf('/img/broker-zhaoshang-96.png') >= 0, '两张同名的行都带券商图标（不是只渲染了一行）');
+
+  // 股东榜同理：按 h.account 认我，标题与曲线也走账号键
+  api.setHolders({
+    stockId: STOCK,
+    rows: [
+      { account: 'other', name: '股神大神', role: 'player', qty: 500, pct: 5, change: 0, changePct: 0, dQty: null, dPct: null },
+      { account: 'tester', name: '股神大神', role: 'player', qty: 300, pct: 3, change: 0, changePct: 0, dQty: null, dPct: null },
+    ],
+    holderSnapshot: null,
+  });
+  api.setActiveView('trade');
+  api.renderHolders();
+  const body = api.el('holdersBody').innerHTML;
+  const holderRows = body.split('<tr').filter((r) => r.indexOf('row-mine') >= 0);
+  assert(holderRows.length === 1, `股东榜的重名也不会认错行（实际 ${holderRows.length} 行）`);
+  assert(holderRows[0].indexOf('other') === -1, '高亮的是账号匹配的那一行');
+  assert(body.split('（我）').length === 2, `（我）整张股东榜只出现一次（实际 ${body.split('（我）').length - 1} 次）`);
+  assert(holderRows[0].indexOf('data-holder="tester"') >= 0, '行上的 data-holder 是账号（曲线按账号取数）');
+  assert(/我的排名<\/label><span>第 2 名/.test(api.el('holdersMeta').innerHTML), '「我的排名」按账号算（第 2 名）');
+
+  resetFetch();
+
+  console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
+  process.exit(failed ? 1 : 0);
+})();

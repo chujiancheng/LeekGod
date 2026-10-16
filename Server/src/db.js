@@ -10,11 +10,12 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 6：账号与昵称分家（accounts 加 nick 列，name 从此只作登录账号）
 // 5：彩蛋里程碑（accounts 加 milestones 列，仅玩家写）
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -29,9 +30,13 @@ CREATE TABLE IF NOT EXISTS meta (
 -- 券商几列只对**玩家**有意义。NPC 的券商是由账户名哈希派生的派生标签（§11.4.1），
 -- 不落盘——落盘会踩「NPC 逐 tick 标脏」这条禁忌，也让存档版本无谓抬升。
 CREATE TABLE IF NOT EXISTS accounts (
+  -- 账号：登录凭据，玩家自填、全程不可改，也是各表 account 列引用的那个键。
+  -- 昵称（nick）只是展示名，与账号分开——账号要 ASCII 且唯一，昵称可中文、可重名、可改
   name          TEXT PRIMARY KEY,
   is_npc        INTEGER NOT NULL DEFAULT 0,
   role          TEXT NOT NULL,
+  -- 昵称：玩家开户时填、之后随时可改。NULL = 还没开过户（老档升级上来 / 建号未完成）
+  nick          TEXT,
   cash          REAL NOT NULL,
   order_frozen  REAL NOT NULL DEFAULT 0,
   short_margin  REAL NOT NULL DEFAULT 0,
@@ -240,9 +245,20 @@ const MIGRATION_5 = `
 ALTER TABLE accounts ADD COLUMN milestones TEXT;
 `;
 
+/**
+ * 版本 5 → 6 的**原地升级**：昵称列。
+ *
+ * 账号（`name`）与昵称从这一版起分家：`name` 退化成纯登录凭据（ASCII、唯一、不可改），
+ * 界面上给人看的是 `nick`（可中文、可重名、可改）。老档原地升上来 `nick` 为 NULL，
+ * 表示"这个号还没走完开户"——该玩家下次登录时会被要求补填昵称并选券商（§3.2）。
+ */
+const MIGRATION_6 = `
+ALTER TABLE accounts ADD COLUMN nick TEXT;
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;

@@ -232,18 +232,41 @@ console.log('\n[7] 转户（§9 D5）');
   assert(r.ok && r.fee === 1000, '没有交易日时钟时只按费用约束（不误拦）');
 }
 
-console.log('\n[8] 昵称规则（新注册仅 ASCII）');
+console.log('\n[8] 账号与昵称两套规则（账号 = 登录凭据，昵称 = 展示名）');
 {
-  assert(broker.validateNick('abc', false).ok, '3 位纯字母合法');
-  assert(broker.validateNick('a-b_c9', false).ok, '连字符/下划线/数字合法');
-  assert(broker.validateNick('abcdefghijklmnop', false).ok, '16 位合法');
-  assert(!broker.validateNick('abcdefghijklmnopq', false).ok, '17 位被拒');
-  assert(!broker.validateNick('ab', false).ok, '2 位被拒');
-  assert(!broker.validateNick('1abc', false).ok, '数字开头被拒');
-  assert(!broker.validateNick('新玩家', false).ok, '中文被拒');
-  assert(!broker.validateNick('a b', false).ok, '空格被拒');
-  assert(!broker.validateNick('a@b', false).ok, '特殊符号被拒');
-  assert(broker.validateNick('张三丰', true).ok, '老档中文账号放行（存量不锁门，用户已确认会清库）');
+  // 账号：ASCII、字母开头、3~16 位。要进存档主键 / 日志 / URL，不能让中文进来
+  assert(broker.validateAccount('abc', false).ok, '3 位纯字母合法');
+  assert(broker.validateAccount('a-b_c9', false).ok, '连字符/下划线/数字合法');
+  assert(broker.validateAccount('abcdefghijklmnop', false).ok, '16 位合法');
+  assert(!broker.validateAccount('abcdefghijklmnopq', false).ok, '17 位被拒');
+  assert(!broker.validateAccount('ab', false).ok, '2 位被拒');
+  assert(!broker.validateAccount('1abc', false).ok, '数字开头被拒（避免与 NPC 编号撞车）');
+  assert(!broker.validateAccount('新玩家', false).ok, '账号不允许中文');
+  assert(!broker.validateAccount('a b', false).ok, '空格被拒');
+  assert(!broker.validateAccount('a@b', false).ok, '特殊符号被拒');
+  assert(!broker.validateAccount('', false).ok, '空账号被拒');
+  // 保留名：SYSTEM 是市场里的系统账户，玩家账号撞上它会顶掉它
+  assert(!broker.validateAccount('SYSTEM', false).ok, '保留账号名被拒');
+  assert(!broker.validateAccount('system', false).ok, '保留名不分大小写');
+  assert(broker.validateAccount('system1', false).ok, '只是前缀相同不算撞名');
+  // 存量放行：升级上来的老档名字可能是中文，拿新规则去卡会把老玩家锁在门外
+  assert(broker.validateAccount('张三丰', true).ok, '老档账号名放行（不锁门）');
+
+  // 昵称：中文可用、2~12 字符、可重名、可改——所以没有"存量放行"这回事
+  assert(broker.validateNick('张三丰').ok, '中文昵称合法');
+  assert(broker.validateNick('股神小明').ok, '中文 + 混合长度合法');
+  assert(broker.validateNick('ABC').ok, '英文昵称合法');
+  assert(broker.validateNick('小-明_2').ok, '连字符/下划线/数字合法');
+  assert(broker.validateNick('小明').ok, '2 个汉字合法');
+  assert(broker.validateNick('abcdefghijkl').ok, '12 个 ASCII 字符合法');
+  assert(!broker.validateNick('abcdefghijklm').ok, '13 个字符被拒');
+  assert(broker.validateNick('一二三四五六七八九十一二').ok, '12 个汉字合法（按字符算，不按字节）');
+  assert(!broker.validateNick('一二三四五六七八九十一二三').ok, '13 个汉字被拒');
+  assert(!broker.validateNick('a').ok, '1 个字符被拒');
+  assert(!broker.validateNick('').ok, '空昵称被拒');
+  assert(!broker.validateNick('   ').ok, '纯空格被拒');
+  assert(!broker.validateNick('小 明').ok, '昵称里不能带空格');
+  assert(!broker.validateNick('小明@home').ok, '特殊符号被拒');
 }
 
 console.log('\n[9] NPC 券商归属：确定性 + 下限兜底');
