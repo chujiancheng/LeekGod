@@ -781,11 +781,13 @@
   }
 
   /**
-   * 登录（第一步）：拿账号换令牌。
-   * 两条成功路径之外的唯一分支是 `needOnboard`——账号还没开过户，直接切到开户那一步，
-   * 不让玩家再从第一步重输一遍。返回服务端响应，调用方只管展示错误文案。
+   * 静默探测（页面加载 / 令牌失效后自动重登）：成功就直接进市场，没开过户就**停在第一步**。
+   *
+   * 落点是刻意的——**开户步骤只能由玩家点一次「登录」进入**，不在加载时自动跳。
+   * 否则本地还留着上一局（或已被清库）的账号名时，一打开页面就直接是「填昵称 + 选券商」，
+   * 玩家会以为自己没经过登录。账号预填在输入框里，点一次「登录」就继续。
    */
-  function doLoginFlow(account) {
+  function probeLogin(account) {
     return apiPost('/api/login', { account })
       .then((r) => r.json())
       .then((res) => {
@@ -795,6 +797,31 @@
           maybeFirstTheme(); // 首次登录弹一次主题选择（之后从顶栏「主题」随时换）
           return res;
         }
+        // 没开完户 / 登录失败：界面回到第一步，账号预填回输入框。
+        // **不合规的名字不预填**（老档中文名 / 手输的脏数据）：那种名字点了必被打回，
+        // 预填只会让玩家对着一个"一提交就报错"的框发愣
+        const keep = ACCOUNT_RE.test(res.account || account) ? res.account || account : '';
+        setIdentity(keep, res.nick || myNick, '');
+        showLogin(keep);
+        return res;
+      });
+  }
+
+  /**
+   * 玩家点了「登录」：成功进市场，没开过户就**切到开户步骤**（填昵称 + 选券商），
+   * 免得让玩家再输一遍账号。返回服务端响应，调用方只管展示错误文案。
+   */
+  function doLoginFlow(account) {
+    return apiPost('/api/login', { account })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res.ok) {
+          setIdentity(res.account, res.nick, res.token);
+          enterApp();
+          maybeFirstTheme();
+          return res;
+        }
+        // 服务端会回带该账号已填过的昵称（老档可能没有），有就预填省一次输入
         if (res.needOnboard) showLoginStep(2, res.account || account, res.nick || '');
         return res;
       });
@@ -845,10 +872,9 @@
         toast('请输入账号', 'err');
         return;
       }
-      if (!ACCOUNT_RE.test(account)) {
-        fail(ACCOUNT_HINT);
-        return;
-      }
+      // 规则不合只给**软提示**，照样提交：最终判定在服务端（老档里可能存在中文账号，
+      // 本地硬拦会把它的玩家锁在门外——服务端认识它就会放行）
+      setHint($('accountHint'), ACCOUNT_RE.test(account) ? '' : ACCOUNT_HINT);
       doLoginFlow(account)
         .then((res) => {
           if (!res.ok && !res.needOnboard) fail(res.error || '登录失败');
@@ -1129,15 +1155,14 @@
           connectSSE();
           return;
         }
-        // 账号没开完户（服务端换了库）/ 账号不合法：退回登录页，该开户就开户。
-        // 账号留在本地、只作废令牌，刷新后还能自动回到这一步
+        // 账号没开完户（服务端换了库）/ 账号不合法：退回登录页**第一步**，
+        // 由玩家自己点一次「登录」再进开户流程。账号留在本地、只作废令牌
         toast(res.error || '登录状态已失效，请重新登录', 'err');
         const account = me;
         setIdentity(account, res.nick || myNick, '');
         es && es.close();
         $('app').classList.add('hidden');
-        if (res.needOnboard) showLoginStep(2, res.account || account, res.nick || '');
-        else showLogin(account);
+        showLogin(res.needOnboard ? res.account || account : account);
       })
       .catch(() => {
         relogging = false;
@@ -4341,26 +4366,15 @@
     // 券商卡片墙在**登录之前**就要渲染，所以先拉公开的 /api/brokers，再决定要不要弹登录
     loadBrokers();
     if (me) {
-      // 有账号就自动登录一次（令牌在服务端重启后会失效，所以这里始终走一次登录换新令牌）
+      // 有账号就静默登录一次（令牌在服务端重启后必失效，所以这里始终走一次登录换新令牌）。
+      // **没开过户不会自动进开户步骤**——探测失败就停在第一步、账号预填在框里，
+      // 开户流程一律要玩家自己点一次「登录」才进入（见 probeLogin）
       const account = me;
-      apiPost('/api/login', { account })
-        .then((r) => r.json())
+      probeLogin(account)
         .then((res) => {
-          if (res.ok) {
-            setIdentity(res.account, res.nick, res.token);
-            enterApp();
-            maybeFirstTheme();
-            return;
-          }
-          // 该账号还没开户：直接停在开户那一步，别让玩家再从第一步输一遍。
-          // 账号仍然留在本地（只是令牌作废），刷新后还能自动回到这一步
-          const wasAccount = res.account || me;
-          setIdentity(wasAccount, res.nick || '', '');
-          if (res.needOnboard) showLoginStep(2, wasAccount, res.nick || '');
-          else showLogin(wasAccount);
-          if (res.error) toast(res.error, 'err');
+          if (res && !res.ok && res.error) toast(res.error, 'err');
         })
-        .catch(() => showLogin(account));
+        .catch(() => showLogin(ACCOUNT_RE.test(account) ? account : ''));
     } else {
       showLogin('');
     }

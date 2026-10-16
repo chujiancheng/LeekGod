@@ -43,8 +43,13 @@ function mkCtx2d() {
 }
 
 const els = new Map();
+// 事件登记处：记录每个元素挂的监听器，于是自检能**真的点一次按钮**（`fire('loginBtn','click')`），
+// 而不是只调内部函数——「点登录 → 切到开户步骤」这类接线错误只有走点击路径才拦得住
+const elHandlers = new Map();
 function mkEl(id) {
   const cls = new Set();
+  const handlers = new Map();
+  elHandlers.set(id, handlers);
   return {
     id,
     hidden: false,
@@ -66,7 +71,11 @@ function mkEl(id) {
       },
       contains: (c) => cls.has(c),
     },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      const arr = handlers.get(type) || [];
+      arr.push(fn);
+      handlers.set(type, arr);
+    },
     removeEventListener() {},
     querySelectorAll: () => [],
     querySelector: () => null,
@@ -84,6 +93,13 @@ function mkEl(id) {
 const getEl = (id) => {
   if (!els.has(id)) els.set(id, mkEl(id));
   return els.get(id);
+};
+/** 在某个元素上触发事件（模拟真实点击 / 回车），返回是否真的有监听器被调用 */
+const fire = (id, type, ev) => {
+  const m = elHandlers.get(id);
+  const fns = ((m && m.get(type)) || []).slice();
+  fns.forEach((fn) => fn(ev || { key: '', preventDefault() {}, target: getEl(id) }));
+  return fns.length;
 };
 
 const store = { gushen_stock: '600001', gushen_name: '', gushen_token: '' };
@@ -176,7 +192,7 @@ src = src.replace(
     dayLoadedSize: () => dayLoaded.size,
     chartModeOf: () => chartMode,
     // 账号 / 昵称 / 登录开户
-    doLoginFlow, doOnboardFlow, showLoginStep, showLogin, renderIdentity, saveNick,
+    doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
     identity: () => ({ account: me, nick: myNick, token }),
     accountRe: () => String(ACCOUNT_RE),
@@ -1026,29 +1042,59 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
   assert(api.el('loginStep1').hidden === false && api.el('loginStep2').hidden === true, '退回第一步只显示第一步');
   assert(api.el('loginAccount').value === 'zhangsan', '退回第一步保留刚输的账号');
 
-  // ---- 第一步：账号没开过户 → 服务端回 needOnboard，切到第二步，且**不写身份** ----
+  // ---- 页面加载 / 自动重登：没开过户也**停在第一步**，绝不自动跳进开户步骤 ----
   api.setIdentity('', '', '');
   scriptFetch(() => ({ ok: false, needOnboard: true, account: 'tester', nick: '小明', error: '账号不存在，请先开户' }));
-  let res = null;
-  api.doLoginFlow('tester').then((r) => { res = r; });
+  let probe = null;
+  api.probeLogin('tester').then((r) => { probe = r; });
   await flush(); await flush();
-  assert(res && res.needOnboard === true, 'needOnboard 原样透出');
+  assert(probe && probe.needOnboard === true, 'probeLogin 原样透出服务端响应');
+  assert(api.el('loginStep1').hidden === false, '加载时探测到"没开户"仍停在第一步');
+  assert(api.el('loginStep2').hidden === true, '开户步骤不自动出现（要玩家点一次「登录」）');
+  assert(api.el('loginAccount').value === 'tester', '第一步预填账号（刷新后不用重打）');
+  assert(api.el('loginOverlay').classList.contains('hidden') === false, '登录弹层保持可见');
+  assert(api.identity().account === 'tester' && api.identity().token === '', '账号留下、令牌作废');
+
+  // 本地残留的账号名可能已经不合规（老档中文名）：那种名字点了必被打回，不预填
+  scriptFetch(() => ({ ok: false, needOnboard: true, account: '张三', nick: '', error: '账号不存在，请先开户' }));
+  api.probeLogin('张三').then(() => {});
+  await flush(); await flush();
+  assert(api.el('loginAccount').value === '', '不合规的旧账号名不预填（让玩家重新输一个）');
+  assert(api.identity().account === '' && api.acctKey() === null, '脏账号名从本地清掉');
+
+  // ---- 点「登录」的真实点击路径：账号没开过户 → 切到第二步 + 不写身份 ----
+  scriptFetch(() => ({ ok: false, needOnboard: true, account: 'tester', nick: '小明', error: '账号不存在，请先开户' }));
+  api.el('loginAccount').value = 'tester';
+  assert(fire('loginBtn', 'click') === 1, '「登录」按钮挂着监听器');
+  await flush(); await flush();
   const loginCalls = fetchCalls.filter((c) => c.url === '/api/login');
-  assert(loginCalls.length === 1, `登录只打一次 /api/login（实际 ${loginCalls.length} 次）`);
+  assert(loginCalls.length === 1, `点登录只打一次 /api/login（实际 ${loginCalls.length} 次）`);
   assert(!fetchCalls.some((c) => c.url === '/api/onboard'), '需要开户时不偷偷建号（不打 /api/onboard）');
   assert(loginCalls[0].body.account === 'tester' && loginCalls[0].body.name === undefined, '请求体只有 account（不再有 name/broker）');
-  assert(api.el('loginStep2').hidden === false, 'needOnboard 直接把界面切到开户步骤');
+  assert(api.el('loginStep2').hidden === false && api.el('loginStep1').hidden === true, '点登录后切到开户步骤');
   assert(api.el('onboardAccount').textContent === 'tester', '开户步骤用的是服务端回带的账号');
   assert(api.identity().account === '' && api.acctKey() === null, '没开户前不写本地身份');
 
-  // ---- 第二步：昵称 + 券商开户成功 → 账号与昵称分别落盘，弹层收起 ----
-  scriptFetch(() => ({ ok: true, account: 'tester', nick: '股神小明', token: 'tok-1', broker: 'zhaoshang' }));
-  let done = null;
-  api.doOnboardFlow('tester', '股神小明', 'zhaoshang').then((r) => { done = r; });
+  // 软提示而不是硬拦：本地不合规的名字照样提交，由服务端裁决（老档里可能有中文账号）
+  scriptFetch(() => ({ ok: false, error: '账号需为 3~16 位、字母开头，只允许英文字母 / 数字 / 下划线 / 连字符' }));
+  api.el('loginAccount').value = '张三丰';
+  fire('loginBtn', 'click');
   await flush(); await flush();
-  assert(done && done.ok, '开户返回成功');
+  assert(fetchCalls.filter((c) => c.url === '/api/login').length === 1, '不合规的账号也会提交（不在本地硬拦）');
+  assert(api.el('loginErr').hidden === false && /账号需为/.test(api.el('loginErr').textContent), `服务端的规则文案被展示（${api.el('loginErr').textContent}）`);
+
+  // ---- 第二步：填昵称 + 选券商 + 点「开户并进入市场」→ 账号与昵称分别落盘，弹层收起 ----
+  scriptFetch(() => ({ ok: true, account: 'tester', nick: '股神小明', token: 'tok-1', broker: 'zhaoshang' }));
+  fire('loginBtn', 'click'); // 先正常走到第二步（账号预填 tester 仍需玩家点一次登录）
+  await flush(); await flush();
+  assert(api.el('loginStep2').hidden === false, '再次点登录切到开户步骤');
+  api.el('loginNick').value = '股神小明';
+  api.setPicked('zhaoshang');
+  scriptFetch(() => ({ ok: true, account: 'tester', nick: '股神小明', token: 'tok-1', broker: 'zhaoshang' }));
+  assert(fire('onboardBtn', 'click') === 1, '「开户并进入市场」按钮挂着监听器');
+  await flush(); await flush();
   const onboardCalls = fetchCalls.filter((c) => c.url === '/api/onboard');
-  assert(onboardCalls.length === 1, `开户只打一次 /api/onboard（实际 ${onboardCalls.length} 次）`);
+  assert(onboardCalls.length === 1, `点开户只打一次 /api/onboard（实际 ${onboardCalls.length} 次）`);
   assert(
     onboardCalls[0].body.account === 'tester' && onboardCalls[0].body.nick === '股神小明' && onboardCalls[0].body.broker === 'zhaoshang',
     `开户请求体齐全（${JSON.stringify(onboardCalls[0].body)}）`
@@ -1059,6 +1105,7 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
   assert(api.el('loginOverlay').classList.contains('hidden'), '开户成功后登录弹层收起');
   assert(api.el('whoName').textContent === '股神小明', `顶栏显示昵称（${api.el('whoName').textContent}）`);
   assert(/tester/.test(api.el('whoName').title), '账号放在 title 里可查');
+  // 弹层本身的复位不靠这里：顶栏「换号」走 location.reload()，重进一律从第一步开始
 
   // ---- 改昵称：账号不动、令牌不动、只改展示名 ----
   scriptFetch(() => ({ ok: true, nick: '股神大神' }));
