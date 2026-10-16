@@ -416,6 +416,7 @@
     renderHeader();
     renderStockTabs();
     renderHalt();
+    renderDay();
     renderDepth();
     renderTape();
     renderAssets();
@@ -492,7 +493,7 @@
     } else {
       $('bandStat').hidden = true;
     }
-    $('clock').textContent = fmtTime(state.serverTime);
+    renderClock();
     $('onlineCount').textContent = '在线 ' + (state.online || 0) + ' 人';
   }
 
@@ -2106,6 +2107,11 @@
     });
     const a = state.account;
     const halted = !!(state.halt && state.halt.halted);
+    // 休市（午休 / 夜间）与停牌一样整段冻结四个方向：服务端本来就会拒，
+    // 这里提前禁用省得玩家点出一个红 toast
+    const day = dayInfo();
+    const closed = !!day && !day.trading;
+    const frozen = halted || closed;
     const pos = curPosition();
     const lock = directionLock();
     renderDirectionLock(lock);
@@ -2118,16 +2124,17 @@
       const dis = isIndex
         ? { buy_open: true, sell_close: true, sell_open: true, buy_close: true }
         : {
-            buy_open: halted || lock.short,
-            sell_close: halted || !pos || pos.long.sellable <= 0,
-            sell_open: halted || noBorrow || lock.long,
-            buy_close: halted || !pos || pos.short.coverable <= 0,
+            buy_open: frozen || lock.short,
+            sell_close: frozen || !pos || pos.long.sellable <= 0,
+            sell_open: frozen || noBorrow || lock.long,
+            buy_close: frozen || !pos || pos.short.coverable <= 0,
           };
       document.querySelectorAll('.act-btn').forEach((btn) => {
         const d = dis[btn.dataset.action];
         btn.disabled = d;
         if (isIndex) btn.title = '指数不可交易，仅供观察大盘';
         else if (halted) btn.title = '已停牌，暂停下单';
+        else if (closed) btn.title = `${day.label || '休市'}中，暂停下单`;
         else if (btn.dataset.action === 'sell_open' && noBorrow) {
           btn.title = !L || !L.enabled ? '融券做空未开放' : '可借券源不足，请先在融券页挂借';
         } else if (btn.dataset.action === 'buy_open' && lock.short) {
@@ -2143,7 +2150,7 @@
     // 融资开关只在买入开多且服务端开放时出现
     const fin = state.rules.finance;
     const finRow = $('financeRow');
-    const finAvailable = !isIndex && selectedAction === 'buy_open' && !!(fin && fin.enabled) && !halted;
+    const finAvailable = !isIndex && selectedAction === 'buy_open' && !!(fin && fin.enabled) && !frozen;
     finRow.hidden = !finAvailable;
     if (finAvailable) {
       const times = fin.ratio > 0 ? (1 / fin.ratio).toFixed(1).replace(/\.0$/, '') : '1';
@@ -2295,21 +2302,25 @@
 
   function renderCooldown() {
     const left = cooldownMsLeft();
-    // 停牌与方向锁一并在这里处理：tickUI 每 200ms 会重写 submitBtn.disabled，
+    // 停牌、休市与方向锁一并在这里处理：tickUI 每 200ms 会重写 submitBtn.disabled，
     // 只在 renderOrderPanel 里禁用会被它覆盖回可点
     const halted = !!(state.halt && state.halt.halted);
+    const day = dayInfo();
+    const closed = !!day && !day.trading; // 午休 / 夜间：整段不接受下单
     const lock = directionLock();
     const locked =
       (selectedAction === 'buy_open' && lock.short) ||
       (selectedAction === 'sell_open' && lock.long);
     $('cooldownText').textContent = halted
       ? '已停牌'
-      : locked
-        ? '本股方向已锁'
-        : left > 0
-          ? `冷却 ${(left / 1000).toFixed(1)}s`
-          : '';
-    $('submitBtn').disabled = halted || left > 0 || locked || !!(curMarket() || {}).isIndex;
+      : closed
+        ? day.label || '休市中'
+        : locked
+          ? '本股方向已锁'
+          : left > 0
+            ? `冷却 ${(left / 1000).toFixed(1)}s`
+            : '';
+    $('submitBtn').disabled = halted || closed || left > 0 || locked || !!(curMarket() || {}).isIndex;
   }
 
   // ---------- 停牌 ----------
@@ -2322,6 +2333,130 @@
   function fmtDur(ms) {
     const s = Math.ceil(ms / 1000);
     return s >= 60 ? `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒` : `${s} 秒`;
+  }
+
+  // ---------- 交易日（见服务端 src/daycycle.js） ----------
+  //
+  // 阶段一律吃服务端下发的 state.day，客户端**不自己算阶段**——客户端算的话
+  // 一旦本机时钟偏了或掉线重连，横幅、倒计时与真实撮合窗口就会错位。
+
+  /** 服务端下发的交易日段（老服务端没有 day 字段时返回 null，前端自动退回旧口径） */
+  function dayInfo() {
+    const d = state && state.day;
+    return d && d.enabled ? d : null;
+  }
+
+  /** 距上一帧 state 的毫秒数：倒计时与游戏内时钟都按它往前推，与冷却同口径 */
+  function stateDrift() {
+    return Math.max(0, Date.now() - lastStateAt);
+  }
+
+  /**
+   * 游戏内的真实交易时刻（毫秒，自 00:00 起）。
+   * 服务端只给到「上一帧那一刻」，这里按阶段内的真实比例线性推进：
+   * 竞价 30 秒映射 09:15→09:25，于是 3 秒后顶栏正好走到 09:16。
+   * 跨过阶段末尾时就夹住，等下一帧（最慢 200ms）把阶段对齐。
+   */
+  function gameClockNow() {
+    const d = dayInfo();
+    if (!d) return null;
+    const phaseMs = d.phaseMs || 1;
+    const span = d.phaseGameMs || phaseMs;
+    const elapsed = d.phaseElapsedMs || 0;
+    const done = Math.min(1, elapsed / phaseMs);
+    // 阶段起点的游戏内时刻：用「当前时刻 − 已走完的进度」反推。
+    // 不能直接在当前时刻上加"漂移量 × 比例"——那样漂移超过阶段末尾时会多算一整段跨度
+    // （实测 09:18:48 漂到 09:28:48，本该夹在阶段末尾 09:25:00）
+    const startMs = d.gameClockMs - span * done;
+    const ratio = Math.min(1, (elapsed + stateDrift()) / phaseMs);
+    const v = (startMs + span * ratio) % 86400000;
+    return (v + 86400000) % 86400000;
+  }
+
+  /** 自 00:00 起的毫秒 → 'HH:MM:SS' */
+  function fmtClockMs(ms) {
+    const v = ((ms % 86400000) + 86400000) % 86400000;
+    const p = (n) => String(n).padStart(2, '0');
+    const h = Math.floor(v / 3600000);
+    const m = Math.floor((v - h * 3600000) / 60000);
+    const s = Math.floor((v - h * 3600000 - m * 60000) / 1000);
+    return `${p(h)}:${p(m)}:${p(s)}`;
+  }
+
+  /** 顶栏时钟：有交易日时钟就显示游戏内交易时刻，否则退回服务器时间 */
+  function renderClock() {
+    const g = gameClockNow();
+    $('clock').textContent = g == null ? fmtTime(serverNow()) : fmtClockMs(g);
+  }
+
+  /**
+   * 交易日 UI：顶栏徽标、阶段横幅、盘口虚拟成交价、下单面板时段提示。
+   * 每帧与每 200ms 各跑一次——倒计时必须按本机流逝平滑推进，
+   * 只靠 state 帧的话数字会一格一格跳。
+   */
+  function renderDay() {
+    if (!state) return;
+    const d = dayInfo();
+    const chip = $('dayChip');
+    const banner = $('dayBanner');
+    const note = $('sessionNote');
+    const strip = $('auctionStrip');
+    if (!d) {
+      chip.hidden = true;
+      banner.hidden = true;
+      note.hidden = true;
+      strip.hidden = true;
+      return;
+    }
+
+    const drift = stateDrift();
+    const left = Math.max(0, (d.phaseLeftMs || 0) - drift);
+    $('dayNo').textContent = `第 ${d.day} 天`;
+    $('dayPhase').textContent = d.label || '';
+    $('dayLeft').textContent = left > 0 ? fmtDur(left) : '即将切换';
+    chip.hidden = false;
+    chip.className = 'day-chip' + (d.auction ? ' auction' : '') + (d.trading ? '' : ' closed');
+
+    const m = curMarket() || {};
+    if (d.auction) {
+      // 集合竞价：横幅把「虚拟成交价」顶到最显眼处，玩家挂单前先看它
+      const a = m.auction;
+      banner.hidden = false;
+      banner.className = 'halt-banner day-banner auction';
+      $('dayBannerTag').textContent = `第 ${d.day} 天 · ${d.auction === 'open' ? '开盘竞价' : '收盘竞价'}`;
+      $('dayBannerText').textContent =
+        a && a.price != null
+          ? `虚拟成交价 ${fmtP(a.price)} · 可成交 ${fmtQty(a.volume)} 股`
+          : '盘口未交叉，暂撮合不出价格';
+      const unlock = Math.max(0, (d.unlockLeftMs || 0) - drift);
+      $('dayBannerLeft').textContent = d.locked
+        ? '已进入不可撤单窗口'
+        : `距不可撤单 ${fmtDur(unlock)} · 阶段结束集中撮合`;
+    } else if (!d.trading) {
+      banner.hidden = false;
+      banner.className = 'halt-banner day-banner closed';
+      $('dayBannerTag').textContent = `第 ${d.day} 天`;
+      $('dayBannerText').textContent =
+        d.phase === 'lunch' ? '午间休市，13:00 恢复交易' : '已收盘结算，未成交委托按当日失效';
+      $('dayBannerLeft').textContent = `恢复交易还有 ${fmtDur(left)}`;
+    } else {
+      banner.hidden = true;
+    }
+
+    note.hidden = d.trading;
+    if (!d.trading) note.textContent = `当前${d.label || '休市'}，暂停下单与撮合`;
+
+    if (d.auction && m.auction) {
+      strip.hidden = false;
+      $('auctionTag').textContent = m.auction.kind === 'open' ? '虚拟开盘价' : '虚拟收盘价';
+      $('auctionPrice').textContent = m.auction.price == null ? '--' : fmtP(m.auction.price);
+      $('auctionVol').textContent =
+        m.auction.price == null
+          ? '无交叉盘口'
+          : `可成交 ${fmtQty(m.auction.volume)} 股${m.auction.locked ? ' · 已锁定' : ''}`;
+    } else {
+      strip.hidden = true;
+    }
   }
 
   /** 停牌横幅：原因与剩余时间，复牌后自动隐藏 */
@@ -2567,7 +2702,12 @@
     let maxVol = 1;
     const deltas = [];
     for (let i = 0; i < pts.length; i++) {
-      const d = i === 0 ? 0 : Math.max(0, (pts[i].vol || 0) - (pts[i - 1].vol || 0));
+      const v = pts[i].vol || 0;
+      const pv = i === 0 ? 0 : pts[i - 1].vol || 0;
+      // 日切检测：收盘结算会把当日成交量归零，直接相减会出现负差——
+      // 一根柱子凭空消失，下一根又从零重新长。检测到 vol 回落就当成"新的一天"，
+      // 用当日累计量本身作为这一根的增量（开盘竞价那一笔巨量正好一根柱画完）
+      const d = i === 0 ? 0 : v < pv ? v : Math.max(0, v - pv);
       deltas.push(d);
       if (d > maxVol) maxVol = d;
     }
@@ -2707,7 +2847,8 @@
     if (Date.now() - lastStateAt > 4000) $('connDot').classList.add('off');
     renderCooldown();
     renderHalt();
-    $('clock').textContent = fmtTime(state.serverTime + (Date.now() - lastStateAt));
+    renderDay();
+    renderClock();
     // 股东榜：进 tab 时按需拉，前台每 5 秒刷新一次（服务端只在操作时记快照，
     // 但持股会随行情外的成交变动，5 秒足够新）
     if (activeView === 'trade' && activeTab === 'holders') {

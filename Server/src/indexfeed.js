@@ -95,6 +95,20 @@ class IndexFeed {
     return Math.round(p * 100) / 100;
   }
 
+  /**
+   * 日终结算：收盘点位定格为新「昨收」，今开/最高/最低归零到收盘点位，
+   * 成交量额清零。指数的涨跌幅因此从「相对开服基点」变成「相对昨日收盘」——
+   * 这正是引入「天」之后玩家想看的东西。
+   */
+  settleDay() {
+    this.prevClose = this.lastPrice;
+    this.open = this.lastPrice;
+    this.high = this.lastPrice;
+    this.low = this.lastPrice;
+    this.volume = 0;
+    this.turnover = 0;
+  }
+
   /** 与 Market.snapshot 同构的行情快照，客户端可像处理股票一样处理指数 */
   snapshot() {
     const change = r2(this.lastPrice - this.prevClose);

@@ -19,6 +19,10 @@ const P = (g) => g.markets.get(STOCK.id);
 const N = (g) => g.npcs.get(STOCK.id);
 // 本文件要验证开空后的空头批次/保证金落盘，临时放开裸空（生产默认禁止）
 config.margin.allowNakedShort = true;
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是存档往返，
+// 用例里按 0.9 / 1.1 倍打价是常态，开着涨跌停会被拦在门外。
+// 涨跌停、集合竞价与日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
+config.priceLimit.enabled = false;
 
 let passed = 0;
 let failed = 0;
@@ -59,6 +63,7 @@ assert(p1.loadAll(ALL_IDS).resumed === false, '空存档 resumed=false');
 
 const g1 = new Game({ persist: p1 });
 g1.start();
+g1.day.reanchor(Date.now() - 120000);
 g1.stop(); // 测试里手动 tick，不要 setInterval
 
 console.log('\n[2] 玩家下单产生持仓 / 空头 / 活动委托');
@@ -158,6 +163,7 @@ assert(snap2.startedAt === before.startedAt, '开局时间延续（未开新局�
 
 const g2 = new Game({ persist: p2 });
 g2.start();
+g2.day.reanchor(Date.now() - 120000);
 g2.stop();
 
 const acc2 = g2.store.get('测试玩家');
@@ -304,6 +310,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p = new Persister(file);
   const g = new Game({ persist: p });
   g.start();
+    g.day.reanchor(Date.now() - 120000);
   g.halt(30, '跨重启测试');
   const until = P(g).haltUntil;
   g.tick(); // 触发一次 commit，把停牌写进 meta
@@ -313,6 +320,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p2h = new Persister(file);
   const g2h = new Game({ persist: p2h });
   g2h.start();
+    g2h.day.reanchor(Date.now() - 120000);
   assert(P(g2h).isHalted(), '重启后仍在停牌');
   assert(P(g2h).haltUntil === until, `停牌截止时间原样恢复 (${P(g2h).haltUntil})`);
   assert(P(g2h).haltReason === '跨重启测试', '停牌原因原样恢复');
@@ -327,6 +335,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p3 = new Persister(file);
   const g3 = new Game({ persist: p3 });
   g3.start();
+    g3.day.reanchor(Date.now() - 120000);
   assert(!P(g3).isHalted(), '复牌状态同样跨重启保留');
   g3.stop();
   p3.close();

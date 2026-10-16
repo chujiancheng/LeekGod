@@ -48,6 +48,12 @@
       <div class="top-right">
         <span class="conn-dot" id="connDot" title="连接状态"></span>
         <span class="online" id="onlineCount">在线 --</span>
+        <!-- 交易日：第几天 / 当前阶段 / 阶段倒计时。时钟本身显示的是"游戏内真实时刻" -->
+        <span class="day-chip" id="dayChip" hidden title="交易日">
+          <b id="dayNo">第 1 天</b>
+          <span id="dayPhase">--</span>
+          <i id="dayLeft">--</i>
+        </span>
         <span class="clock" id="clock">--:--:--</span>
         <button class="ghost-btn" id="switchBtn" title="切换账号">换号</button>
       </div>
@@ -58,6 +64,13 @@
       <span class="halt-tag">停牌</span>
       <span class="halt-text" id="haltText">暂停交易</span>
       <span class="halt-left" id="haltLeft"></span>
+    </div>
+
+    <!-- 交易日横幅：集合竞价 / 午休 / 夜间休市时出现，连续竞价时段隐藏 -->
+    <div class="halt-banner day-banner" id="dayBanner" hidden>
+      <span class="halt-tag" id="dayBannerTag">集合竞价</span>
+      <span class="halt-text" id="dayBannerText">--</span>
+      <span class="halt-left" id="dayBannerLeft"></span>
     </div>
 
     <!-- 股票切换栏：交易终端顶部（顶栏下方），10 只股票 + 大盘指数 -->
@@ -159,6 +172,13 @@
         <aside class="right-col">
           <section class="panel depth-panel">
             <div class="panel-title"><span>五档盘口</span></div>
+            <!-- 集合竞价阶段的虚拟成交价（最大成交量价）。竞价簿允许买卖价交叉，
+                 所以这时的盘口是"交叉的"，真实行情里的虚拟开盘价就是它 -->
+            <div class="auction-strip" id="auctionStrip" hidden>
+              <span class="as-tag" id="auctionTag">虚拟开盘价</span>
+              <span class="as-price" id="auctionPrice">--</span>
+              <span class="as-vol" id="auctionVol"></span>
+            </div>
             <table class="depth-table">
               <tbody id="asksBody"></tbody>
               <tbody class="depth-mid">
@@ -179,6 +199,7 @@
       <!-- 下单面板 -->
       <aside class="panel order-panel">
         <div class="panel-title"><span>下单</span><span class="panel-sub" id="cooldownText"></span></div>
+        <div class="session-note" id="sessionNote" hidden></div>
 
         <div class="action-grid">
           <button class="act-btn buy" data-action="buy_open">买入开多</button>

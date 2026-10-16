@@ -153,6 +153,8 @@ class AutoManager {
       if (!ctx) continue;
       // 停牌按股票单独判断：只有本股在停牌才冻结它的策略，其它股票照跑
       if (ctx.market.isHalted(now)) continue;
+      // 休市（午休 / 夜间）同样冻结：没有对手盘，下单只会挂成一张跨夜的死单
+      if (ctx.market.closedForTrading && ctx.market.closedForTrading(now)) continue;
       try {
         if (s.type === 'tps') this.stepTps(s, ctx, now);
         else if (s.type === 'grid') this.stepGrid(s, ctx, now);

@@ -173,6 +173,17 @@ class Persister {
     this.st.delSession.run(token);
   }
 
+  /** 读一条 meta（不存在返回 ''） */
+  getMeta(key) {
+    const row = this.st.getMeta.get(key);
+    return row ? row.value : '';
+  }
+
+  /** 写一条 meta（交易日结算进度等小状态；大对象不要往这里塞） */
+  setMeta(key, value) {
+    this.st.setMeta.run(String(key), String(value));
+  }
+
   /**
    * 新开一局：记下开局时间并清掉上一局的行情断点，行情由首个 tick 的 commit 写入。
    * 多股票下 prices/market_state 每只股票各一行，按 stock_id 区分，不需要按股票清表。
@@ -379,6 +390,7 @@ class Persister {
    */
   loadAll(stockIds) {
     const startedRow = this.st.getMeta.get('round_started_at');
+    const daySettledRow = this.st.getMeta.get('day_settled');
     const halt = this.readHalt();
     const accounts = this.st.allAccounts.all();
     const ledger = this.st.allLedger.all();
@@ -407,6 +419,8 @@ class Persister {
     return {
       resumed,
       startedAt: startedRow ? Number(startedRow.value) : null,
+      // 已结算到第几个交易日：续跑时据此补做停机期间错过的日终结算
+      daySettled: daySettledRow ? Number(daySettledRow.value) || 0 : 0,
       halt,
       accounts,
       ledger,

@@ -18,6 +18,11 @@ const ALL_IDS = config.stocks.map((s) => s.id);
 // 指数也用同一套 market_state/prices 落盘，读取时同样要把它列进标的清单
 const ALL_MARKET_IDS = [...ALL_IDS, config.index.code];
 
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是多股票机制，
+// 用例里按 0.9 / 1.1 / 1.2 倍打价是常态，开着涨跌停会被拦在门外。
+// 涨跌停与集合竞价、日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
+config.priceLimit.enabled = false;
+
 let passed = 0;
 let failed = 0;
 function assert(cond, msg) {
@@ -33,6 +38,9 @@ function assert(cond, msg) {
 /** 起一局纯内存游戏（不启 setInterval），并跑几步让盘口铺开 */
 function fresh(ticks = 12) {
   const g = new Game();
+  // 交易日时钟锚到「上午连续竞价」段内（一天：竞价 0~30s、上午 30~260s…）。
+  // 本文件验的是多股票机制，不需要真等 30 秒集合竞价走完才有成交
+  g.day.reanchor(Date.now() - 120000);
   const now = Date.now();
   for (const s of config.stocks) {
     g.npcs.get(s.id).init(now);
@@ -445,6 +453,7 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
   const p1 = new Persister(FILE);
   const g1 = new Game({ persist: p1 });
   g1.start();
+    g1.day.reanchor(Date.now() - 120000);
   g1.stop();
 
   const tk = g1.login('多股玩家').token;
@@ -490,6 +499,7 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
 
   const g2 = new Game({ persist: p2 });
   g2.start();
+    g2.day.reanchor(Date.now() - 120000);
   g2.stop();
   const acc2 = g2.store.get('多股玩家');
   assert(acc2.cash === beforeCash, `现金原样恢复 ${acc2.cash}`);
@@ -606,6 +616,8 @@ console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
   const p1 = new Persister(FILE);
   const g1 = new Game({ persist: p1 });
   g1.start();
+  // 交易日时钟锚到「上午连续竞价」段（start() 会把它锚到本轮开盘＝集合竞价）
+  g1.day.reanchor(Date.now() - 120000);
   g1.stop();
   const tk1 = g1.login('删股票玩家').token;
   const acc1 = g1.store.get('删股票玩家');
@@ -628,6 +640,7 @@ console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
   let started = true;
   try {
     g2.start();
+    g2.day.reanchor(Date.now() - 120000);
   } catch (e) {
     started = false;
     console.log('    启动异常:', e.message);

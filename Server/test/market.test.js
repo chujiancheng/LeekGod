@@ -185,16 +185,27 @@ console.log('\n[8] 资金不足拒绝买入');
   assert(!r.ok && /资金/.test(r.error), '资金不足被拒');
 }
 
-// ---- 9. 涨跌停开关 ----
-console.log('\n[9] 涨跌停（开启时限制价格）');
+// ---- 9. 涨跌停 ----
+console.log('\n[9] 涨跌停（相对昨收 ±10%，依赖交易日时钟）');
 {
   const { m, A } = fresh();
-  config.priceLimit.enabled = true;
-  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 25.0, now: 0 });
+  // 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收由每个交易日的收盘结算滚动而来，
+  // 所以这里必须挂上交易日时钟——孤立 Market（无 dayCycle）没有昨收口径，band() 直接返回 null。
+  // 一天里：竞价 0~30s、上午 30~260s、午休 260~300s、下午 300~560s、收盘竞价 560~580s、夜间 580~620s。
+  // 取 now = 120000ms 落在「上午连续竞价」段内（可撮合、非竞价锁定期）。
+  const { DayCycle } = require('../src/daycycle');
+  m.dayCycle = new DayCycle(config.day, 0);
+  const now = 120000;
+  const band = m.band();
+  assert(band.up === 22 && band.down === 18, `昨收 20 → 涨跌停 18 ~ 22（${band.down} ~ ${band.up}）`);
+  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 25.0, now });
   assert(!r1.ok && /涨跌停/.test(r1.error), '超过涨停价被拒');
-  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 19.0, now: 100 });
+  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 19.0, now: now + 100 });
   assert(r2.ok, '区间内价格可下单');
   config.priceLimit.enabled = false;
+  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 25.0, now: now + 5000 });
+  assert(r3.ok, '关掉涨跌停后 25 元放行（开关生效）');
+  config.priceLimit.enabled = true;
 }
 
 // ---- 10. 部分成交不得越量 ----

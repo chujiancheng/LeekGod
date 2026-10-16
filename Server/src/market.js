@@ -43,6 +43,14 @@ class Market {
     this._lastShortSample = 0;
     this.haltUntil = 0; // 停牌截止时间戳（0 = 正常交易），手动运营开关
     this.haltReason = '';
+    // 交易日时钟（见 daycycle.js）。未挂载时退化为「永远处于连续交易」，
+    // 等价于引入「天」之前的旧行为——单元测试里的孤立 Market 就走这条路径
+    this.dayCycle = null;
+    // 集合竞价正在撮合中（runAuction 内 → true）：此窗口内禁止风控强平，
+    // 因为竞价簿允许买卖价交叉，强平单按交叉价撮合会被一路拉飞
+    this._auctionRunning = false;
+    // 本交易日是否已经成交过（第一笔成交决定「今开」，日终归零）
+    this.dayTradeCount = 0;
     // 由 Game 注入的持久化器；未注入时纯内存运行（测试脚本就是这样）
     this.journal = null;
     // 跨股票取价：风控要按**整个账户**算权益，就得知道账户在其它股票上的持仓值多少。
@@ -99,17 +107,25 @@ class Market {
    * 变成「撤不掉、又仍会被撮合」的幽灵单；开空单占用的券源还会释放到错误的池子上。
    * 未注入 marketOf 时退化为只有本市场（单股测试路径）。
    */
-  cancelAny(account, orderId, now) {
+  cancelAny(account, orderId, now, opts) {
     const order = account.orders.get(orderId);
     const owner = order && this.marketOf ? this.marketOf(order.stockId) : null;
     const target = owner && typeof owner.cancel === 'function' ? owner : this;
-    return target.cancel(account, orderId, now);
+    return target.cancel(account, orderId, now, opts);
   }
 
-  /** 涨跌停区间（关闭时返回 null） */
+  /**
+   * 涨跌停区间（关闭时返回 null）。
+   *
+   * 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收只在每个交易日收盘结算时滚动
+   * （见 settleDay）。没有交易日时钟时昨收永远是开盘价，价格会被硬夹在开盘价 ±10% 里
+   * 再也出不来——那不是涨跌停，是死锁。所以没有挂载交易日时钟的孤立市场
+   * （单元测试路径）一律不启用涨跌停。
+   */
   band() {
     const cfg = config.priceLimit;
     if (!cfg.enabled) return null;
+    if (!this.dayCycle || !this.dayCycle.ok) return null;
     const up = this.roundPrice(this.prevClose * (1 + cfg.pct));
     const down = this.roundPrice(this.prevClose * (1 - cfg.pct));
     return { up, down };
@@ -138,6 +154,263 @@ class Market {
     const pct = config.trade.cagePct;
     if (!pct || !this.lastPrice) return true;
     return Math.abs(price - this.lastPrice) / this.lastPrice <= pct;
+  }
+
+  // ---------- 交易日阶段（挂载 dayCycle 后生效） ----------
+
+  /** 当前阶段是否接受下单（集合竞价也算「接受」，只是不连续撮合） */
+  tradingNow(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return true;
+    return dc.canTrade(now);
+  }
+
+  /** 当前是否集合竞价阶段：'open' / 'close' / null */
+  auctionKind(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return null;
+    return dc.auction(now);
+  }
+
+  /** 集合竞价是否已进入不可撤单窗口 */
+  auctionLocked(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return false;
+    return dc.auctionLocked(now);
+  }
+
+  /**
+   * 是否处于「连续竞价」（可切片撮合、可强平）。
+   * 集合竞价与休市都返回 false——集合竞价期间风控强平必须冻结：
+   * 那时候簿里允许买卖价交叉（虚拟成交价就是这么来的），强平单按它撮合会被交叉价拉飞。
+   */
+  continuousNow(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return true;
+    const st = dc.locate(now);
+    return st.phase.trading && !st.phase.auction;
+  }
+
+  /** 休市中（午休 / 夜间）：报价与撮合冻结，但公允价值继续迁移（隔夜跳空的来源） */
+  closedForTrading(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return false;
+    return !dc.canTrade(now);
+  }
+
+  /** 夜间休市（不含午休）：只有这里按 overnightDriftMul 放大公允迁移 */
+  isNight(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return false;
+    return dc.locate(now).phase.key === 'night';
+  }
+
+  // ---------- 集合竞价 ----------
+
+  /**
+   * 虚拟成交价 / 虚拟开盘价：**最大成交量原则**。
+   *
+   * 对每个候选价 P，可成交量 = min(买价 ≥ P 的剩余量之和, 卖价 ≤ P 的剩余量之和)。
+   * 取成交量最大的 P；多个 P 并列时取最接近昨收的那个（真实交易所的口径是
+   * 使未成交量最小、再取中间价，这里用「最接近昨收」等价地表达"不无谓地偏离"）。
+   *
+   * 竞价阶段盘口允许买卖价交叉——真实行情里的「虚拟开盘价」就是这么算出来的，
+   * 玩家在 09:15~09:25 看到的就是它。
+   *
+   * @returns {{price:number, volume:number}|null} 无可成交量时返回 null
+   */
+  auctionQuote() {
+    const bids = this.book.bids; // 价格降序、同价早单在前
+    const asks = this.book.asks; // 价格升序
+    if (!bids.length || !asks.length) return null;
+
+    // 先按价位聚合剩余量（同价多单合并），避免逐单 O(n²)
+    const bl = [];
+    for (const o of bids) {
+      const r = o.qty - (o.filled || 0);
+      if (r <= 0) continue;
+      const last = bl[bl.length - 1];
+      if (last && last.p === o.price) last.q += r;
+      else bl.push({ p: o.price, q: r });
+    }
+    const al = [];
+    for (const o of asks) {
+      const r = o.qty - (o.filled || 0);
+      if (r <= 0) continue;
+      const last = al[al.length - 1];
+      if (last && last.p === o.price) last.q += r;
+      else al.push({ p: o.price, q: r });
+    }
+    if (!bl.length || !al.length) return null;
+
+    // 候选价 = 两侧价位的并集，升序游标一次扫完
+    const band = this.band();
+    const ref = this.prevClose || this.lastPrice;
+    let d = 0;
+    for (const x of bl) d += x.q;
+    let s = 0;
+    let bi = bl.length - 1; // bl 降序：从最低买价开始剔除
+    let aj = 0; // al 升序：从最低卖价开始累计
+    let best = null;
+    // 两个有序数组归并成升序候选价
+    let i = bl.length - 1;
+    let j = 0;
+    while (i >= 0 || j < al.length) {
+      const bp = i >= 0 ? bl[i].p : Infinity;
+      const ap = j < al.length ? al[j].p : Infinity;
+      const p = Math.min(bp, ap);
+      if (i >= 0 && bp === p) i--;
+      if (j < al.length && ap === p) j++;
+      // 推进到 P 的可成交量口径：买价 ≥ P、卖价 ≤ P
+      while (bi >= 0 && bl[bi].p < p) {
+        d -= bl[bi].q;
+        bi--;
+      }
+      while (aj < al.length && al[aj].p <= p) {
+        s += al[aj].q;
+        aj++;
+      }
+      if (band && (p < band.down || p > band.up)) continue;
+      const v = Math.min(d, s);
+      if (v <= 0) continue;
+      if (
+        !best ||
+        v > best.volume ||
+        (v === best.volume && Math.abs(p - ref) < Math.abs(best.price - ref))
+      ) {
+        best = { price: p, volume: v };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 集合竞价集中撮合（在竞价阶段结束的那一 tick 由 Game 调用一次）。
+   * 按**价格优先、时间优先**在虚拟成交价上一次性成交，剩余委托留在簿里
+   * 进入随后的连续竞价（真实市场就是这么承接的）。
+   *
+   * 价格笼子在这里**不适用**：笼子是相对上一笔成交价的 ±5%，而集合竞价的成交价
+   * 相对昨收可以有 ±10% 的跳空——照笼子判会把所有跳空单都判成"脱笼"撤掉，
+   * 跳空越大越开不出盘，恰好废掉引入「天」最想要的那个机制。
+   */
+  runAuction(now = Date.now()) {
+    const q = this.auctionQuote();
+    this._auctionRunning = true;
+    try {
+      if (!q) {
+        // 开不出价也要收尾扫交叉：自成交残单、零剩余量残留都得清掉，
+        // 否则簿会带着交叉进入连续竞价
+        this.sweepCrossed(now);
+        return { price: null, qty: 0 };
+      }
+      return this._runAuctionAt(q, now);
+    } finally {
+      this._auctionRunning = false;
+    }
+  }
+
+  _runAuctionAt(q, now) {
+    const price = q.price;
+    const buys = this.book.bids.filter((o) => o.price >= price && o.qty - (o.filled || 0) > 0);
+    const asks = this.book.asks.filter((o) => o.price <= price && o.qty - (o.filled || 0) > 0);
+    let bi = 0;
+    let ai = 0;
+    let qty = 0;
+    let guard = 0;
+    while (bi < buys.length && ai < asks.length && guard++ < 50000) {
+      const b = buys[bi];
+      const a = asks[ai];
+      if (b.filled >= b.qty || b.status !== 'live') {
+        bi++;
+        continue;
+      }
+      if (a.filled >= a.qty || a.status !== 'live') {
+        ai++;
+        continue;
+      }
+      // 禁止自成交：同一账户的买卖不能互为对手盘
+      if (b.account === a.account) {
+        ai++;
+        continue;
+      }
+      if (!this.isSettleable(b, 1)) {
+        this.dropStaleOrder(b);
+        bi++;
+        continue;
+      }
+      if (!this.isSettleable(a, 1)) {
+        this.dropStaleOrder(a);
+        ai++;
+        continue;
+      }
+      const take = Math.min(b.qty - b.filled, a.qty - a.filled);
+      this.execute(b, a, price, take, now, price >= this.lastPrice ? 'buy' : 'sell');
+      qty += take;
+    }
+    // 自成交跳过可能留下少量交叉残单，收尾扫一遍，保证进入连续竞价时簿不再交叉
+    this.sweepCrossed(now);
+    return { price, qty };
+  }
+
+  /** 把簿里仍然交叉的顶档撮掉（价格为被动方挂单价），用于竞价收尾与异常兜底 */
+  sweepCrossed(now = Date.now()) {
+    let guard = 0;
+    while (guard++ < 5000) {
+      const b = this.book.bids[0];
+      const a = this.book.asks[0];
+      if (!b || !a) break;
+      const br = b.qty - (b.filled || 0);
+      const ar = a.qty - (a.filled || 0);
+      if (br <= 0) {
+        if (b.status === 'live') this.dropStaleOrder(b);
+        else this.book.remove(b);
+        continue;
+      }
+      if (ar <= 0) {
+        if (a.status === 'live') this.dropStaleOrder(a);
+        else this.book.remove(a);
+        continue;
+      }
+      if (b.price < a.price) break;
+      if (b.account === a.account) {
+        // 自成交：不能只 book.remove——账户侧会留一张 status=live 的幽灵单，
+        // 冻结资金与仓位预留一并锁死，盘口里却已经看不见。走正式撤单
+        // （保留买侧、撤卖侧，与 _runAuctionAt 的 ai++ 口径一致）
+        if (!this.cancel(a.account, a.id, now, { internal: true }).ok) {
+          this.dropStaleOrder(a);
+        }
+        continue;
+      }
+      this.execute(b, a, a.price, Math.min(br, ar), now, 'buy');
+    }
+  }
+
+  /**
+   * 日终结算（收盘集合竞价结束 → 夜间那一步由 Game 调用一次）：
+   * - 收盘价定格为新「昨收」，涨跌幅基准随之滚动到「今日」
+   * - 今开 / 最高 / 最低 / 成交量 / 成交额归零，等次日开盘竞价的成交价来填「今开」
+   * - **委托当日作废**：全部活动委托撤掉（真实市场收盘后未成交委托自动失效），
+   *   冻结资金与仓位预留一并退回。不撤的话昨天的挂单会带着昨天的价格活到今天，
+   *   玩家看到的盘口与自己的委托表都对不上。
+   */
+  settleDay(now = Date.now(), opts = {}) {
+    const cancelOrders = opts.cancelOrders !== false;
+    this.prevClose = this.lastPrice;
+    this.open = this.lastPrice;
+    this.high = this.lastPrice;
+    this.low = this.lastPrice;
+    this.volume = 0;
+    this.turnover = 0;
+    this.dayTradeCount = 0;
+    let canceled = 0;
+    if (cancelOrders) {
+      for (const o of [...this.book.orders.values()]) {
+        const r = this.cancel(o.account, o.id, now, { internal: true });
+        if (!r.ok) this.book.remove(o);
+        else canceled += 1;
+      }
+    }
+    return { prevClose: this.prevClose, canceled };
   }
 
   // ---------- 停牌（手动运营开关） ----------
@@ -453,6 +726,14 @@ class Market {
     // 停牌优先于其余校验：停牌时应答"已停牌"，而不是"冷却中/资金不足"
     if (this.isHalted(now)) return { ok: false, error: '已停牌，暂停下单' };
 
+    // 交易日阶段门控：午休 / 夜间（收盘结算）不接受下单。
+    // 撤单不受此限（见 cancel）——玩家得能在休市时把自己的钱收回来。
+    const dc = this.dayCycle;
+    if (dc && dc.ok && !dc.canTrade(now)) {
+      const st = dc.locate(now);
+      return { ok: false, error: `当前${st.phase.label}，暂停下单` };
+    }
+
     if (!VALID_ACTIONS.has(action)) return { ok: false, error: '未知操作类型' };
     if (!Number.isFinite(price) || price <= 0) return { ok: false, error: '价格无效' };
     if (!Number.isInteger(qty) || qty <= 0) return { ok: false, error: '数量无效' };
@@ -661,7 +942,14 @@ class Market {
     if (account.orderHistory.length > 100) account.orderHistory.length = 100;
     if (!account.isNPC && !opts.noCooldown) account.lastOrderAt = now;
 
-    this.match(order, now, order.side);
+    // 集合竞价阶段：**只入簿、不撮合**。成交要等阶段结束时按「最大成交量原则」
+    // 一次性集中撮合（见 runAuction）——在此之前每一单都还可能被撤回或被后来者挤掉，
+    // 这正是集合竞价与连续撮合的本质区别。
+    if (this.auctionKind(now)) {
+      this.book.add(order);
+    } else {
+      this.match(order, now, order.side);
+    }
     this.notifyChange(account, order);
     return { ok: true, order };
   }
@@ -817,6 +1105,13 @@ class Market {
   }
 
   onTrade(price, qty, aggressorSide, now) {
+    // 本交易日第一笔成交决定「今开」，同时把最高/最低从昨收的占位值上摘下来
+    if (this.dayTradeCount === 0) {
+      this.open = price;
+      this.high = price;
+      this.low = price;
+    }
+    this.dayTradeCount += 1;
     this.lastPrice = price;
     if (price > this.high) this.high = price;
     if (price < this.low) this.low = price;
@@ -949,13 +1244,22 @@ class Market {
     this.notifyChange(acc, order);
   }
 
-  /** 撤单 */
-  cancel(account, orderId, now) {
+  /**
+   * 撤单。
+   * @param {{internal?:boolean}} [opts] internal=true 表示系统内部撤单（撮合兜底、日终结算、
+   *   NPC 重报价），不受集合竞价「锁定期不可撤单」约束；玩家的撤单请求不传，会被拦下。
+   */
+  cancel(account, orderId, now, opts = {}) {
     const order = account.orders.get(orderId);
     if (!order) return { ok: false, error: '委托不存在或已完结' };
     if (order.status !== 'live') {
       account.orders.delete(orderId);
       return { ok: false, error: '委托已完结' };
+    }
+    // 集合竞价最后 10 秒锁死：想撤的人撤不掉、想追的人不敢追。
+    // 这是整个竞价系统最有价值的心理设计点（真实市场 09:20 那条硬线）
+    if (!opts.internal && this.auctionLocked(now)) {
+      return { ok: false, error: '集合竞价已锁定，不可撤单（等待开盘集中撮合）' };
     }
     const remain = order.qty - order.filled;
     this.book.cancel(order.id);
@@ -990,6 +1294,12 @@ class Market {
   maybeLiquidate(account, now) {
     if (!account || account === SYSTEM_ACCOUNT) return false;
     if (account._liquidating) return false;
+    // 集合竞价与休市不做风控强平：竞价簿里买卖价允许交叉，强平单按它撮合会被交叉价拉飞；
+    // 休市则压根没有对手盘。等进入连续竞价再处置，账户权益口径不变
+    if (!this.continuousNow(now)) return false;
+    // 阶段切换那一 tick 里 phase 已经翻到下一段，continuousNow() 会误判成"已进入连续竞价"，
+    // 此时竞价撮合正在跑（runAuction 中），强平单会被交叉盘口拉飞，故全程冻结
+    if (this._auctionRunning) return false;
     const m = config.margin.maintenance;
     const last = this.lastPrice;
     // 组合口径：权益含账户全部持仓（各股按各股最新价），敞口也按账户总空头/总融资多头计。
@@ -1233,7 +1543,22 @@ class Market {
       depth,
       trades: this.trades.slice(0, 30),
       band: this.band(),
+      // 集合竞价阶段下发虚拟参考价（最大成交量价），客户端在盘口中显示为「虚拟开盘价」
+      auction: this.auctionSnapshot(),
       lending: this.lendingSnapshot(),
+    };
+  }
+
+  /** 集合竞价快照：虚拟成交价 / 可成交量 / 是否已进入不可撤单窗口；非竞价阶段返回 null */
+  auctionSnapshot(now = Date.now()) {
+    const kind = this.auctionKind(now);
+    if (!kind) return null;
+    const q = this.auctionQuote();
+    return {
+      kind,
+      price: q ? q.price : null,
+      volume: q ? q.volume : 0,
+      locked: this.auctionLocked(now),
     };
   }
 

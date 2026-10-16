@@ -5,6 +5,11 @@ const { Game, ACTIONS } = require('../src/game');
 const config = require('../src/config');
 const { NewsSystem, TEMPLATES, STOCK_TEMPLATES } = require('../src/news');
 
+// 涨跌停是**日频机制**（区间以昨收为基准，价格一天最多走 ±10%）。本文件验的是撮合 /
+// 风控 / 快照 / 消息本身，用例里按盘口 ±0.05 打价是常态，开着涨跌停会把它们拦在门外。
+// 涨跌停、集合竞价与日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
+config.priceLimit.enabled = false;
+
 // ---- 多股票测试辅助：测试聚焦「大米集团」(config.stocks[0]) ----
 // P(g)/N(g)：取某局里大米集团的市场与做市引擎（多股票后 Game 持的是 Map）
 const STOCK = config.stocks[0];
@@ -26,6 +31,11 @@ function assert(cond, msg) {
 
 const g = new Game();
 const stock = STOCK;
+
+// 交易日时钟：把这一局的时钟锚到「上午连续竞价」段内（一天：竞价 0~30s、上午 30~260s…）。
+// 本文件的用例验的是撮合 / 风控 / 快照 / 消息，不需要真等 30 秒集合竞价走完才有成交；
+// 集合竞价的集中撮合、日终结算与涨跌停由 test/day.test.js 专门覆盖。
+g.day.reanchor(Date.now() - 120000);
 
 // 手动初始化（不启动 setInterval）：与 Game.start 的新局路径一致，**每只股票各建一套 NPC 池**，
 // 否则其余 9 只没有账户、股东榜为空，跨股票断言就失去意义

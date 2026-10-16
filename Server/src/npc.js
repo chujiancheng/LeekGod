@@ -170,13 +170,29 @@ class NpcManager {
       this.updateBias(n, now);
       this.updateSide(n);
       this.syncLend(n);
-      const shouldRequote = this.shouldRequote(n);
+      const shouldRequote = this.shouldRequote(n, now);
       if (shouldRequote) this.requote(n, now);
       // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate
       const p = this.profileOf(n);
       const rate = p.aggressiveRate * (p.polarOrderScale ? 1 + this.polar * 0.8 : 1);
       if (Math.random() < rate) this.tryAggressive(n, now);
     }
+  }
+
+  /**
+   * 休市（午休 / 夜间）推进：只走趋势、消息与公允价值，**不报价、不撮合**。
+   *
+   * 这是「隔夜跳空」的来源：价格在休市期间冻在收盘价上，而定价锚继续迁移。
+   * 次日开盘集合竞价第一次集中撮合时，NPC 拿着已经走远的锚报价，
+   * 开盘价自然对昨收出现缺口。没有这一步，「天」就只是多了个时钟而已。
+   */
+  stepFairValue(now) {
+    this.tickCount += 1;
+    this.priceTrail.push(this.market.lastPrice);
+    if (this.priceTrail.length > config.npc.momentumTicks + 10) {
+      this.priceTrail.shift();
+    }
+    this.updateFairValue(now);
   }
 
   updateFairValue(now) {
@@ -194,7 +210,12 @@ class NpcManager {
     this.fund *= 1 + gauss() * cfg.fundNoiseRel;
 
     let fv = this.fairValue;
-    fv *= 1 + this.trendDrift; // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）
+    // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）。
+    // **只有夜间**按 overnightDriftMul 放大——游戏里的 40 秒夜间代表现实一整夜，
+    // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
+    // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
+    const overnight = this.market.isNight && this.market.isNight(now);
+    fv *= 1 + this.trendDrift * (overnight ? cfg.overnightDriftMul || 1 : 1);
     fv *= 1 + this.news.fvDrift(now, this.stock.id); // 消息推力（乘性，只算本股 + 大盘消息）
     fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
     fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
@@ -761,7 +782,13 @@ class NpcManager {
     for (const n of this.npcs) this.market.notifyChange(n.acc);
   }
 
-  shouldRequote(n) {
+  shouldRequote(n, now) {
+    // 集合竞价：只在手上完全没有挂单时补一次盘口，之后保持不动。
+    // 跟着 tick 一直撤单-重挂会把竞价簿搅散——竞价要的是"委托累积起来"，
+    // 每 tick 撤光重挂的话虚拟成交价永远在抖，也凑不出真实的集中成交量
+    if (this.market.auctionKind && this.market.auctionKind(now)) {
+      return n.ownResting.length === 0;
+    }
     if (n.ownResting.length === 0) return true;
     if (n.requoteIn > 0) {
       n.requoteIn -= 1;
@@ -778,7 +805,7 @@ class NpcManager {
   /** 撤旧挂单并按公允价值+情绪挂双边报价 */
   requote(n, now) {
     for (const o of n.ownResting) {
-      if (o.status === 'live') this.market.cancel(n.acc, o.id, now);
+      if (o.status === 'live') this.market.cancel(n.acc, o.id, now, { internal: true });
     }
     n.ownResting = [];
 

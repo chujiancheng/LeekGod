@@ -16,6 +16,11 @@ const STOCK = config.stocks[0];
 const P = (g) => g.markets.get(STOCK.id);
 const N = (g) => g.npcs.get(STOCK.id);
 
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是策略参数校验与触发，
+// 用例里按盘口 1.05 倍打价是常态，开着涨跌停会被拦在门外。
+// 涨跌停与集合竞价、日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
+config.priceLimit.enabled = false;
+
 let passed = 0;
 let failed = 0;
 function assert(cond, msg) {
@@ -30,6 +35,8 @@ function assert(cond, msg) {
 
 const g = new Game();
 const stock = STOCK;
+// 交易日时钟锚到「上午连续竞价」段内，免得整段用例都卡在集合竞价里没有成交
+g.day.reanchor(Date.now() - 120000);
 N(g).init(g.startedAt);
 P(g).priceHistory.push({ t: g.startedAt, price: P(g).lastPrice, vol: 0 });
 N(g).step(g.startedAt);

@@ -240,6 +240,19 @@ input { font: inherit; color: inherit; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
 .conn-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .clock { font-variant-numeric: tabular-nums; color: var(--ink); }
+/* 交易日徽标：第几天 / 阶段 / 倒计时 */
+.day-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 3px 10px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 11.5px; white-space: nowrap;
+}
+.day-chip b { color: var(--gold); font-weight: 700; }
+.day-chip span { color: var(--ink); }
+.day-chip i { font-style: normal; color: var(--muted); font-variant-numeric: tabular-nums; }
+.day-chip.auction { border-color: rgba(240, 180, 41, .55); background: rgba(240, 180, 41, .10); }
+.day-chip.closed { opacity: .72; }
+.day-chip.closed i { color: var(--blue); }
 .ghost-btn {
   background: transparent; border: 1px solid var(--line); border-radius: 6px;
   padding: 4px 10px; color: var(--muted);
@@ -263,6 +276,41 @@ input { font: inherit; color: inherit; }
 }
 .halt-text { color: var(--ink); }
 .halt-left { margin-left: auto; color: var(--gold); font-variant-numeric: tabular-nums; }
+
+/* ---------- 交易日横幅（集合竞价 / 休市） ---------- */
+.day-banner.auction {
+  background: rgba(76, 141, 255, .10);
+  border-color: rgba(76, 141, 255, .45);
+}
+.day-banner.auction .halt-tag { background: var(--blue); color: #fff; }
+.day-banner.auction .halt-left { color: var(--blue); }
+.day-banner.closed {
+  background: rgba(125, 135, 155, .10);
+  border-color: rgba(125, 135, 155, .40);
+}
+.day-banner.closed .halt-tag { background: var(--muted); color: var(--panel); }
+.day-banner.closed .halt-left { color: var(--muted); }
+
+/* ---------- 集合竞价虚拟成交价 ---------- */
+.auction-strip {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 0 0 6px;
+  padding: 6px 9px; border-radius: 8px;
+  background: rgba(76, 141, 255, .10);
+  border: 1px solid rgba(76, 141, 255, .40);
+  font-size: 12px;
+}
+.as-tag { color: var(--blue); font-size: 11px; }
+.as-price { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.as-vol { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---------- 下单面板时段提示 ---------- */
+.session-note {
+  margin-bottom: 8px; padding: 6px 9px; border-radius: 8px;
+  background: rgba(240, 180, 41, .10);
+  border: 1px solid rgba(240, 180, 41, .40);
+  color: var(--ink); font-size: 12px;
+}
 
 /* ---------- 分时图 ---------- */
 .chart-panel { min-height: 0; }
@@ -808,11 +856,11 @@ input { font: inherit; color: inherit; }
     height: 330px;
   }
   .depth-panel { overflow: hidden; }
-  .depth-table { font-size: 11px; }
+  .depth-table { font-size: 11px; table-layout: fixed; }
   .depth-table td { padding: 3px 5px; }
-  .depth-table .lv { width: 28px; }
-  .depth-table .px { width: 50px; }
-  .depth-table .qty { font-size: 10.5px; }
+  .depth-table .lv { width: 20%; }
+  .depth-table .px { width: 34%; }
+  .depth-table .qty { width: 46%; font-size: 10.5px; padding-right: 10px; }
   .mid-cell { padding: 5px 5px !important; }
   #depthLast { font-size: 16px; }
   .tape-head, .tape-row { padding: 3px 8px; grid-template-columns: 1.2fr 1fr 0.9fr 0.6fr; font-size: 11px; }

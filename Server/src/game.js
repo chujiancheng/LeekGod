@@ -11,6 +11,7 @@ const { NewsSystem } = require('./news');
 const { NpcManager, normalizeNpcType } = require('./npc');
 const { AutoManager } = require('./auto');
 const { IndexFeed } = require('./indexfeed');
+const { DayCycle } = require('./daycycle');
 
 const NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
 
@@ -31,6 +32,13 @@ class Game {
     this.stocks = config.stocks;
     this.stocksById = new Map(this.stocks.map((s) => [s.id, s]));
     this.store = new Store();
+    // 交易日时钟（服务端权威）：全市场共用一份。阶段只由「本轮开盘时刻 + 当前时间」
+    // 推出，是纯函数，所以重启后只要把开盘时刻恢复回来就能接着走。
+    this.startedAt = Date.now();
+    this.day = new DayCycle(config.day, this.startedAt);
+    this._dayState = null;
+    // 最近一次已结算的交易日序号（落 meta），用于续跑时补做停机期间错过的日终结算
+    this._daySettled = 0;
     // 每只股票一套完全独立的市场与做市引擎：各自盘口、融券池、做市资金、趋势与情绪。
     // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
     this.markets = new Map();
@@ -38,6 +46,7 @@ class Game {
     for (const stock of this.stocks) {
       const market = new Market(stock);
       market.journal = opts.persist || null;
+      market.dayCycle = this.day; // 阶段门控、集合竞价、日终结算都靠它
       market.accountsProvider = () => this.store.all();
       // 跨股票取价：风控要按整个账户算权益，就得知道账户在其它股票上的持仓值多少
       market.priceOf = (stockId) => this.marketOf(stockId).lastPrice;
@@ -55,7 +64,6 @@ class Game {
     this.auto = new AutoManager(this.markets, this.stocksById, this.store);
     this.persist = opts.persist || null;
     this.auto.journal = this.persist;
-    this.startedAt = Date.now();
     this.timer = null;
     this.tickCount = 0;
     this.listeners = new Set(); // SSE 广播回调
@@ -112,6 +120,7 @@ class Game {
       this.applySnapshot(snap);
     } else {
       this.startedAt = Date.now();
+      this.day.reanchor(this.startedAt);
       const now = this.startedAt;
       for (const stock of this.stocks) {
         const market = this.markets.get(stock.id);
@@ -121,6 +130,9 @@ class Game {
       this.index.update(this.markets, now);
       this.persist?.startRound(now);
     }
+    // 续跑时补做停机期间错过的日终结算：昨收要滚到停机前最后的价格，
+    // 否则涨跌停区间会锚在几天前的收盘价上、所有委托都被判成越界
+    if (resumed) this.catchUpDay(Date.now());
     // NPC 首轮报价（续跑时报价单不入存档，靠这一步把双边盘口重新挂上）
     for (const npc of this.npcs.values()) npc.step(Date.now());
     this.refreshStats();
@@ -149,6 +161,8 @@ class Game {
    */
   applySnapshot(snap) {
     this.startedAt = snap.startedAt || Date.now();
+    this.day.reanchor(this.startedAt);
+    this._daySettled = snap.daySettled || 0;
 
     const byName = new Map();
     for (const row of snap.accounts) {
@@ -361,6 +375,23 @@ class Game {
     const now = Date.now();
     this.tickCount += 1;
 
+    // ---- 交易日时钟：定位当前阶段，并在阶段切换时做该做的事 ----
+    // 阶段由「本轮开盘时刻 + 当前时间」纯函数推出，没有内部状态，重启后自动接上
+    const dayState = this.day.ok ? this.day.locate(now) : null;
+    const prevDay = this._dayState;
+    if (
+      dayState &&
+      (!prevDay || prevDay.day !== dayState.day || prevDay.phase.key !== dayState.phase.key)
+    ) {
+      this.onPhaseChange(prevDay, dayState, now);
+    }
+    this._dayState = dayState;
+    // 结算兜底：tick 跨过收盘竞价时（休眠唤醒、长 GC）onPhaseChange 看到的 prev
+    // 不是 closeAuction，会漏结；这里每帧用「已收盘日」判据补一次
+    this.ensureDaySettled(now);
+    // 休市（午休 / 夜间）：不接受下单、不撮合、不报价，但公允价值继续迁移
+    const closed = !!(dayState && !dayState.phase.trading);
+
     // 停牌是全市场一起停（运营开关），以第一只股票的状态为准摊到全部股票
     const primary = this.markets.get(this.stocks[0].id);
     if (primary.expireHalt(now)) {
@@ -371,10 +402,13 @@ class Game {
       logger.info('[我是股神] 停牌到期，已自动复牌');
     }
     const halted = primary.isHalted(now);
+    // 可交易 = 未停牌 且 不在休市阶段。集合竞价算可交易（只是不连续撮合）
+    const active = !halted && !closed;
 
     if (!halted) {
       // 消息方向偏置取全市场平均阶段：10 只股票各自的牛熊互相对冲，
-      // 大盘消息（全体 scope）代表的是「整个市场」的方向，用均值最合理
+      // 大盘消息（全体 scope）代表的是「整个市场」的方向，用均值最合理。
+      // **休市也照发**：盘后公告正是隔夜跳空的燃料，停掉它"天"就没有夜了
       let bias = 0;
       for (const npc of this.npcs.values()) bias += npc.regime * config.news.regimeBias;
       bias /= this.npcs.size;
@@ -389,12 +423,18 @@ class Game {
     for (const stock of this.stocks) {
       const market = this.markets.get(stock.id);
       if (!halted) {
-        this.npcs.get(stock.id).step(now);
-        // 全账户风控扫描（成交触发之外的兜底）。只扫持有本股敞口的账户：
-        // 10 只股票 × 3160 个 NPC 账户全扫一遍是几万次无效检查
-        for (const acc of allAccounts) {
-          if (!acc.longs.has(stock.id) && !acc.shorts.has(stock.id)) continue;
-          market.maybeLiquidate(acc, now);
+        if (active) {
+          this.npcs.get(stock.id).step(now);
+          // 全账户风控扫描（成交触发之外的兜底）。只扫持有本股敞口的账户：
+          // 10 只股票 × 3160 个 NPC 账户全扫一遍是几万次无效检查
+          for (const acc of allAccounts) {
+            if (!acc.longs.has(stock.id) && !acc.shorts.has(stock.id)) continue;
+            market.maybeLiquidate(acc, now);
+          }
+        } else {
+          // 休市：只推进定价锚（趋势 + 消息 + 向重心回归），不报价不撮合。
+          // 次日开盘竞价的跳空就是这么攒出来的
+          this.npcs.get(stock.id).stepFairValue(now);
         }
         // 融券利息：空头按 tick 付给出借方，券源越少利率越高
         market.accrueLendingInterest(now);
@@ -415,8 +455,8 @@ class Game {
       }
     }
 
-    // 玩家自动化策略（按策略所属股票逐个判断停牌）
-    if (!halted) this.auto.step(now);
+    // 玩家自动化策略（按策略所属股票逐个判断停牌与休市）
+    if (active) this.auto.step(now);
 
     // 大盘指数：用各股最新价合成点位并记分时
     this.index.update(this.markets, now);
@@ -428,6 +468,105 @@ class Game {
     // 本 tick 的全部变更（账户、委托、成交、行情）在一个事务里落盘。
     // markets 含 10 只股票 + 指数，接口同构所以一起写
     this.persist?.commit({ now, markets: [...this.markets.values()], allAccounts });
+  }
+
+  // ---------- 交易日（见 src/daycycle.js） ----------
+
+  /**
+   * 阶段切换：集合竞价结束 → 按最大成交量原则集中撮合（开盘与收盘各一次）。
+   * 日终结算不放在这里——放这里的话 tick 跨过 closeAuction 时会漏结，
+   * 统一交给 ensureDaySettled（见 tick）。
+   */
+  onPhaseChange(prev, next, now) {
+    if (!prev) {
+      logger.info(`[我是股神] 交易时钟就位：第 ${next.day} 个交易日 · ${next.phase.label}`);
+      return;
+    }
+    if (prev.phase.auction) {
+      const kind = prev.phase.auction === 'open' ? '开盘' : '收盘';
+      let traded = 0;
+      for (const stock of this.stocks) {
+        const m = this.markets.get(stock.id);
+        const r = m.runAuction(now);
+        if (r.price == null) continue;
+        traded += 1;
+        const gap = m.prevClose > 0 ? ((r.price - m.prevClose) / m.prevClose) * 100 : 0;
+        logger.info(
+          `[我是股神] ${stock.name} ${kind}集合竞价成交价 ${r.price}，` +
+            `成交量 ${r.qty} 股，对昨收 ${m.prevClose} 跳空 ${gap >= 0 ? '+' : ''}${gap.toFixed(2)}%`
+        );
+      }
+      if (!traded) logger.info(`[我是股神] ${kind}集合竞价无成交（盘口未交叉）`);
+    }
+    if (next.phase.key === 'auction') {
+      logger.info(
+        `[我是股神] 第 ${next.day} 个交易日开盘集合竞价开始（涨跌停 ±${config.priceLimit.enabled ? config.priceLimit.pct * 100 : 0}%）`
+      );
+    }
+  }
+
+  /**
+   * 日终结算：收盘价定格为新昨收，今开/最高/最低/成交量额归零，活动委托全部作废。
+   * `_daySettled` 记的是**哪一天的收盘已经滚进昨收**：
+   * 夜间结算时是今天；次日盘中补结时是昨天（今天还没收盘，不能记成今天，
+   * 否则今晚的日终结算会被跳过）。
+   */
+  settleDay(now = Date.now(), opts = {}) {
+    let canceled = 0;
+    for (const stock of this.stocks) {
+      canceled += this.markets.get(stock.id).settleDay(now, { cancelOrders: opts.cancelOrders }).canceled;
+    }
+    this.index.settleDay();
+    const st = this.day.ok ? this.day.locate(now) : null;
+    if (st) {
+      this._daySettled = st.phase.key === 'night' ? st.day : st.day - 1;
+    }
+    if (opts.meta) this.persist?.setMeta('day_settled', String(this._daySettled));
+    logger.info(
+      `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：昨收已滚动到各股收盘价，` +
+        `${canceled} 笔未成交委托当日作废`
+    );
+  }
+
+  /**
+   * 确保所有「已经收盘」的交易日都结算过。两个调用点：
+   * ① `start()` 续跑补结算；② `tick()` 每帧兜底。
+   *
+   * 「已收盘」= 当前若在夜间则是今天，否则是昨天。**不能**用 `st.day > _daySettled`
+   * 当判据——那样 day2 上午（昨天已结、今天还没收盘）会被误结，昨收滚成盘中价、
+   * 当日量额被清零。也不补的话，tick 跨过 closeAuction（休眠唤醒）会永远漏结。
+   *
+   * 补结算只滚昨收与当日高低量额，**默认不动委托**——除了夜间（那时委托本就该全部作废），
+   * 免得把玩家新一天刚挂的单清掉。落在夜间时先补一次收盘集中撮合，
+   * 否则崩溃在收盘竞价里的那批委托会被「当日作废」整批吞掉。
+   */
+  ensureDaySettled(now = Date.now()) {
+    if (!this.day.ok) return;
+    const st = this.day.locate(now);
+    const completedDay = st.phase.key === 'night' ? st.day : st.day - 1;
+    const settledBefore = this._daySettled || 0;
+    if (completedDay <= settledBefore) return;
+    if (st.phase.key === 'night') {
+      for (const stock of this.stocks) {
+        const r = this.markets.get(stock.id).runAuction(now);
+        if (r.price != null) {
+          logger.info(
+            `[我是股神] ${stock.name} 补做收盘集合竞价成交价 ${r.price}，成交量 ${r.qty} 股`
+          );
+        }
+      }
+    }
+    const cancelOrders = st.phase.key === 'night';
+    this.settleDay(now, { meta: true, cancelOrders });
+    logger.info(
+      `[我是股神] 补做日终结算（已收盘 ${completedDay - settledBefore} 个交易日未结，` +
+        `当前第 ${st.day} 天 · ${st.phase.label}${cancelOrders ? '，委托已按当日作废' : ''}）`
+    );
+  }
+
+  /** 语义同 ensureDaySettled（续跑入口保留旧名） */
+  catchUpDay(now = Date.now()) {
+    this.ensureDaySettled(now);
   }
 
   /** 刷新排行榜与各股票的前十大股东缓存 */
@@ -741,6 +880,8 @@ class Game {
       startedAt: this.startedAt,
       markets,
       index,
+      // 交易日时钟（全市场共用一份）：第几天、哪个阶段、还剩多久、游戏内时刻
+      day: this.day.snapshot(now),
       // 兼容字段：老客户端只认单个 market。取第一只股票，新客户端一律走 markets
       market: markets[0],
       news: this.news.tapeSnapshot(50),
