@@ -63,6 +63,7 @@
           <i id="dayLeft">--</i>
         </span>
         <span class="clock" id="clock">--:--:--</span>
+        <button class="ghost-btn" id="themeBtn" title="切换主题">主题 · 深夜终端</button>
         <button class="ghost-btn" id="switchBtn" title="切换账号">换号</button>
       </div>
     </header>
@@ -119,6 +120,8 @@
           <div class="market-stats" id="homeMarketStats"></div>
           <div class="market-sub" id="homeMarketSub"></div>
         </div>
+        <!-- 吉祥物立绘：只有自带换装的二次元主题会显示（applyMascot 控制） -->
+        <img class="hero-mascot" id="heroMascot" alt="吉祥物" hidden />
       </section>
 
       <div class="home-grid">
@@ -513,6 +516,22 @@
       <div class="broker-wall" id="transferWall"></div>
       <div class="transfer-note" id="transferNote">--</div>
       <button class="deposit-cancel" id="transferCancelBtn">关闭</button>
+    </div>
+  </div>
+
+  <!-- 主题选择：首次登录弹一次，之后随时从顶栏「主题」进入。
+       预览卡片自带 data-theme，变量在子树内生效，预览即所见 -->
+  <div id="themeOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card theme-card-wrap">
+      <div class="deposit-title">选一个喜欢的主题</div>
+      <div class="login-sub">随时可以在顶栏「主题」里再换 · 二次元主题带专属吉祥物换装</div>
+      <div class="theme-wall" id="themeWall"></div>
+      <!-- 吉祥物：默认跟随主题，也可自选，跨主题生效 -->
+      <div class="mascot-head">再挑个吉祥物<span class="panel-sub">主页常驻 · 彩蛋弹出时露脸</span></div>
+      <div class="mascot-wall" id="mascotWall"></div>
+      <button id="themeConfirmBtn">就用这套，开市！</button>
+      <!-- 点主题卡即生效并落盘（setTheme 保存），所以这里只是关闭，不是「不改」 -->
+      <button class="deposit-cancel" id="themeCloseBtn">关闭</button>
     </div>
   </div>
 

@@ -27,10 +27,15 @@ const STATIC_FILES = {
  *    原图 262KB~990KB，十档盘口每帧都要画几十个 12px 图标，用原图是纯浪费）；
  * ② 股神猫头像 `/img/egg-cat-<key>-96.png`（彩蛋演出用，**只有** 96px——横幅里显示
  *    32~40px，原图 850KB 是纯浪费）。
+ * ③ 主题吉祥物立绘 `/img/mascot-<key>.png`（1024 原图，留给以后的大图位）、
+ *    `-256`（主页 hero 高 120px，2 倍屏 240px 够用）与 `-96`（选择卡 + 彩蛋横幅头像）。
  *
  * **按 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
  * 也不能走出指定目录（避免 `../` 穿越）。图标文件缺失时不注册，请求落到 404，
  * 前端只会看到空图标而不会报错。
+ *
+ * ⚠️ **新增图片资源必须在这里登记**：漏登记不会报错、只会 404，前端表现是**裂图**。
+ * 吉祥物阵容（id / 名称 / 文案）在前端 `Client/app.js` 的 `MASCOTS`，两处的 key 必须同名。
  */
 const IMG_ASSETS = new Map();
 function registerImg(name, size) {
@@ -42,6 +47,13 @@ for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
   registerImg(`broker-${key}-96.png`, 'sm');
 }
 for (const key of milestones.MASCOT_KEYS) registerImg(`egg-cat-${key}-96.png`, 'sm');
+// 主题吉祥物：key 与前端 app.js 的 MASCOTS 对齐（不含 'cat'——股神猫没有主页立绘，
+// 只用上面那批 egg-cat 头像）
+for (const key of ['sakura', 'magic', 'maodiao', 'orange', 'doro', 'duck', 'knight']) {
+  registerImg(`mascot-${key}.png`, 'lg');
+  registerImg(`mascot-${key}-256.png`, 'md');
+  registerImg(`mascot-${key}-96.png`, 'sm');
+}
 
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。
 const SECURITY_HEADERS = {

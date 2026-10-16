@@ -22,6 +22,26 @@ function assert(cond, msg) {
 }
 
 // ---- 极简 DOM 桩：$() 按 id 惰性造元素，把要断言的值直接挂在元素上 ----
+// 2D 上下文桩：画布那几条绘制函数（drawMinuteChart / drawDayChart / 持仓与挂借走势）
+// 在砌「切主题要重绘」这类断言时会被真调到，桩里每个方法都得存在且可链式调用
+function mkCtx2d() {
+  const gradient = { addColorStop() {} };
+  const noop = () => {};
+  return {
+    font: '', textAlign: '', textBaseline: '', lineWidth: 1, strokeStyle: '', fillStyle: '',
+    globalAlpha: 1, lineJoin: '', lineCap: '', shadowBlur: 0, shadowColor: '',
+    measureText: () => ({ width: 8 }),
+    createLinearGradient: () => gradient,
+    createRadialGradient: () => gradient,
+    getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+    save: noop, restore: noop, beginPath: noop, closePath: noop,
+    moveTo: noop, lineTo: noop, quadraticCurveTo: noop, bezierCurveTo: noop, arc: noop,
+    rect: noop, stroke: noop, fill: noop, clip: noop, setLineDash: noop,
+    fillRect: noop, strokeRect: noop, clearRect: noop, fillText: noop, strokeText: noop,
+    translate: noop, scale: noop, rotate: noop, setTransform: noop, drawImage: noop,
+  };
+}
+
 const els = new Map();
 function mkEl(id) {
   const cls = new Set();
@@ -55,7 +75,7 @@ function mkEl(id) {
     get offsetWidth() {
       return 120;
     },
-    getContext: () => null,
+    getContext: () => mkCtx2d(),
     width: 800,
     height: 400,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 400 }),
@@ -117,6 +137,19 @@ src = src.replace(
     setBrokers: (m) => { brokerMeta = m; },
     setPicked: (k) => { pickedBroker = k; },
     brokerKeys,
+    // 主题系统
+    setTheme, repaintTheme, maybeFirstTheme, setView, applyMascot,
+    themeOf: () => currentTheme,
+    themeAttr: () => ('theme' in document.documentElement.dataset ? document.documentElement.dataset.theme : null),
+    themes: () => THEMES.map((t) => t.id),
+    mascots: () => MASCOTS.map((m) => m.id),
+    mascotPickOf: () => currentMascot,
+    mascotOf: () => { const c = mascotConf(); return { id: c.id, img: c.img, thumb: c.thumb }; },
+    themeBtnText: () => $('themeBtn').textContent,
+    themeOverlayShown: () => !$('themeOverlay').classList.contains('hidden'),
+    heroMascot: () => { const h = $('heroMascot'); return { hidden: !!h.hidden, src: h.src || '' }; },
+    setMascotPick: (v) => { currentMascot = v; },
+    setActiveView: (v) => { activeView = v; },
     activeTabOf: () => activeTab,
     setActiveTab: (t) => { activeTab = t; },
     setDrift: (ms) => { lastStateAt = Date.now() - ms; },
@@ -163,7 +196,11 @@ const sandbox = {
     createElement: (tag) => mkEl(tag),
     body: mkEl('body'),
     hidden: false,
+    // 主题系统要读它：setTheme 写 documentElement.dataset.theme
+    documentElement: { dataset: {} },
   },
+  // 主题 token 在真浏览器里从计算样式读；桩里一律给空串，themeTokens() 会走自己的兜底默认值
+  getComputedStyle: () => ({ getPropertyValue: () => '' }),
   EventSource: function () {
     this.addEventListener = () => {};
     this.close = () => {};
@@ -878,6 +915,73 @@ console.log('\n[15] 彩蛋：toast / 横幅 / 队列 / seq 去重与进度卡');
   assert(api.el('eggHead').textContent.indexOf('称号A02') >= 0, 'bob 的事件照常播（没有继承 alice 的水位）');
   api.hideEggBanner();
 }
+
+console.log('\n[16] 主题系统：切换 / 落盘 / 吉祥物换装 / 两个视图都要能重绘');
+{
+  // ---- 默认（localStorage 没有 gushen_theme）= 深夜终端，html 上不挂 data-theme ----
+  api.setTheme('', false);
+  assert(api.themeOf() === '' && api.themeAttr() === null, '默认主题不写 html[data-theme]（靠 :root 兜底）');
+  assert(api.themeBtnText() === '主题 · 深夜终端', `顶栏按钮显示当前主题名（实际「${api.themeBtnText()}」）`);
+
+  // ---- 切主题三件套：属性 / 落盘 / 按钮文案 ----
+  api.setTheme('sakura', true);
+  assert(api.themeAttr() === 'sakura', '切主题把 id 写到 html[data-theme]');
+  assert(localStorageStub.getItem('gushen_theme') === 'sakura', '切主题落 localStorage（刷新后靠它恢复）');
+  assert(api.themeBtnText() === '主题 · 樱色交易所', `顶栏按钮跟着换（实际「${api.themeBtnText()}」）`);
+
+  // ---- 脏值兜底：老存档 / 手改 localStorage 写进未知 id 时回落默认，不抛 ----
+  api.setTheme('nope', false);
+  assert(api.themeOf() === '' && api.themeAttr() === null, '未知主题 id 回落默认主题');
+
+  assert(api.themes().length === 5, `主题表含默认在内共 5 套（实际 ${api.themes().length}）`);
+  assert(api.themes()[1] === 'broker' && api.themes()[4] === 'magic', '主题表顺序 = 弹窗里的排列顺序');
+
+  // ---- 吉祥物：默认跟随主题，二次元主题自带换装 ----
+  api.setMascotPick(null);
+  api.setTheme('sakura', false);
+  assert(api.mascotOf().id === 'sakura', `跟随主题时用该主题的默认吉祥物（实际 ${api.mascotOf().id}）`);
+  assert(api.heroMascot().src === '/img/mascot-sakura-256.png' && !api.heroMascot().hidden, '二次元主题换上主页立绘');
+  api.setTheme('broker', false);
+  assert(api.mascotOf().id === 'cat' && api.heroMascot().hidden, '主题没配吉祥物 → 股神猫，主页立绘隐藏');
+
+  // ---- 自选吉祥物：写进 currentMascot，跨主题保持 ----
+  api.setMascotPick('knight');
+  api.applyMascot();
+  assert(api.mascotOf().id === 'knight' && api.heroMascot().src === '/img/mascot-knight-256.png', '自选吉祥物立刻换装');
+  api.setTheme('magic', false);
+  assert(api.mascotOf().id === 'knight', '自选吉祥物不被后来的主题切走（跨主题生效）');
+  api.setMascotPick('');
+  api.setTheme('magic', false);
+  assert(api.mascotOf().id === 'magic', '选回「跟随主题」后再次跟着主题走');
+
+  // ---- 立绘与缩略图分档：主页 120px 用 -256，44/56px 的小位用 -96（别挂 1~2MB 原图）----
+  assert(api.mascotOf().img.endsWith('-256.png') && api.mascotOf().thumb.endsWith('-96.png'), '立绘取 -256、缩略图取 -96');
+
+  // ---- 首次登录弹一次：本地从没选过才弹，选过就不再打扰 ----
+  api.el('themeOverlay').classList.add('hidden');
+  localStorageStub.removeItem('gushen_theme');
+  api.maybeFirstTheme();
+  assert(api.themeOverlayShown(), '本地没存过主题选择 → 首次登录弹选择窗');
+  api.el('themeOverlay').classList.add('hidden');
+  localStorageStub.setItem('gushen_theme', 'magic');
+  api.maybeFirstTheme();
+  assert(!api.themeOverlayShown(), '选过之后不再弹');
+
+  // ---- 切主题要整体重绘：两个视图都必须跑通（repaintTheme 里调错函数名会在这里炸）----
+  api.setState(mkState({ ...AUCTION_DAY, day: 3, phase: 'morning', label: '上午连续竞价', auction: null }, null));
+  for (const view of ['home', 'trade']) {
+    api.setActiveView(view);
+    api.setTheme('gold', false);
+    let err = null;
+    try {
+      api.repaintTheme();
+    } catch (e) {
+      err = e.message;
+    }
+    assert(err === null, `${view} 视图下 repaintTheme 不抛异常（实际：${err || '无'}）`);
+  }
+}
+
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed ? 1 : 0);

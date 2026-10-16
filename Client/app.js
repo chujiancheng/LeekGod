@@ -45,6 +45,188 @@
   // 「交易日号 + 是否已收盘结算」：跨天与进入夜间都要作废日线缓存（见 onState）
   let lastDayKey = '';
 
+  // ---------- 主题系统 ----------
+  // 主题 = <html data-theme> 一个属性 + localStorage。每套主题在 style.css 里重写
+  // 同一套 token，DOM 样式零改动即时生效；画布/SVG 里的颜色走 themeC 缓存，
+  // 切换主题时刷新缓存并整体重绘一次。吉祥物换装：二次元主题自带专属立绘，
+  // 主页 hero 和彩蛋横幅头像一起换（themeConf(id).mascot）。
+  const THEMES = [
+    { id: '',       name: '深夜终端', tag: '默认', desc: '深蓝黑交易终端 · 经典默认' },
+    { id: 'broker', name: '老牌券商厅', tag: '传统', desc: '红木黄铜 · 90 年代营业部大厅' },
+    { id: 'gold',   name: '黑金股神', tag: '传统', desc: '黑金配色 · 尊贵感拉满' },
+    { id: 'sakura', name: '樱色交易所', tag: '二次元', desc: '樱粉白卡 · 抽卡式软萌 UI', mascotId: 'sakura' },
+    { id: 'magic',  name: '魔法夜空', tag: '二次元', desc: '深紫夜空 · 魔法少女夜战', mascotId: 'magic' },
+  ];
+  const THEME_KEY = 'gushen_theme'; // 只在玩家主动选过之后才写入：null = 从没选过（首次登录要弹选择）
+  let currentTheme = '';
+  let themeC = {}; // 画布/SVG 用的 token 缓存，themeTokens() 刷新
+  const themeConf = (id) => THEMES.find((t) => t.id === id) || THEMES[0];
+
+  // 吉祥物阵容：默认跟随主题（mascotId），玩家在弹窗里自选后记 localStorage、跨主题生效
+  const MASCOTS = [
+    { id: '',        name: '跟随主题', img: '', thumb: '/img/egg-cat-smug-96.png', desc: '二次元主题带专属换装' },
+    { id: 'cat',     name: '股神猫', img: '', thumb: '/img/egg-cat-smug-96.png', desc: '经典原版' },
+    // 立绘走 -256（主页 hero 高 120px，2 倍屏要 240px 才不糊）；缩略图走 -96，
+    // 供选择卡（56px）与彩蛋横幅头像（44px）用——原图 1024/1~2MB，别在这两处引用
+    { id: 'sakura',  name: '和服猫耳少女', img: '/img/mascot-sakura-256.png', thumb: '/img/mascot-sakura-96.png', desc: '樱色原配' },
+    { id: 'magic',   name: '魔法少女', img: '/img/mascot-magic-256.png', thumb: '/img/mascot-magic-96.png', desc: '夜空原配' },
+    { id: 'maodiao', name: '耄耋猫', img: '/img/mascot-maodiao-256.png', thumb: '/img/mascot-maodiao-96.png', desc: '亏麻了，面无表情' },
+    { id: 'orange',  name: '丑橘猫', img: '/img/mascot-orange-256.png', thumb: '/img/mascot-orange-96.png', desc: '涨了！傻乐' },
+    { id: 'doro',    name: '小恶魔朵洛', img: '/img/mascot-doro-256.png', thumb: '/img/mascot-doro-96.png', desc: 'Doro 味原创同人' },
+    { id: 'duck',    name: '咕咕嘎嘎', img: '/img/mascot-duck-256.png', thumb: '/img/mascot-duck-96.png', desc: 'duck 不服' },
+    { id: 'knight',  name: '刀盾骑士', img: '/img/mascot-knight-256.png', thumb: '/img/mascot-knight-96.png', desc: '我的刀！我的盾！' },
+  ];
+  const MASCOT_KEY = 'gushen_mascot'; // '' = 跟随主题；null = 从没选过（同样跟随主题）
+  let currentMascot = null;
+  function mascotConf() {
+    // 未选择 / 选了「跟随主题」→ 用当前主题的默认吉祥物，主题没配就用股神猫
+    const pick = currentMascot || themeConf(currentTheme).mascotId || 'cat';
+    return MASCOTS.find((m) => m.id === pick) || MASCOTS[1];
+  }
+
+  function themeTokens() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (n, d) => cs.getPropertyValue(n).trim() || d;
+    themeC = {
+      ink: v('--ink', '#dce3ef'),
+      muted: v('--muted', '#7d879b'),
+      red: v('--red', '#f0464b'),
+      green: v('--green', '#1fb978'),
+      blue: v('--blue', '#4c8dff'),
+      gold: v('--gold', '#f0b429'),
+      grid: v('--chart-grid', 'rgba(255,255,255,.06)'),
+    };
+  }
+
+  /** 十六进制色 + 透明度 → rgba()（画布不认 CSS color-mix，只能手动算） */
+  function withA(hex, a) {
+    const m = /^#([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return hex;
+    const n = parseInt(m[1], 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  /** 吉祥物换装：当前吉祥物有立绘就换上；股神猫没有主页立绘（保持原版，只有彩蛋头像） */
+  function applyMascot() {
+    const conf = mascotConf();
+    const hero = $('heroMascot');
+    if (hero) {
+      if (conf.img) {
+        hero.src = conf.img;
+        hero.hidden = false;
+      } else {
+        hero.hidden = true;
+      }
+    }
+  }
+
+  /** 轻量应用：只切属性/存档/刷新 token 缓存，不触发重绘（启动阶段用，此时还没数据） */
+  function setTheme(id, save) {
+    const conf = themeConf(id);
+    currentTheme = conf.id;
+    if (currentTheme) document.documentElement.dataset.theme = currentTheme;
+    else delete document.documentElement.dataset.theme;
+    if (save) {
+      try { localStorage.setItem(THEME_KEY, currentTheme); } catch (e) { /* 隐私模式等场景忽略 */ }
+    }
+    themeTokens();
+    applyMascot();
+    const b = $('themeBtn');
+    if (b) b.textContent = '主题 · ' + conf.name;
+  }
+
+  /** 重绘当前视图：DOM 部分吃 CSS 变量已即时生效，这里补画布/SVG 和纯 JS 拼的 HTML */
+  function repaintTheme() {
+    renderStockTabs();
+    if (activeView === 'home') {
+      renderHome();
+    } else {
+      renderHeader();
+      renderDepth();
+      renderTape();
+      renderFlow();
+      renderChartMode();
+      drawChart();
+      renderPositions();
+      renderHolders();
+      renderLending();
+      renderOrderPanel();
+    }
+  }
+
+  // ---------- 主题选择弹窗 ----------
+  function buildThemeCards() {
+    const wall = $('themeWall');
+    if (!wall || wall.childElementCount) return;
+    for (const t of THEMES) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'theme-card' + (t.id === currentTheme ? ' on' : '');
+      card.dataset.theme = t.id; // 子树内直接吃到该主题的 CSS 变量，预览即所见
+      card.innerHTML =
+        '<span class="tc-tag">' + t.tag + '</span>' +
+        '<div class="tc-demo">' +
+          '<div class="tc-bar"><i class="up num">+2.35%</i><i class="down num">-1.20%</i></div>' +
+          '<div class="tc-line"></div>' +
+          '<div class="tc-line short"></div>' +
+        '</div>' +
+        '<b class="tc-name">' + t.name + '</b>' +
+        '<span class="tc-desc">' + t.desc + '</span>';
+      card.addEventListener('click', () => {
+        setTheme(t.id, true);
+        repaintTheme();
+        wall.querySelectorAll('.theme-card').forEach((c) => c.classList.toggle('on', c === card));
+      });
+      wall.appendChild(card);
+    }
+  }
+
+  function buildMascotCards() {
+    const wall = $('mascotWall');
+    if (!wall || wall.childElementCount) return;
+    for (const m of MASCOTS) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'mascot-card';
+      card.dataset.mascot = m.id;
+      card.title = m.desc;
+      card.innerHTML =
+        '<img src="' + (m.thumb || m.img) + '" alt="" loading="lazy" />' +
+        '<b>' + m.name + '</b>' +
+        '<span>' + m.desc + '</span>';
+      card.addEventListener('click', () => {
+        currentMascot = m.id;
+        try { localStorage.setItem(MASCOT_KEY, m.id); } catch (e) { /* 忽略 */ }
+        applyMascot();
+        wall.querySelectorAll('.mascot-card').forEach((c) => c.classList.toggle('on', c === card));
+        if (m.img) toast('吉祥物换成了「' + m.name + '」');
+      });
+      wall.appendChild(card);
+    }
+  }
+
+  function openThemePicker() {
+    buildThemeCards();
+    const wall = $('themeWall');
+    if (wall) wall.querySelectorAll('.theme-card').forEach((c) => c.classList.toggle('on', themeConf(currentTheme).id === c.dataset.theme));
+    // 吉祥物区：首次进来现建，之后只刷新选中态
+    buildMascotCards();
+    const mw = $('mascotWall');
+    if (mw) {
+      const pick = currentMascot || '';
+      mw.querySelectorAll('.mascot-card').forEach((c) => c.classList.toggle('on', c.dataset.mascot === pick));
+    }
+    $('themeOverlay').classList.remove('hidden');
+  }
+
+  /** 首次登录（本地从没存过主题选择）登录成功后弹一次 */
+  function maybeFirstTheme() {
+    let stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch (e) {}
+    if (stored === null) openThemePicker();
+  }
+
+
   // ---- 券商（出身门派）----
   // 展示元数据在**登录前**就要有（开户卡片墙），所以走公开的 /api/brokers，
   // 不能等 state（那是登录之后才拉的）。键与 config.brokers.list 一致
@@ -316,7 +498,12 @@
     if (!el) return;
     eggBusy = true;
     const av = $('eggAvatar');
-    if (av) av.src = '/img/egg-cat-' + (ev.mascot || 'smug') + '-96.png';
+    if (av) {
+      // 当前吉祥物有立绘时，彩蛋头像一起换装；没有立绘（股神猫 / 跟随主题）则用事件自带的
+      // 表情头像。头像位只有 44px，所以立绘也取 -96 缩略图，不拉 -256 立绘
+      const conf = mascotConf();
+      av.src = conf.img ? conf.thumb : '/img/egg-cat-' + (ev.mascot || 'smug') + '-96.png';
+    }
     const head = $('eggHead');
     if (head) head.textContent = `第 ${ev.day} 天 · ${ev.title}`;
     const txt = $('eggText');
@@ -607,6 +794,7 @@
           }
           setIdentity(res.name, res.token);
           enterApp();
+          maybeFirstTheme(); // 首次登录弹一次主题选择（之后从顶栏「主题」随时换）
         })
         .catch(() => toast('网络异常，请重试', 'err'));
     };
@@ -620,6 +808,14 @@
         location.reload();
       }
     });
+    // 主题：顶栏常驻入口 + 选择弹窗
+    $('themeBtn').addEventListener('click', openThemePicker);
+    $('themeConfirmBtn').addEventListener('click', () => {
+      try { localStorage.setItem(THEME_KEY, currentTheme); } catch (e) {}
+      $('themeOverlay').classList.add('hidden');
+      toast('已切换到「' + themeConf(currentTheme).name + '」');
+    });
+    $('themeCloseBtn').addEventListener('click', () => $('themeOverlay').classList.add('hidden'));
   }
 
   function enterApp() {
@@ -1508,7 +1704,7 @@
     const iw = W - pad.l - pad.r;
     const ih = H - pad.t - pad.b;
 
-    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.strokeStyle = withA(themeC.ink, .06);
     ctx.lineWidth = 1;
     for (let i = 0; i <= 3; i++) {
       const y = pad.t + (ih * i) / 3;
@@ -1519,7 +1715,7 @@
     }
 
     if (known.length === 0) {
-      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.fillStyle = withA(themeC.ink, .35);
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(pts.length ? '该股东未进过快照前 30 名' : '暂无快照，登录或下单后开始记录', W / 2, H / 2);
@@ -1555,7 +1751,7 @@
         ctx.lineTo(x, y);
       }
     });
-    ctx.strokeStyle = '#5b9cff';
+    ctx.strokeStyle = themeC.blue;
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
@@ -1571,12 +1767,12 @@
       if (p.pct == null) return;
       ctx.beginPath();
       ctx.arc(xAt(i), yAt(p.pct), i === lastIdx ? 3.2 : 2.2, 0, Math.PI * 2);
-      ctx.fillStyle = i === lastIdx ? '#f0b429' : '#5b9cff';
+      ctx.fillStyle = i === lastIdx ? themeC.gold : themeC.blue;
       ctx.fill();
     });
 
     ctx.font = '10px sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.fillStyle = withA(themeC.ink, .45);
     ctx.textAlign = 'right';
     ctx.fillText(hi.toFixed(2) + '%', pad.l - 6, pad.t + 8);
     ctx.fillText(((hi + lo) / 2).toFixed(2) + '%', pad.l - 6, pad.t + ih / 2 + 4);
@@ -1588,7 +1784,7 @@
       ctx.fillText(fmtTime(pts[pts.length - 1].t), W - pad.r, H - 7);
     }
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#f0b429';
+    ctx.fillStyle = themeC.gold;
     const lp = pts[lastIdx];
     ctx.fillText(
       lp.pct.toFixed(2) + '%',
@@ -1667,7 +1863,7 @@
     const ih = H - pad.t - pad.b;
 
     // 背景网格
-    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.strokeStyle = withA(themeC.ink, .06);
     ctx.lineWidth = 1;
     for (let i = 0; i <= 3; i++) {
       const y = pad.t + (ih * i) / 3;
@@ -1678,7 +1874,7 @@
     }
 
     if (!hist || hist.length < 2) {
-      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.fillStyle = withA(themeC.ink, .35);
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(hist && hist.length === 1 ? '采样中…（每 5 分钟一点）' : '暂无空头仓位采样', W / 2, H / 2);
@@ -1706,17 +1902,17 @@
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
-    ctx.strokeStyle = '#5b9cff';
+    ctx.strokeStyle = themeC.blue;
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.lineTo(xAt(hist.length - 1), pad.t + ih);
     ctx.lineTo(xAt(0), pad.t + ih);
     ctx.closePath();
-    ctx.fillStyle = 'rgba(91,156,255,.12)';
+    ctx.fillStyle = withA(themeC.blue, .12);
     ctx.fill();
 
     // 轴标
-    ctx.fillStyle = 'rgba(255,255,255,.4)';
+    ctx.fillStyle = withA(themeC.ink, .4);
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'right';
     ctx.fillText(fmtQty(hi), pad.l - 4, pad.t + 8);
@@ -1910,7 +2106,7 @@
       return;
     }
     const c = cls(idx.change);
-    const spark = sparkSvg(sparks.get(idx.stockId) || [], idx.change >= 0 ? '#f0464b' : '#1fb978');
+    const spark = sparkSvg(sparks.get(idx.stockId) || [], idx.change >= 0 ? themeC.red : themeC.green);
     const comps = idx.components || [];
     const up = comps.filter((x) => x.changePct > 0).length;
     const down = comps.filter((x) => x.changePct < 0).length;
@@ -2264,7 +2460,7 @@
       ? `<tr class="quote-row idx-row" data-stock="${esc(idx.stockId)}">
             <td class="q-code">${esc(idx.stockId)}</td>
             <td class="q-name">${esc(idx.name)}<span class="idx-badge">指数</span></td>
-            <td>${sparkSvg(sparks.get(idx.stockId) || [], idx.change >= 0 ? '#f0464b' : '#1fb978')}</td>
+            <td>${sparkSvg(sparks.get(idx.stockId) || [], idx.change >= 0 ? themeC.red : themeC.green)}</td>
             <td class="q-last ${cls(idx.change)}">${fmtP(idx.last)}</td>
             <td class="${cls(idx.change)}">${idx.change >= 0 ? '+' : ''}${fmtP(idx.change)}</td>
             <td class="${cls(idx.change)}">${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}%</td>
@@ -2278,7 +2474,7 @@
       (markets
         .map((m) => {
           const c = cls(m.change);
-          const spark = sparkSvg(sparks.get(m.stockId) || [], m.change >= 0 ? '#f0464b' : '#1fb978');
+          const spark = sparkSvg(sparks.get(m.stockId) || [], m.change >= 0 ? themeC.red : themeC.green);
           return `<tr class="quote-row" data-stock="${esc(m.stockId)}">
             <td class="q-code">${esc(m.stockId)}</td>
             <td class="q-name">${esc(m.name)}</td>
@@ -3436,7 +3632,7 @@
     const bars = daySeriesOf(m);
     ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
     if (!bars.length) {
-      ctx.fillStyle = '#7d879b';
+      ctx.fillStyle = themeC.muted;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('暂无日线数据（收盘结算后每根 K 线落一笔）', W / 2, H / 2);
@@ -3452,13 +3648,13 @@
     for (let i = 0; i <= 4; i++) {
       const p = L.lo + ((L.hi - L.lo) * i) / 4;
       const yy = L.y(p);
-      ctx.strokeStyle = 'rgba(30,38,54,.9)';
+      ctx.strokeStyle = themeC.grid;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(L.PAD_L, yy);
       ctx.lineTo(W - L.PAD_R, yy);
       ctx.stroke();
-      ctx.fillStyle = '#7d879b';
+      ctx.fillStyle = themeC.muted;
       ctx.textAlign = 'left';
       ctx.fillText(p.toFixed(2), W - L.PAD_R + 6, yy);
     }
@@ -3469,13 +3665,13 @@
     for (let k = 0; k < ticks; k++) {
       const i = Math.round(((n - 1) * k) / Math.max(1, ticks - 1));
       const xx = L.xc(i);
-      ctx.strokeStyle = 'rgba(30,38,54,.6)';
+      ctx.strokeStyle = themeC.grid;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(xx, L.PAD_T);
       ctx.lineTo(xx, L.volTop + L.VOL_H);
       ctx.stroke();
-      ctx.fillStyle = '#7d879b';
+      ctx.fillStyle = themeC.muted;
       ctx.fillText('第' + bars[i].day + '天', Math.min(Math.max(xx, L.PAD_L + 20), W - L.PAD_R - 22), H - L.PAD_B / 2 - 2);
     }
 
@@ -3483,7 +3679,7 @@
     for (let i = 0; i < n; i++) {
       const b = bars[i];
       const up = b.close >= b.open;
-      const color = up ? '#f0464b' : '#1fb978';
+      const color = up ? themeC.red : themeC.green;
       const x = L.xc(i);
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
@@ -3497,7 +3693,7 @@
       ctx.fillRect(x - bw / 2, Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)));
       const vh = ((b.volume || 0) / L.maxVol) * L.VOL_H;
       if (vh >= 0.5) {
-        ctx.fillStyle = up ? 'rgba(240,70,75,.55)' : 'rgba(31,185,120,.55)';
+        ctx.fillStyle = up ? withA(themeC.red, .55) : withA(themeC.green, .55);
         ctx.fillRect(x - bw / 2, L.volTop + (L.VOL_H - vh), bw, vh);
       }
     }
@@ -3522,15 +3718,15 @@
       ctx.lineWidth = 1.2;
       ctx.stroke();
     };
-    drawMa(ma5, '#f0b429');
-    drawMa(ma10, '#4c8dff');
+    drawMa(ma5, themeC.gold);
+    drawMa(ma10, themeC.blue);
 
     // 当日未收盘的标记
     const last = bars[n - 1];
     if (last.live) {
       ctx.beginPath();
       ctx.arc(L.xc(n - 1), L.y(last.close), 3, 0, Math.PI * 2);
-      ctx.strokeStyle = '#dce3ef';
+      ctx.strokeStyle = themeC.ink;
       ctx.lineWidth = 1.2;
       ctx.stroke();
     }
@@ -3538,15 +3734,15 @@
     // 图例
     ctx.textAlign = 'left';
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillStyle = '#7d879b';
+    ctx.fillStyle = themeC.muted;
     let lx = L.PAD_L + 4;
     const maV = (arr) => (arr[n - 1] == null ? '--' : arr[n - 1].toFixed(2));
     ctx.fillText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`, lx, L.PAD_T - 3);
     lx += ctx.measureText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`).width + 12;
-    ctx.fillStyle = '#f0b429';
+    ctx.fillStyle = themeC.gold;
     ctx.fillText('MA5 ' + maV(ma5), lx, L.PAD_T - 3);
     lx += ctx.measureText('MA5 ' + maV(ma5)).width + 12;
-    ctx.fillStyle = '#4c8dff';
+    ctx.fillStyle = themeC.blue;
     ctx.fillText('MA10 ' + maV(ma10), lx, L.PAD_T - 3);
   }
 
@@ -3693,31 +3889,31 @@
     for (let i = 0; i <= lines; i++) {
       const p = lo + ((hi - lo) * i) / lines;
       const yy = y(p);
-      ctx.strokeStyle = 'rgba(30,38,54,.9)';
+      ctx.strokeStyle = themeC.grid;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(PAD_L, yy);
       ctx.lineTo(W - PAD_R, yy);
       ctx.stroke();
-      ctx.fillStyle = '#7d879b';
+      ctx.fillStyle = themeC.muted;
       ctx.textAlign = 'left';
       ctx.fillText(p.toFixed(2), W - PAD_R + 6, yy);
       // 涨跌幅刻度
       const pct = ((p - prev) / prev) * 100;
-      ctx.fillStyle = pct > 0 ? '#f0464b' : pct < 0 ? '#1fb978' : '#7d879b';
+      ctx.fillStyle = pct > 0 ? themeC.red : pct < 0 ? themeC.green : themeC.muted;
       ctx.fillText((pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', W - PAD_R + 6, yy + 11);
     }
 
     // 时间刻度（纵线贯穿价格/成交量/MACD 三带）
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#7d879b';
+    ctx.fillStyle = themeC.muted;
     for (let i = 0; i <= 4; i++) {
       const tt = t0 + ((t1 - t0) * i) / 4;
       const xx = x(tt);
       // 居中绘制会越出画布，两端夹回可视区
       const tx = Math.min(Math.max(xx, PAD_L + 18), W - PAD_R - 18);
       ctx.fillText(fmtTime(tt).slice(0, 5), tx, H - PAD_B / 2 - 2);
-      ctx.strokeStyle = 'rgba(30,38,54,.6)';
+      ctx.strokeStyle = themeC.grid;
       ctx.beginPath();
       ctx.moveTo(xx, PAD_T);
       ctx.lineTo(xx, macdTop + MACD_H);
@@ -3726,7 +3922,7 @@
 
     // 昨收虚线
     ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = '#7d879b';
+    ctx.strokeStyle = themeC.muted;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PAD_L, y(prev));
@@ -3735,7 +3931,7 @@
     ctx.setLineDash([]);
 
     const up = m.last >= prev;
-    const lineColor = up ? '#f0464b' : '#1fb978';
+    const lineColor = up ? themeC.red : themeC.green;
 
     // 面积
     ctx.beginPath();
@@ -3745,7 +3941,7 @@
     ctx.lineTo(x(pts[0].t), PAD_T + priceH);
     ctx.closePath();
     const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T + priceH);
-    grad.addColorStop(0, up ? 'rgba(240,70,75,.28)' : 'rgba(31,185,120,.28)');
+    grad.addColorStop(0, up ? withA(themeC.red, .28) : withA(themeC.green, .28));
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grad;
     ctx.fill();
@@ -3773,7 +3969,7 @@
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
-    ctx.strokeStyle = 'rgba(240,180,41,.85)';
+    ctx.strokeStyle = withA(themeC.gold, .85);
     ctx.lineWidth = 1;
     ctx.stroke();
 
@@ -3791,7 +3987,7 @@
       if (d > maxVol) maxVol = d;
     }
     const bw = Math.max(1, ((W - PAD_L - PAD_R) / Math.max(pts.length, 1)) * 0.7);
-    ctx.fillStyle = 'rgba(76,141,255,.55)';
+    ctx.fillStyle = withA(themeC.blue, .55);
     for (let i = 1; i < pts.length; i++) {
       const h = (deltas[i] / maxVol) * VOL_H;
       if (h < 0.5) continue;
@@ -3807,7 +4003,7 @@
     }
     const mMid = macdTop + MACD_H / 2;
     const mY = (v) => mMid - (v / mAbs) * (MACD_H / 2 - 10);
-    ctx.strokeStyle = 'rgba(30,38,54,.9)';
+    ctx.strokeStyle = themeC.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PAD_L, mMid);
@@ -3816,7 +4012,7 @@
     for (let i = 0; i < nM; i++) {
       const h = (Math.abs(macd.hist[i]) / mAbs) * (MACD_H / 2 - 10);
       if (h < 0.4) continue;
-      ctx.fillStyle = macd.hist[i] > 0 ? 'rgba(240,70,75,.9)' : 'rgba(31,185,120,.9)';
+      ctx.fillStyle = macd.hist[i] > 0 ? withA(themeC.red, .9) : withA(themeC.green, .9);
       ctx.fillRect(x(pts[i].t) - bw / 2, macd.hist[i] > 0 ? mMid - h : mMid, bw, h);
     }
     ctx.beginPath();
@@ -3826,7 +4022,7 @@
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
-    ctx.strokeStyle = '#f0b429';
+    ctx.strokeStyle = themeC.gold;
     ctx.lineWidth = 1.4;
     ctx.stroke();
     ctx.beginPath();
@@ -3836,7 +4032,7 @@
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
-    ctx.strokeStyle = '#4c8dff';
+    ctx.strokeStyle = themeC.blue;
     ctx.lineWidth = 1.4;
     ctx.stroke();
 
@@ -3849,19 +4045,19 @@
 
     // 图例
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#f0b429';
+    ctx.fillStyle = themeC.gold;
     ctx.fillText('均价', PAD_L + 4, PAD_T + 8);
     ctx.fillStyle = lineColor;
     ctx.fillText('价格', PAD_L + 36, PAD_T + 8);
-    ctx.fillStyle = '#7d879b';
+    ctx.fillStyle = themeC.muted;
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
     let lx = PAD_L + 4;
     ctx.fillText('MACD(12,26,9)', lx, macdTop + 9);
     lx += ctx.measureText('MACD(12,26,9)').width + 10;
-    ctx.fillStyle = '#f0b429';
+    ctx.fillStyle = themeC.gold;
     ctx.fillText('DIF ' + macd.dif[nM - 1].toFixed(3), lx, macdTop + 9);
     lx += ctx.measureText('DIF ' + macd.dif[nM - 1].toFixed(3)).width + 12;
-    ctx.fillStyle = '#4c8dff';
+    ctx.fillStyle = themeC.blue;
     ctx.fillText('DEA ' + macd.dea[nM - 1].toFixed(3), lx, macdTop + 9);
   }
 
@@ -3974,6 +4170,9 @@
     bindTransfer();
     bindEggs();
     renderChartMode();
+    // 恢复上次的主题与吉祥物（都没选过=默认：深夜终端 + 跟随主题）
+    try { currentMascot = localStorage.getItem(MASCOT_KEY); } catch (e) { /* 忽略 */ }
+    setTheme(localStorage.getItem(THEME_KEY) || '', false);
     setInterval(tickUI, 200);
     // 券商卡片墙在**登录之前**就要渲染，所以先拉公开的 /api/brokers，再决定要不要弹登录
     loadBrokers();
@@ -3984,6 +4183,7 @@
           if (res.ok) {
             setIdentity(res.name, res.token);
             enterApp();
+            maybeFirstTheme();
           } else {
             setIdentity('', '');
             $('loginOverlay').classList.remove('hidden');
