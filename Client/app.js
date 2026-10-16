@@ -45,6 +45,13 @@
   // 「交易日号 + 是否已收盘结算」：跨天与进入夜间都要作废日线缓存（见 onState）
   let lastDayKey = '';
 
+  // ---- 券商（出身门派）----
+  // 展示元数据在**登录前**就要有（开户卡片墙），所以走公开的 /api/brokers，
+  // 不能等 state（那是登录之后才拉的）。键与 config.brokers.list 一致
+  let brokerMeta = {}; // key -> 展示元数据
+  let pickedBroker = ''; // 登录页/转户弹窗里当前选中的券商
+  let brokerFetching = false;
+
   const ACTION_LABEL = {
     buy_open: '买入开多',
     sell_close: '卖出平多',
@@ -210,19 +217,201 @@
   }
 
   // ---------- 登录 ----------
+  // 昵称规则与服务端 broker.NICK_RE 一致：3~16 位、字母开头、仅 ASCII
+  const NICK_RE = /^[A-Za-z][A-Za-z0-9_-]{2,15}$/;
+
+  /** 拉券商展示元数据（公开接口，登录前就要有）。失败时静默——登录仍可提交 */
+  function loadBrokers() {
+    if (brokerFetching) return Promise.resolve();
+    brokerFetching = true;
+    return apiGet('/api/brokers')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((res) => {
+        brokerFetching = false;
+        if (!res || !res.brokers) return;
+        brokerMeta = {};
+        for (const b of res.brokers) brokerMeta[b.key] = b;
+        brokerMeta.__selected = res.selected || {};
+        brokerMeta.__weekly = res.weekly || {};
+        if (!pickedBroker) pickedBroker = (res.weekly && res.weekly.key) || Object.keys(brokerMeta)[0] || '';
+        renderBrokerWall();
+        renderBrokerWeeklyHint();
+      })
+      .catch(() => {
+        brokerFetching = false;
+      });
+  }
+
+  /** 佣金显示成「万N」比 0.0002 直观 */
+  function fmtFeeRate(rate) {
+    if (!Number.isFinite(rate)) return '--';
+    const wan = rate * 10000;
+    return '万' + (Math.round(wan * 100) / 100).toString();
+  }
+
+  /**
+   * 券商图标。`xs` 走 96px 缩略图（盘口/逐笔/排行榜这些高频小位置）——
+   * 1024 原图 262KB~990KB，一屏几十个 12px 图标用原图纯属浪费；
+   * 卡片墙与「我的券商」卡才用原图（§11.5）
+   */
+  function brokerIcon(key, cls) {
+    const suffix = cls && cls.indexOf('xs') >= 0 ? '-96' : '';
+    return `<img class="bk-ico ${cls || ''}" src="/img/broker-${esc(key)}${suffix}.png" alt="">`;
+  }
+
+  /** 五档/逐笔里的「券商席位」小标识：**图标必须配两字简称**——招伤与东风的红
+   *  与行情「涨红」同色，只靠颜色区分会误读（Doc/券商方案.md §11.5） */
+  function seatHtml(key) {
+    if (!key) return '<span class="seat-cell none">--</span>';
+    const b = brokerMeta[key];
+    const abbr = b ? b.abbr : key;
+    return `<span class="seat-cell" title="${esc(b ? b.name : key)}">${brokerIcon(key, 'xs')}<span class="seat-abbr">${esc(abbr)}</span></span>`;
+  }
+
+  /**
+   * 一张券商卡片。登录开户墙与转户弹窗共用同一份渲染：
+   * 图标 + 名称 + 人设 + 强项/代价 chip + 关键数值 + 拥挤度条（CSSOM 设宽度，CSP 禁内联样式）。
+   * @param {string} key
+   * @param {{mode?:'pick'|'view', dim?:boolean, tag?:string}} [opts]
+   */
+  function brokerCardHtml(key, opts) {
+    const o = opts || {};
+    const b = brokerMeta[key];
+    if (!b) return '';
+    const p = b.preview || {};
+    const tier = esc(b.crowdTier || 'normal');
+    const on = o.mode !== 'view' && key === pickedBroker;
+    const cls = ['broker-card'];
+    if (on) cls.push('on');
+    if (o.dim) cls.push('dim');
+    if (o.mode === 'view') cls.push('locked');
+    const week = brokerMeta.__weekly && brokerMeta.__weekly.key === key;
+    const cnt = (brokerMeta.__selected || {})[key] || 0;
+    return `<div class="${cls.join(' ')}" data-bk="${esc(key)}">
+      <div class="bk-top">
+        ${brokerIcon(key)}
+        <div>
+          <div class="bk-name">${esc(b.name)}<span class="bk-abbr">${esc(b.abbr)}</span></div>
+          <div class="bk-metrics">已有 ${b.virtualClients} 万客户${cnt > 0 ? ` · 本服 ${cnt} 人已选` : ''}</div>
+        </div>
+      </div>
+      <div class="bk-persona">${esc(b.persona)}</div>
+      <div class="bk-chips">
+        ${(b.strengths || []).slice(0, 2).map((s) => `<span class="chip good">${esc(s)}</span>`).join('')}
+        ${(b.costs || []).slice(0, 1).map((s) => `<span class="chip bad">${esc(s)}</span>`).join('')}
+        ${week ? '<span class="chip gold">本周之星 · 佣金减半</span>' : ''}
+        ${o.tag ? `<span class="chip">${esc(o.tag)}</span>` : ''}
+      </div>
+      <div class="bk-metrics">
+        佣金 <b>${fmtFeeRate(p.feeRate)}</b> · 冷却 <b>${(p.cooldownMs / 1000).toFixed(1)}s</b> ·
+        锁仓 <b>${(p.lockMs / 1000).toFixed(0)}s</b> · 融资 <b>${p.leverage}×</b><br>
+        保证金 <b>${Math.round((p.financeRatio || 0) * 100)}%</b> · 券源 <b>${p.lendCapacityPct}%</b> ·
+        策略 <b>${p.autoMax} 条</b>${p.newsLeadMs ? ` · 提前量 <b>${(p.newsLeadMs / 1000).toFixed(1)}s</b>` : ''}
+      </div>
+      <div class="bk-foot">
+        <span class="bk-crowd">拥挤度 ${b.crowdPct}%<i class="crowd-bar"><b data-w="${b.crowdPct}" data-tier="${tier}"></b></i></span>
+        <span class="crowd-tag ${tier}">${esc(b.crowdLabel)}</span>
+      </div>
+      <div class="bk-persona">适合：${esc(b.suitable)}</div>
+    </div>`;
+  }
+
+  /** 把卡片里的拥挤度条宽度用 CSSOM 设好（CSP 禁内联 style 属性） */
+  function paintCrowdBars(root) {
+    if (!root) return;
+    const TIERS = ['heavy', 'light', 'normal', 'subsidy'];
+    root.querySelectorAll('.crowd-bar b[data-w]').forEach((el) => {
+      const w = Number(el.dataset.w) || 0;
+      el.style.width = Math.max(2, Math.min(100, w)) + '%';
+      const t = String(el.dataset.tier || '');
+      el.className = TIERS.indexOf(t) >= 0 ? t : 'normal';
+    });
+  }
+
+  function renderBrokerWall() {
+    const wall = $('brokerWall');
+    if (!wall) return;
+    const keys = brokerKeys();
+    if (!keys.length) {
+      wall.innerHTML = '<div class="bk-persona">券商列表加载中…（若一直为空，请检查服务端 /api/brokers）</div>';
+      return;
+    }
+    wall.innerHTML = keys.map((k) => brokerCardHtml(k, { mode: 'pick' })).join('');
+    paintCrowdBars(wall);
+    wall.querySelectorAll('.broker-card').forEach((el) => {
+      el.addEventListener('click', () => {
+        pickedBroker = el.dataset.bk;
+        renderBrokerWall();
+      });
+    });
+  }
+
+  function brokerKeys() {
+    return Object.keys(brokerMeta).filter((k) => k.indexOf('__') !== 0);
+  }
+
+  function renderBrokerWeeklyHint() {
+    const el = $('brokerWeeklyHint');
+    const w = brokerMeta.__weekly;
+    if (!el) return;
+    if (!w || !w.key || !brokerMeta[w.key]) {
+      el.textContent = '';
+      return;
+    }
+    el.textContent = `本周之星：${brokerMeta[w.key].name}（佣金减半 · 额度 +0.5×）`;
+  }
+
   function bindLogin() {
-    const doLogin = () => {
-      const name = $('loginName').value.trim();
-      if (!name) {
-        toast('请输入账号', 'err');
+    // 输入时实时校验昵称，避免提交后才被打回
+    const nameEl = $('loginName');
+    nameEl.addEventListener('input', () => {
+      const v = nameEl.value.trim();
+      const hint = $('nickHint');
+      if (!v) {
+        hint.textContent = '';
+        hint.classList.remove('bad');
         return;
       }
-      // 输入名字即进入：同名永远回到同一个账户
-      apiPost('/api/login', { name })
+      // 已存在的账号可能是老档里的中文名（服务端会放行），所以这里只做**软提示**：
+      // 最终判定以服务端为准，避免把老账号的玩家挡在门外
+      const ok = NICK_RE.test(v);
+      hint.textContent = ok ? '' : '新账号需 3~16 位、字母开头，仅英文 / 数字 / _ / -';
+      hint.classList.toggle('bad', !ok);
+    });
+
+    const doLogin = (retried) => {
+      const name = nameEl.value.trim();
+      const err = $('loginErr');
+      err.hidden = true;
+      if (!name) {
+        toast('请输入昵称', 'err');
+        return;
+      }
+      if (!NICK_RE.test(name) && !retried) {
+        // 仍可能是老档的中文账号：让服务端裁决（它认识这个账号就放行）
+        err.hidden = false;
+        err.textContent = '昵称需 3~16 位、字母开头，仅英文 / 数字 / _ / -（老账号不受此限）';
+        return;
+      }
+      // 输入名字即进入：同名永远回到同一个账户。首次开户要一并提交券商（服务端强制）
+      const body = { name };
+      if (pickedBroker) body.broker = pickedBroker;
+      apiPost('/api/login', body)
         .then((r) => r.json())
         .then((res) => {
           if (!res.ok) {
-            toast(res.error || '登录失败', 'err');
+            if (res.needBroker) {
+              err.hidden = false;
+              err.textContent = res.error || '请选择一家券商开户';
+              return;
+            }
+            // 老账号带中文名：把昵称规则放过去，用服务端认得的名字重试一次
+            if (!retried && /昵称/.test(res.error || '')) {
+              doLogin(true);
+              return;
+            }
+            err.hidden = false;
+            err.textContent = res.error || '登录失败';
             return;
           }
           setIdentity(res.name, res.token);
@@ -230,9 +419,9 @@
         })
         .catch(() => toast('网络异常，请重试', 'err'));
     };
-    $('loginBtn').addEventListener('click', doLogin);
-    $('loginName').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doLogin();
+    $('loginBtn').addEventListener('click', () => doLogin(false));
+    nameEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doLogin(false);
     });
     $('switchBtn').addEventListener('click', () => {
       if (confirm('切换账号？当前账号将退出登录。')) {
@@ -278,6 +467,7 @@
       renderLending();
       renderOrderPanel();
       renderRisk();
+      renderSeats();
     } else {
       renderHome();
     }
@@ -383,7 +573,11 @@
   function relogin() {
     if (relogging) return;
     relogging = true;
-    apiPost('/api/login', { name: me })
+    const body = { name: me };
+    const account = state && state.account;
+    // 带上自己已选的券商：老档升级上来的账号可能还没选过，那时服务端会要求补选
+    if (account && account.broker && account.broker.key) body.broker = account.broker.key;
+    apiPost('/api/login', body)
       .then((r) => r.json())
       .then((res) => {
         relogging = false;
@@ -394,12 +588,14 @@
           connectSSE();
           return;
         }
-        // 名字不合法等：退回登录页
+        // 昵称不合法 / 需要补选券商：退回登录页（卡片墙就在那里）
         toast(res.error || '登录状态已失效，请重新登录', 'err');
         setIdentity('', '');
         es && es.close();
         $('app').classList.add('hidden');
         $('loginOverlay').classList.remove('hidden');
+        loadBrokers();
+        $('loginName').value = me || '';
       })
       .catch(() => {
         relogging = false;
@@ -457,6 +653,8 @@
     renderRank();
     renderAuto();
     renderOrderPanel();
+    renderMarginCall();
+    if (activeTab === 'seats') renderSeats();
 
     // 新消息提醒
     if (s.lastNews && s.lastNews.id !== lastNewsSeen) {
@@ -580,7 +778,18 @@
     if (!d) {
       return `<tr class="${clsName}"><td class="lv">${side}${lv}</td><td class="px">--</td><td class="qty">--</td></tr>`;
     }
-    return `<tr class="${clsName}"><td class="lv">${side}${lv}</td><td class="px">${fmtP(d.price)}</td><td class="qty">${fmtBookQty(d.qty)}</td></tr>`;
+    // 该档挂单占比最高的前 2 家券商（§11.3.1）。这一处按设计稿**只给小图标 + hover 全名**——
+    // 五档的价格列很窄，再塞两字简称会把价格挤到看不清；简称留给逐笔与席位榜。
+    // 服务端只在开席位时下发 brokers 段，老服务端没有就只显示价格与量
+    const bks = (d.brokers || [])
+      .map((b) => {
+        const meta = brokerMeta[b.key] || {};
+        return `<span class="depth-seat" title="${esc(meta.name || b.key)} 本档占 ${b.pct}%">${brokerIcon(b.key, 'xs')}</span>`;
+      })
+      .join('');
+    return `<tr class="${clsName}"><td class="lv">${side}${lv}</td><td class="px">${fmtP(d.price)}${
+      bks ? `<span class="depth-brokers">${bks}</span>` : ''
+    }</td><td class="qty">${fmtBookQty(d.qty)}</td></tr>`;
   }
   function emptyDepth() {
     return '<tr><td colspan="3" class="lv center">--</td></tr>';
@@ -598,6 +807,8 @@
         <span class="${cls(t.price - m.prevClose)}">${fmtP(t.price)}</span>
         <span>${fmtQty(t.qty)}</span>
         <span class="side-${side}">${side === 'B' ? '买' : '卖'}</span>
+        <span>${seatHtml(t.buyBroker)}</span>
+        <span>${seatHtml(t.sellBroker)}</span>
       </div>`;
     });
     $('tape').innerHTML = rows.join('') || '<div class="tape-row"><span class="time">暂无成交</span></div>';
@@ -875,20 +1086,37 @@
     const list = filterNews(items || []).slice(0, limit || undefined);
     return list
       .map(
-        (n) => `<li class="${n.dir > 0 ? 'npos' : 'nneg'}">
+        (n) => `<li class="${n.dir > 0 ? 'npos' : n.dir < 0 ? 'nneg' : ''}${n.early ? ' nearly' : ''}">
             <span class="ntime">${fmtTime(n.t)}</span>
             <span class="ntype">${esc(n.type)}</span>
             ${newsTag(n)}
             ${n.session && n.session !== '盘中' ? `<span class="nsess">${esc(n.session)}</span>` : ''}
+            ${n.early ? `<span class="nearly-tag">${n.masked ? '未公开' : '提前'}</span>` : ''}
             <span class="ntext">${esc(n.text)}</span>
           </li>`
       )
       .join('');
   }
 
+  /**
+   * 泄露期的「异动提示」（消息分层 §7.2）：不点方向、不点原因、不点谁。
+   * 它存在的意义是让「偷偷买进」不沦为纯黑箱——普通玩家至少知道这只股票有事
+   */
+  function newsHintsHtml() {
+    const hints = (state && state.newsHints) || [];
+    if (!hints.length) return '';
+    return hints
+      .map(
+        (h) =>
+          `<li class="news-hint">⚡ ${esc(h.text)}<span class="panel-sub">距公开约 ${Math.max(0, Math.round((h.leftMs || 0) / 1000))} 秒</span></li>`
+      )
+      .join('');
+  }
+
   function renderNews() {
-    const items = state.news || [];
-    $('newsList').innerHTML = newsRowsHtml(items) || '<li class="empty">暂无消息</li>';
+    const items = (state && state.news) || [];
+    $('newsList').innerHTML =
+      newsHintsHtml() + (newsRowsHtml(items) || '<li class="empty">暂无消息</li>');
   }
 
   // ---------- 前十大股东 ----------
@@ -1356,15 +1584,21 @@
   }
 
   // ---------- 排行 ----------
-  /** 排行行 HTML（主页只取前几行） */
+  /** 排行行 HTML（主页只取前几行）。带券商简称与**组内名次**——组内名次是软分流的关键
+   *  （冷门券商的组内名次天然更容易靠前，争榜的动机会把人往冷门赶，§5.3） */
   function rankRowsHtml(limit) {
     const rows = (state.players || []).slice(0, limit || undefined);
     return rows
       .map((p, i) => {
         const mine = p.name === me;
+        const b = p.broker ? brokerMeta[p.broker] : null;
+        const tag = b
+          ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
+             <span class="panel-sub">组内 #${p.brokerRank || 1}</span>${p.star > 1 ? `<span class="mb-star flat">${'★'.repeat(Math.min(p.star, 5))}</span>` : ''}`
+          : '<span class="panel-sub">未开户</span>';
         return `<tr${mine ? ' class="row-mine"' : ''}>
           <td>${i + 1}</td>
-          <td>${esc(p.name)}${mine ? '（我）' : ''}</td>
+          <td>${esc(p.name)}${mine ? '（我）' : ''} ${tag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
         </tr>`;
       })
@@ -1373,6 +1607,33 @@
 
   function renderRank() {
     $('rankBody').innerHTML = rankRowsHtml() || '<tr><td colspan="3" class="empty">暂无玩家</td></tr>';
+    renderBrokerBoard();
+  }
+
+  /** 券商榜（§5.3）：总榜 + 券商榜 + 组内榜。组内榜就是玩家表里的「组内 #N」 */
+  function renderBrokerBoard() {
+    const rows = (state && state.brokerBoard) || [];
+    const body = $('brokerBoardBody');
+    if (!body) return;
+    const myKey = state && state.account && state.account.broker ? state.account.broker.key : null;
+    $('brokerBoardMeta').innerHTML =
+      rows.length
+        ? `<span class="panel-sub">按券商聚合本服玩家总权益；冷门券商的组内名次天然更容易靠前</span>`
+        : '';
+    body.innerHTML =
+      rows
+        .map((g) => {
+          const b = brokerMeta[g.key] || {};
+          const mine = g.key === myKey;
+          return `<tr class="${mine ? 'row-mine' : ''}">
+            <td>${g.rank}</td>
+            <td><span class="bk-inline">${brokerIcon(g.key, 'xs')}${esc(b.name || g.key)}</span></td>
+            <td>${g.clients}</td>
+            <td>${fmtMoney(g.equity)}</td>
+            <td>${g.top ? esc(g.top) : '--'}</td>
+          </tr>`;
+        })
+        .join('') || '<tr><td colspan="5" class="empty">暂无数据</td></tr>';
   }
 
   // ---------- 主页：交易大厅 ----------
@@ -1478,10 +1739,286 @@
     `;
   }
 
+  /**
+   * 「我的券商」卡（§6 前端对接点）：名称 / 声誉星级 / 拥挤度 / 我的特权清单 /
+   * 本周加成 / 免息券 / 转户入口。数值全部来自服务端 account.broker，
+   * **客户端不自己算券商规则**（算两遍必然与服务端漂移）。
+   */
+  function renderMyBroker() {
+    const el = $('myBrokerCard');
+    if (!el) return;
+    const a = state && state.account;
+    const bk = a && a.broker;
+    if (!bk || !bk.key) {
+      el.innerHTML = '<div class="panel-title"><span>我的券商</span></div><div class="empty">未开户</div>';
+      return;
+    }
+    const b = brokerMeta[bk.key] || {};
+    const starMax = bk.starMax || 5;
+    let stars = '';
+    for (let i = 1; i <= starMax; i++) stars += i <= bk.star ? '★' : '<span class="off">★</span>';
+    const pr = bk.progress;
+    const pct = bk.intensity || 0;
+
+    const cells = [
+      ['佣金', fmtFeeRate(bk.feeRate), bk.weekly && bk.weekly.isStar ? '本周半价' : ''],
+      ['下单冷却', (bk.cooldownMs / 1000).toFixed(1) + 's', ''],
+      ['买入锁仓', (bk.lockMs / 1000).toFixed(0) + 's', ''],
+      ['融资额度', bk.leverage + '×', '自备 ' + Math.round(bk.financeRatio * 100) + '%'],
+      ['保证金', Math.round(bk.marginRatio * 100) + '%', ''],
+      ['维持率', Math.round(bk.maintenance * 100) + '%', bk.features && bk.features.zeroBufferLiquidation ? '零缓冲' : ''],
+      ['融券券源', bk.lendCapacityPct + '%', bk.lendRateMul > 1 ? '券息 ×' + bk.lendRateMul : ''],
+      ['策略上限', bk.autoMax + ' 条', bk.autoSlots + ' 槽'],
+    ];
+    const privRows = (bk.privileges || [])
+      .map(
+        (r) => `<div class="mb-priv-row">
+          <label>${esc(r.label)}</label>
+          <span class="pv">${esc(r.now)}</span>
+          <i class="mb-bar"><b data-w="${r.pct}"></b></i>
+          <span class="pfull">满额 ${esc(r.full)}</span>
+          ${r.extra ? `<span class="chip gold">${esc(r.extra)}</span>` : ''}
+        </div>`
+      )
+      .join('');
+
+    const nextStar = pr
+      ? `<div class="mb-note">
+           距 ${pr.next}★：成交额 ${fmtAmount(pr.volume)} / ${fmtAmount(pr.volumeNeed)}${
+             pr.profitNeed > 0 ? `，累计盈利 ${fmtMoney(pr.profit)} / ${fmtMoney(pr.profitNeed)}` : ''
+           }
+           ${pr.noLiquidation ? `（且不能有爆仓记录，当前 ${pr.liquidations} 次）` : ''}
+           ${pr.cancelRate > 0.8 ? ` · 撤单率 ${(pr.cancelRate * 100).toFixed(0)}%` : ''}
+         </div>`
+      : '<div class="mb-note">已满级</div>';
+
+    const coupon = bk.coupon || {};
+    const couponBtn = coupon.perDay
+      ? `<button class="mini-btn" id="mbCouponBtn" ${coupon.available ? '' : 'disabled'}>
+           ${coupon.active ? '今日利息已全免' : coupon.available ? `用免息券（剩 ${coupon.available ? 1 : 0} 张）` : '今日券已用'}
+         </button>`
+      : '';
+    const weekly = bk.weekly && bk.weekly.key
+      ? `<div class="mb-note">本周之星：<b>${esc((brokerMeta[bk.weekly.key] || {}).name || bk.weekly.key)}</b>${
+          bk.weekly.isStar ? '（就是本家：佣金减半 · 额度 +0.5×）' : `（下周 ${esc((brokerMeta[bk.weekly.nextKey] || {}).name || bk.weekly.nextKey)}）`
+        }</div>`
+      : '';
+
+    el.className = 'panel home-card span-3 my-broker-card';
+    el.innerHTML = `
+      <div class="panel-title">
+        <span>我的券商</span>
+        <span class="panel-sub">${esc(b.slogan ? '「' + b.slogan + '」' : '')}</span>
+      </div>
+      <div class="mb-grid">
+        <div class="mb-id">
+          ${brokerIcon(bk.key, 'lg')}
+          <div>
+            <div class="mb-name">${esc(bk.name || bk.key)}<span class="mb-star">${stars}</span></div>
+            <div class="mb-slogan">${esc(b.abbr || '')}${b.scale ? ' · ' + esc(b.scale) + '券商' : ''}</div>
+            <div class="mb-sub">
+              拥挤度 ${bk.crowdPct}% · <span class="crowd-tag ${esc(bk.crowdTier || 'normal')}">${esc(bk.crowdLabel || '')}</span>
+              · 特权强度 ${pct}%
+            </div>
+            <div class="mb-sub">${esc(b.persona || '')}</div>
+          </div>
+        </div>
+        <div>
+          <div class="mb-cells">
+            ${cells
+              .map(
+                (c) =>
+                  `<div class="mb-cell"><label>${esc(c[0])}</label><b>${esc(String(c[1]))}</b>${c[2] ? `<i>${esc(c[2])}</i>` : ''}</div>`
+              )
+              .join('')}
+          </div>
+          ${privRows ? `<div class="mb-priv gap-top">${privRows}</div>` : ''}
+        </div>
+        <div>
+          ${nextStar}
+          ${weekly}
+          <div class="mb-note">${(b.costs || []).map((c) => '· ' + esc(c)).join('<br>')}</div>
+          <div class="mb-actions">
+            <button class="mini-btn" id="mbTransferBtn">转户</button>
+            ${couponBtn}
+          </div>
+        </div>
+      </div>
+    `;
+    paintCrowdBars(el);
+    el.querySelectorAll('.mb-bar b[data-w]').forEach((n) => {
+      n.style.width = Math.max(2, Math.min(100, Number(n.dataset.w) || 0)) + '%';
+    });
+    const tb = $('mbTransferBtn');
+    if (tb) tb.addEventListener('click', openTransfer);
+    const cb = $('mbCouponBtn');
+    if (cb) cb.addEventListener('click', useCoupon);
+  }
+
+  // ---------- 转户 ----------
+  function openTransfer() {
+    const a = state && state.account;
+    if (!a || !a.broker) return;
+    renderTransferWall();
+    $('transferOverlay').classList.remove('hidden');
+  }
+  function closeTransfer() {
+    $('transferOverlay').classList.add('hidden');
+  }
+  function renderTransferWall() {
+    const a = state && state.account;
+    const bk = a && a.broker;
+    if (!bk) return;
+    const opts = {};
+    for (const o of bk.transfer.options || []) opts[o.key] = o;
+    const keys = brokerKeys();
+    const wall = $('transferWall');
+    if (!wall) return;
+    wall.innerHTML = keys
+      .map((k) => {
+        const o = opts[k] || {};
+        let tag = '';
+        if (k === bk.key) tag = '当前券商';
+        else if (o.free) tag = '免费重选';
+        else if (o.ok) tag = '转户费 ¥' + fmtMoney(o.fee);
+        else tag = o.reason || '暂不可转';
+        return brokerCardHtml(k, {
+          mode: k === bk.key ? 'view' : 'pick',
+          dim: k !== bk.key && !o.ok,
+          tag,
+        });
+      })
+      .join('');
+    paintCrowdBars(wall);
+    $('transferSub').textContent = `${bk.name} · ${bk.star}★ · 总资产 ¥${fmtMoney(a.equity)}`;
+    $('transferNote').innerHTML =
+      `转户费 = 总资产 × ${((bk.transfer.feeRate || 0.001) * 100).toFixed(1)}%（上限 ¥${fmtMoney(bk.transfer.feeCap)}）` +
+      ` · 冷却 1 个交易日 · 开户首日内可免费重选 1 次<br>` +
+      `转户会**清空离开那家与目标那家**的声誉星级与特权进度——回到老东家也要重新攒` +
+      (bk.transfer.freeReselectUsed ? '<br>（本次免费重选机会已用掉）' : '');
+    wall.querySelectorAll('.broker-card').forEach((el) => {
+      const key = el.dataset.bk;
+      if (key === bk.key) return;
+      const o = opts[key] || {};
+      if (!o.ok) return;
+      el.addEventListener('click', () => doTransfer(key, o));
+    });
+  }
+
+  function doTransfer(key, o) {
+    const msg = o.free
+      ? `确认免费转到 ${(brokerMeta[key] || {}).name || key}？（每人仅 1 次，且仅限开户首日）`
+      : `确认转户到 ${(brokerMeta[key] || {}).name || key}？\n转户费 ¥${fmtMoney(o.fee)}，并清空两边的星级与特权进度。`;
+    if (!confirm(msg)) return;
+    apiPost('/api/broker/transfer', { broker: key })
+      .then((r) => r.json())
+      .then((res) => {
+        if (!res.ok) {
+          toast(res.error || '转户失败', 'err');
+          return;
+        }
+        toast(res.free ? '已免费转户到 ' + key : `已转户，费用 ¥${fmtMoney(res.fee)}`, 'ok');
+        closeTransfer();
+        loadInitial();
+      })
+      .catch(() => toast('网络异常', 'err'));
+  }
+
+  function useCoupon() {
+    apiPost('/api/broker/coupon', {})
+      .then((r) => r.json())
+      .then((res) => {
+        if (!res.ok) {
+          toast(res.error || '免息券不可用', 'err');
+          return;
+        }
+        toast('今日融资 / 融券利息全免已生效', 'ok');
+      })
+      .catch(() => toast('网络异常', 'err'));
+  }
+
+  function bindTransfer() {
+    const cancel = $('transferCancelBtn');
+    if (cancel) cancel.addEventListener('click', closeTransfer);
+    const ov = $('transferOverlay');
+    if (ov) {
+      ov.addEventListener('click', (e) => {
+        if (e.target === ov) closeTransfer();
+      });
+    }
+  }
+
+  // ---------- 席位榜 / 龙虎榜 ----------
+  function renderSeats() {
+    const m = curMarket();
+    const seats = m && m.seats;
+    const meta = $('seatMeta');
+    if (!meta) return;
+    if (!seats) {
+      meta.innerHTML = '<span class="panel-sub">本服务端未开启席位玩法</span>';
+      $('seatBody').innerHTML = '<tr><td colspan="6" class="empty">暂无数据</td></tr>';
+      $('surgeWrap').hidden = true;
+      return;
+    }
+    const myKey = state && state.account && state.account.broker ? state.account.broker.key : null;
+    meta.innerHTML =
+      `<span class="panel-sub">${esc(m.name)} · 当日成交额 ${fmtAmount(seats.total)} · 涨跌 ` +
+      `<b class="${cls(m.change)}">${m.changePct >= 0 ? '+' : ''}${m.changePct.toFixed(2)}%</b></span>` +
+      (myKey ? `<span class="chip">我的席位：${esc((brokerMeta[myKey] || {}).abbr || myKey)}</span>` : '');
+    $('seatBody').innerHTML = (seats.rows || [])
+      .map((r) => {
+        const mine = r.key === myKey;
+        return `<tr class="${mine ? 'row-mine' : ''}">
+          <td>${r.rank}</td>
+          <td><span class="bk-inline">${brokerIcon(r.key, 'xs')}${esc(r.name)}</span></td>
+          <td>${fmtAmount(r.buyAmt)}</td>
+          <td>${fmtAmount(r.sellAmt)}</td>
+          <td class="seat-net ${r.net >= 0 ? 'pos' : 'neg'}">${r.net >= 0 ? '+' : '-'}${fmtAmount(Math.abs(r.net))}</td>
+          <td>${r.pct}%</td>
+        </tr>`;
+      })
+      .join('') || '<tr><td colspan="6" class="empty">当日暂无成交</td></tr>';
+
+    const wrap = $('surgeWrap');
+    wrap.hidden = !seats.surge;
+    if (seats.surge && seats.top) {
+      $('surgeSub').textContent = `当日 ${seats.changePct >= 0 ? '+' : ''}${seats.changePct.toFixed(2)}%，披露买卖前五席位`;
+      const rowsOf = (arr) =>
+        (arr || [])
+          .map(
+            (r, i) =>
+              `<tr><td>${i + 1}</td><td><span class="bk-inline">${brokerIcon(r.key, 'xs')}${esc(r.abbr)}</span></td><td>${fmtAmount(r.amt)}</td></tr>`
+          )
+          .join('') || '<tr><td colspan="3" class="empty">--</td></tr>';
+      $('surgeBuyBody').innerHTML = rowsOf(seats.top.buy);
+      $('surgeSellBody').innerHTML = rowsOf(seats.top.sell);
+    }
+  }
+
+  /** 追保预警横幅（§7 彩蛋）：文案随券商风格变。天疯没有预警档，永远不会出现 */
+  function renderMarginCall() {
+    const el = $('marginCallBanner');
+    if (!el) return;
+    const mc = state && state.account && state.account.marginCall;
+    if (!mc) {
+      el.hidden = true;
+      return;
+    }
+    const style = { zhongxin: '正式公函', tianfeng: '跑', dongfeng: '客服', huatai: 'App 推送', zhaoshang: '客户经理' };
+    const who = style[mc.name ? mc.broker : ''] || '券商';
+    el.hidden = false;
+    $('marginCallText').textContent =
+      `${esc(mc.name)}（${who}）追加保证金通知：${esc(mc.stockName || '')}` +
+      `${mc.side === 'short' ? '空头' : '融资多头'}维持率已跌破 ${Math.round(mc.maintenance * 100)}%，` +
+      `需补权益 ¥${fmtMoney(mc.need)}；再跌 ¥${fmtMoney(Math.max(0, mc.left))} 触发强平`;
+    $('marginCallLeft').textContent = '';
+  }
+
   function renderHome() {
     const a = state && state.account;
     if (!a) return;
     const markets = marketList(state);
+
     const players = state.players || [];
     const myIdx = players.findIndex((p) => p.name === me);
     const pnl = (a.longPnl || 0) + (a.shortPnl || 0);
@@ -1494,6 +2031,7 @@
     $('addCashBtn').hidden = !(state.rules.deposit && state.rules.deposit.enabled);
 
     renderIndexCard();
+    renderMyBroker();
 
     // 市场概览：全部按市场维度统计，与任何单只股票解耦
     let up = 0;
@@ -1602,7 +2140,8 @@
 
     const news = filterNews(state.news || []).slice(0, HOME_NEWS_LIMIT);
     $('homeNewsSub').textContent = (state.news || []).length ? `最近 ${news.length} 条` : '';
-    $('homeNews').innerHTML = newsRowsHtml(news) || '<li class="empty">暂无消息</li>';
+    $('homeNews').innerHTML =
+      newsHintsHtml() + (newsRowsHtml(news) || '<li class="empty">暂无消息</li>');
   }
 
   function bindHome() {
@@ -2052,6 +2591,7 @@
           const m = curMarket();
           if (m) loadHolders(m.stockId, true);
         }
+        if (activeTab === 'seats') renderSeats();
         drawChart();
       });
     });
@@ -3231,8 +3771,11 @@
     bindHolders();
     bindCrosshair();
     bindChartMode();
+    bindTransfer();
     renderChartMode();
     setInterval(tickUI, 200);
+    // 券商卡片墙在**登录之前**就要渲染，所以先拉公开的 /api/brokers，再决定要不要弹登录
+    loadBrokers();
     if (me) {
       apiPost('/api/login', { name: me })
         .then((r) => r.json())
@@ -3243,8 +3786,10 @@
           } else {
             setIdentity('', '');
             $('loginOverlay').classList.remove('hidden');
+            $('loginName').value = me;
+            loadBrokers();
             $('loginName').focus();
-            toast(res.error || '请重新登录', 'err');
+            if (res.error) toast(res.error, 'err');
           }
         })
         .catch(() => {

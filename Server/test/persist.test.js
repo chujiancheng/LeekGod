@@ -67,9 +67,9 @@ g1.day.reanchor(Date.now() - 120000);
 g1.stop(); // 测试里手动 tick，不要 setInterval
 
 console.log('\n[2] 玩家下单产生持仓 / 空头 / 活动委托');
-const login = g1.login('测试玩家');
+const login = g1.login('tester', 'zhaoshang');
 assert(login.ok, '玩家登录成功');
-const acc1 = g1.store.get('测试玩家');
+const acc1 = g1.store.get('tester');
 assert(!!acc1, '账户已创建');
 
 // 加钱必须随账户落盘：漏标脏就会在重启后凭空消失
@@ -98,10 +98,10 @@ const r2res = P(g1).place(acc1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: re
 assert(r2res.ok, `远离盘口的买单被接受${r2res.ok ? '' : ': ' + r2res.error}`);
 const restingId = r2res.ok ? r2res.order.id : '';
 
-// 开空：换一个只做空的玩家账户成交（测试玩家已持多头，再卖开会撞同股多空互斥）
-const loginS = g1.login('空头玩家');
+// 开空：换一个只做空的玩家账户成交（tester已持多头，再卖开会撞同股多空互斥）
+const loginS = g1.login('shorteruser', 'zhaoshang');
 assert(loginS.ok, '第二个玩家登录成功');
-const accS = g1.store.get('空头玩家');
+const accS = g1.store.get('shorteruser');
 const sellPrice = P(g1).roundPrice(P(g1).lastPrice * 0.8);
 const r3 = P(g1).place(accS, { action: ACTIONS.SELL_OPEN, qty: 1000, price: sellPrice, now: Date.now(), noCooldown: true });
 assert(r3.ok, `开空委托被接受${r3.ok ? '' : ': ' + r3.error}`);
@@ -166,8 +166,8 @@ g2.start();
 g2.day.reanchor(Date.now() - 120000);
 g2.stop();
 
-const acc2 = g2.store.get('测试玩家');
-const accS2 = g2.store.get('空头玩家');
+const acc2 = g2.store.get('tester');
+const accS2 = g2.store.get('shorteruser');
 assert(!!acc2, '玩家账户被恢复');
 assert(!!accS2, '做空玩家账户被恢复');
 assert(!!g2.store.get(`${STOCK.alias}·机构1`) && !!g2.store.get(`${STOCK.alias}·散户220`), 'NPC 账户被恢复');
@@ -228,7 +228,7 @@ assert(snap2.markets.get(STOCK.id).tape[0].trade_seq >= 1 && snap2.markets.get(S
 
 console.log('\n[7] 令牌与会话（重启不用重新登录）');
 assert(!!g2.accountFor(login.token), '原会话令牌可直接使用');
-assert(g2.accountFor(login.token).name === '测试玩家', '令牌绑定到正确账户');
+assert(g2.accountFor(login.token).name === 'tester', '令牌绑定到正确账户');
 
 console.log('\n[8] 成交与委托记录回填');
 assert(acc2.tradeHistory.length > 0, `成交记录恢复 ${acc2.tradeHistory.length} 条`);
@@ -245,10 +245,10 @@ console.log('\n[9] 账实守恒：重启不产生也不吞掉任何资金和股�
 const accRows = new Map(
   p2.db.prepare('SELECT name, cash, order_frozen FROM accounts').all().map((r) => [r.name, r])
 );
-const pRow = accRows.get('测试玩家');
+const pRow = accRows.get('tester');
 assert(!!pRow && Math.abs(pRow.cash - acc1.cash) < 1e-9, `玩家现金原样落盘 ${pRow && pRow.cash}`);
 assert(!!pRow && pRow.order_frozen === acc1.orderFrozen, `玩家挂单冻结原样落盘 ${pRow && pRow.order_frozen}`);
-const depRow = p2.db.prepare("SELECT deposited FROM accounts WHERE name = '测试玩家'").get();
+const depRow = p2.db.prepare("SELECT deposited FROM accounts WHERE name = 'tester'").get();
 assert(!!depRow && depRow.deposited === before.deposited, `累计加钱原样落盘 ${depRow && depRow.deposited}`);
 
 let npcBad = null;

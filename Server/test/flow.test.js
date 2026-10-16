@@ -233,9 +233,9 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
   g.stop();
 }
 
-console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）');
+console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列可原地升级');
 {
-  assert(SCHEMA_VERSION === 3, `存档表结构版本为 3（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 4, `存档表结构版本为 4（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -250,6 +250,48 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   }
   assert(/表结构版本为 2/.test(msg), `版本 2 的旧档被明确拒绝：${msg.slice(0, 40)}…`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
+
+  // 版本 3 → 4 走的是**原地 ALTER 升级**（券商那批列全是可空/带默认值，不用清库）。
+  // 这条分支存在的意义是：引入券商不必强制清掉正在跑的那一局
+  const FILE3 = path.join(os.tmpdir(), `gushen-flow-v3-${process.pid}.db`);
+  for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });
+  const db3 = new Database(FILE3);
+  db3.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE accounts (
+      name TEXT PRIMARY KEY, is_npc INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL,
+      cash REAL NOT NULL, order_frozen REAL NOT NULL DEFAULT 0, short_margin REAL NOT NULL DEFAULT 0,
+      realized_pnl REAL NOT NULL DEFAULT 0, initial_long INTEGER NOT NULL DEFAULT 0,
+      last_order_at INTEGER, created_at INTEGER NOT NULL, deposited REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE trades (
+      id INTEGER PRIMARY KEY, account TEXT NOT NULL, role TEXT NOT NULL, order_id TEXT NOT NULL,
+      stock_id TEXT NOT NULL, action TEXT NOT NULL, side TEXT NOT NULL, price REAL NOT NULL,
+      qty INTEGER NOT NULL, fee REAL NOT NULL DEFAULT 0, trade_seq INTEGER NOT NULL, t INTEGER NOT NULL
+    );
+  `);
+  db3.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '3')").run();
+  db3.prepare(
+    'INSERT INTO accounts (name, role, cash, created_at, realized_pnl) VALUES (?,?,?,?,?)'
+  ).run('老玩家', 'player', 123456, 1, 0);
+  db3.close();
+  let upMsg = '';
+  let db4 = null;
+  try {
+    db4 = openDatabase(FILE3);
+  } catch (e) {
+    upMsg = e.message;
+  }
+  assert(!upMsg && !!db4, `版本 3 的旧档被原地升级而不是拒绝：${upMsg}`);
+  if (db4) {
+    const v = db4.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+    assert(Number(v.value) === 4, `升级后版本号写成 4（实际 ${v.value}）`);
+    const row = db4.prepare('SELECT * FROM accounts WHERE name = ?').get('老玩家');
+    assert(row && row.cash === 123456, '升级保留了原有账户数据');
+    assert(row.broker === null, '老账号的 broker 为 NULL（表示还没选过券商）');
+    db4.close();
+  }
+  for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

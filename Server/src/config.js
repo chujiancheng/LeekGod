@@ -641,6 +641,40 @@ module.exports = {
       lunch: { minIntervalMs: 18000, maxIntervalMs: 35000, scopeWeights: { 全体: 0.35, 机构: 0.45, 散户: 0.2 } },
       night: { minIntervalMs: 8000, maxIntervalMs: 15000, scopeWeights: { 全体: 0.3, 机构: 0.5, 散户: 0.2 } },
     },
+
+    // ---------------- 消息分层（信息不对称，见 Doc/消息分层方案.md） ----------------
+    //
+    // 三段式生命周期：诞生 t0 → 内幕可见 t1 → 公开 t2 → 过期 until。
+    // **泄露期 [t1, t2) 不可见**是三段式的灵魂：消息此刻已经在驱动机构 NPC 的公允价与
+    // 报价（股价先动），但还没进公共 tape、也没经 SSE 广播（玩家只看到异动、看不到原因）。
+    //
+    // 实现口径 = 「相对公开时刻 t2 提前」：`publicAt = t + leadMax`，各等级在
+    // `publicAt - lead[tier]` 起可见。于是
+    //   孕育期 = [t0, publicAt − lead_inst)、泄露期 = [.., publicAt)、公开期 = [publicAt, until)。
+    lead: {
+      insiderMs: 6000, // L0 内幕（机构里再抽 insiderFrac 的一小撮）
+      instMs: 4000, // L1 机构（现有 type==='inst' 的聪明钱）
+      vipMs: 3000, // L2 情报玩家（招伤满额；按声誉星级 1/4 递进，见 broker.js）
+      publicMs: 0, // L3 公众
+    },
+    // 提前量按 scope 折扣：政策/宏观的内幕就是不存在（恒 0，完全维持现状）；
+    // 研报/调研/大宗本来就是机构先知道（全额）；股吧小道本就是传言（打折）
+    leadByScope: { 全体: 0, 机构: 1.0, 散户: 0.5 },
+    minLeadMs: 1400, // 最小生效提前量；折算后不足此值一律抬到它（否则「名义有、实际看不见」）
+    insiderFrac: 0.1, // 机构里再抽多少比例当 L0（10 股各 10 个机构 → 每股 1 个）
+    // 异动提示（§7.2 公平窗口）：个股在泄露期出现异动时给公众一条**模糊**提示——
+    // 不点方向、不点原因、不说是谁。「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割。
+    // minLeftMs > 0 时只在距公开不足那么久才提示（0 = 整个泄露期都提示）
+    irregularHint: true,
+    irregularHintMinMs: 0,
+    // 合规层（§8.2）：泄露期针对该标的的成交额超阈值 → 罚没 / 降级 / 扣星。
+    // 前提是「玩家能提前」且渠道是灰色的，所以与内幕购买渠道（v3）同批开，这里默认关
+    compliance: {
+      enabled: false,
+      penaltyRate: 0.4,
+      cooldownMs: 60000,
+      leakTurnoverLimit: 3000000,
+    },
   },
 
   // 玩家自动化交易（服务端主循环每 tick 驱动，玩家下线照常执行）
@@ -669,4 +703,300 @@ module.exports = {
     dailyBarsKeep: 260, // 日线（K 线）保留根数：内存与存档同一个上限，约 45 小时的游戏时间
     depthLevels: 5, // 五档盘口
   },
+
+  // ------------------------------------------------------------------
+  // 券商（出身门派）
+  //
+  // 设计见 Doc/券商方案.md。三条硬约束写在代码里：
+  // ① 每家的 overrides 只做「覆盖」——没写的键一律回落到上面的全局默认值
+  //    （两级兜底，解析逻辑全在 broker.js，market/npc/auto 只读解析结果）；
+  // ② 结构按 N 家设计：加第 7 家只需往 list 里再加一条，前端自适应网格不用改；
+  // ③ 每家只强一个维度、只残一个维度，且至少有一项全服垫底（无支配选项）。
+  //
+  // 只有「额度 / 券源 / 消息提前量」走**声誉星级 1/4 递进**（§9 D7：新手拿到的是
+  // 「钟信 Lite」，特权要靠玩出来）；规模与风控属性（冷却、锁仓、强平线、禁买名单、
+  // 券息倍率）不随星级变。方向规则见 broker.privilege：**好于基准才递进，差于基准立刻全量**。
+  // ------------------------------------------------------------------
+  brokers: {
+    enabled: true,
+    // 策略槽的换算基准：老配置里只有一个「策略总条数」上限（auto.maxPerAccount），
+    // 而设计稿按「槽位」说话（基准 2 槽）。两者用比例换算保持等价：
+    //   实际条数上限 = round(auto.maxPerAccount × 该券商槽位 / baseSlots)
+    // 于是基准券商仍是 20 条（老玩家能力不被削），滑泰 = 40 条（自动化之王）
+    baseSlots: 2,
+
+    // 拥挤税档位（乘数）。拥挤度 ≥ min 即落该档，从上往下取第一个命中。
+    // 只惩罚「佣金」与「券源」两项——**不做报单延迟**（§9 D4：不做承诺不了的效果）
+    crowdTiers: [
+      { key: 'heavy', label: '重罚', min: 0.5, feeMul: 1.3, lendMul: 0.7 },
+      { key: 'light', label: '轻罚', min: 0.3, feeMul: 1.15, lendMul: 0.85 },
+      { key: 'normal', label: '中性', min: 0.2, feeMul: 1, lendMul: 1 },
+      { key: 'subsidy', label: '补贴', min: 0, feeMul: 0.8, lendMul: 1, freeCoupons: 1 },
+    ],
+    // 拥挤度是券商的**固有属性**（虚拟规模档决定的固定值，见 §5.1），
+    // 不随本服玩家选择变化——真实占比在小服里就是噪声，只用于选择页展示（§9 D3）
+    crowdSource: 'static',
+
+    // 声誉星级（§5.4 / §9 D7）：按**本券商**的累计成交额 + 累计盈利 + 有无爆仓记录评级。
+    // 每级解锁该券商特权的 1/4 强度：intensity = min(star, maxPrivilegeStar) / maxPrivilegeStar
+    // → 1★ 1/4、2★ 2/4、3★ 3/4、4★ 满额、5★ 同满额（另给「标的方向」）
+    star: {
+      enabled: true,
+      max: 5,
+      maxPrivilegeStar: 4, // 到 4★ 特权给满，5★ 只加「方向可见」
+      // 从 2★ 起每条给出晋级门槛，必须同时满足 volume/profit 且爆仓次数 ≤ maxLiquidations
+      levels: [
+        { star: 2, volume: 5000000, profit: 0, maxLiquidations: null },
+        { star: 3, volume: 20000000, profit: 100000, maxLiquidations: null },
+        { star: 4, volume: 80000000, profit: 500000, maxLiquidations: 0 },
+        { star: 5, volume: 300000000, profit: 2000000, maxLiquidations: 0 },
+      ],
+      // 合规分只做展示（§5.4 提到撤单率，但 §9 D7 的定稿曲线只有量/盈亏/爆仓，
+      // 不另造一条没拍过板的降星规则）
+      compliance: { cancelRateWarn: 0.8 },
+    },
+
+    // 每周之星（§5.5 / §9 D7）：6 家按周轮转、一周一家不重复，
+    // 加成 = 佣金减半 + 融资额度 +0.5×，轮换表提前一周在主页公布。
+    // 「周」按**交易日**算（游戏内一天 620 秒），所以一周 ≈ 72 分钟真实时间
+    weekly: {
+      enabled: true,
+      daysPerWeek: 7,
+      feeMul: 0.5, // 当周之星佣金减半
+      financeBonus: 0.5, // 融资额度 +0.5 倍
+      order: ['zhongxin', 'huatai', 'zhaoshang', 'tianfeng', 'haitong', 'dongfeng'],
+    },
+
+    // 转户（§5.2 / §9 D5）：定位是「认真选一次」的承诺装置，成本要「有点痛但不劝退」
+    transfer: {
+      feeRate: 0.001, // 转户费 = 总资产 × 0.1%
+      feeCap: 50000, // 上限 5 万（大资金不被薅到肉疼，也不至于随便跳）
+      cooldownDays: 1, // 转户冷却 1 个交易日
+      freeReselectDays: 1, // 免费重选 1 次，且仅限开户后首个交易日内
+    },
+
+    // NPC 券商归属（§11.4）——席位系统的**前置条件**（没有它席位表就是空的）。
+    // 账户名哈希确定性派生：不落盘、不占存档版本号、不触发逐 tick 标脏，
+    // 重启后同一 NPC 仍是同一券商（由账户名重算，见 broker.allocateNpcBrokers）
+    npc: {
+      enabled: true,
+      npcFloor: 4, // 每家券商在该股至少保底几个账户，否则小券商席位会长期缺席
+      // 类型倾向：乘在虚拟规模权重上（未列出的券商乘 1）。让「什么资金进什么券商」带上气质
+      typeTilt: {
+        inst: { zhongxin: 3, haitong: 3, zhaoshang: 3 }, // 大机构求稳、要情报
+        hot: { tianfeng: 4, huatai: 4 }, // 游资要杠杆要通道
+        big: { zhongxin: 3, zhaoshang: 3 }, // 大户要额度、要消息
+        mid: { huatai: 2, dongfeng: 2, haitong: 2 }, // 中户分散
+        small: { dongfeng: 4 }, // 散户跟人气、扎堆东风
+      },
+    },
+
+    // 席位玩法（§11.3）：五档挂单券商、逐笔买卖席位、席位榜/龙虎榜。
+    // 数据只喂展示层，**不参与拥挤度计算**（拥挤度是配置里的固有属性）
+    seat: {
+      enabled: true,
+      depthBrokers: 2, // 五档每档显示占比最高的前 N 家券商
+      surgePct: 7, // 个股当日涨跌超 ±7% 时披露买卖前五席位
+      leaderboardRows: 6, // 席位榜显示家数
+      topRows: 5, // 龙虎榜买卖前五
+    },
+
+    // 券商榜（§5.3）：总榜 + 券商榜 + 组内榜。冷门券商的组内名次天然更容易靠前，
+    // 头部玩家的「争榜」动机因此把人往冷门赶——这是最有效的软分流
+    board: { enabled: true, rows: 10 },
+
+    // 六家完整设定。key 与 Client/img/broker-<key>.png 一一对应，前端拼路径直接用
+    list: {
+      zhongxin: {
+        key: 'zhongxin',
+        name: '钟信证券',
+        abbr: '钟信',
+        persona: '大而不倒的老大哥，研报第一，啥都能做，啥都不便宜',
+        slogan: '钟信钟信，终会上升',
+        color: '#1f5fa8',
+        scale: '大',
+        targetShare: 0.22,
+        virtualClients: 3960, // 万客户（展示用）
+        crowd: 0.52, // 拥挤度（固有属性）
+        strengths: ['融资额度 2.5×（全服最高）', '保证金比例 40%（最低）', '10 只股票 + 融券池全开放'],
+        costs: ['佣金万 3（全服最贵）', '下单冷却 3.0 秒（全服最慢）'],
+        suitable: '大资金、做中长线趋势、一天不点几次鼠标的人',
+        overrides: {
+          feeRate: 0.0003,
+          cooldownMs: 3000,
+          lockMs: 10000,
+          financeRatio: 0.4,
+          marginRatio: 0.4,
+          lendCapacityMul: 1,
+          lendRateMul: 1,
+          autoSlots: 2,
+          newsVipLeadMs: 0,
+          openGift: 0,
+          liquidationBuffer: 0.05,
+        },
+      },
+      huatai: {
+        key: 'huatai',
+        name: '滑泰证券',
+        abbr: '滑泰',
+        persona: 'App 装机量第一，系统最快，量化接口敞开',
+        slogan: '天下武功，唯快不破',
+        color: '#2f6fd0',
+        scale: '中',
+        targetShare: 0.16,
+        virtualClients: 2880,
+        crowd: 0.34,
+        strengths: ['下单冷却 0.5 秒（全服最快）', 'T+锁仓砍半（5 秒）', '自动化策略槽 4 个（基准 2）'],
+        costs: ['融资最高仅 1.67×（借钱能力最弱）', '保证金比例 60%（最高）'],
+        suitable: '打板、日内高频、挂自动化策略的人',
+        overrides: {
+          feeRate: 0.00015,
+          cooldownMs: 500,
+          lockMs: 5000,
+          financeRatio: 0.6,
+          marginRatio: 0.6,
+          lendCapacityMul: 0.9,
+          lendRateMul: 1,
+          autoSlots: 4,
+          newsVipLeadMs: 0,
+          openGift: 0,
+          liquidationBuffer: 0.05,
+        },
+      },
+      zhaoshang: {
+        key: 'zhaoshang',
+        name: '招伤证券',
+        abbr: '招伤',
+        persona: '服务天花板，客户经理天天嘘寒问暖',
+        slogan: '您好，我是您的客户经理小张',
+        color: '#9b2c2c',
+        scale: '中',
+        targetShare: 0.14,
+        virtualClients: 2520,
+        crowd: 0.28,
+        strengths: ['消息提前量满额 3 秒（L2 情报，按星级 1/4 递进）', '每日赠送免息券 ×1（当日利息全免）'],
+        costs: ['融券券源仅基准的 60%', '券息上浮 1.4×（做空又贵又难借到）'],
+        suitable: '做多为主、跟消息面吃饭的人',
+        overrides: {
+          feeRate: 0.0002,
+          cooldownMs: 2000,
+          lockMs: 10000,
+          financeRatio: 0.5,
+          marginRatio: 0.5,
+          lendCapacityMul: 0.6,
+          lendRateMul: 1.4,
+          autoSlots: 2,
+          newsVipLeadMs: 3000,
+          freeCouponPerDay: 1,
+          openGift: 0,
+          liquidationBuffer: 0.05,
+        },
+      },
+      tianfeng: {
+        key: 'tianfeng',
+        name: '天疯证券',
+        abbr: '天疯',
+        persona: '敢写研报的野生研究所，一天一篇十倍股',
+        slogan: '本报告不构成投资建议，因为分析师自己满仓了',
+        color: '#d2691e',
+        scale: '小',
+        targetShare: 0.08,
+        virtualClients: 1440,
+        crowd: 0.16,
+        strengths: ['融资最高 3.33×（全服最高）', '强平维持率放宽到 25%（触发线更松）'],
+        costs: [
+          '零缓冲强平：破线立即全平，没有预警与缓一档',
+          '禁买 600006 筷手集团、600010 理享汽车',
+          '佣金万 2.5（拥挤税补贴档后万 2）',
+        ],
+        suitable: '赌徒、想一夜暴富、喜欢看权益曲线陡上陡下的人',
+        overrides: {
+          feeRate: 0.00025,
+          cooldownMs: 2000,
+          lockMs: 8000,
+          financeRatio: 0.3,
+          marginRatio: 0.3,
+          maintenance: 0.25,
+          lendCapacityMul: 0.9,
+          lendRateMul: 1,
+          autoSlots: 3,
+          newsVipLeadMs: 0,
+          openGift: 50000, // 体验金
+        },
+        features: {
+          zeroBufferLiquidation: true,
+          forbidStocks: ['600006', '600010'],
+        },
+      },
+      haitong: {
+        key: 'haitong',
+        name: '嗨通证券',
+        abbr: '嗨通',
+        persona: '老牌国企风，什么都不出彩，什么都不卡你',
+        slogan: '稳，就一个字',
+        color: '#274b6d',
+        scale: '偏小',
+        targetShare: 0.1,
+        virtualClients: 1800,
+        crowd: 0.22,
+        strengths: ['佣金万 0.5（全服最低，基准的一半）', '无任何隐性费用'],
+        costs: [
+          '没有任何特权（无提前量、无免息券、策略槽只有基准 2 个）',
+          '偶发通道卡顿（约 2% 的下单延迟 1 个 tick）',
+        ],
+        suitable: '薅费率、交易量极大、长线持有的人',
+        overrides: {
+          feeRate: 0.00005,
+          cooldownMs: 2500,
+          lockMs: 10000,
+          financeRatio: 0.55,
+          marginRatio: 0.55,
+          lendCapacityMul: 0.9,
+          lendRateMul: 1,
+          autoSlots: 2,
+          newsVipLeadMs: 0,
+          openGift: 0,
+          liquidationBuffer: 0.05,
+        },
+        features: { glitchRate: 0.02 },
+      },
+      dongfeng: {
+        key: 'dongfeng',
+        name: '东风财富',
+        abbr: '东风',
+        persona: '散户大本营，论坛最热闹，人气就是一切',
+        slogan: '东风一到，散户报到',
+        color: '#c62828',
+        scale: '巨大',
+        targetShare: 0.3,
+        virtualClients: 5400,
+        crowd: 0.68,
+        strengths: [
+          '散户人气 buff：本券商成交量推高该股论坛热度，放大散户 NPC 跟风强度',
+          '开户送体验金 · 每日人气任务',
+        ],
+        costs: ['拥挤税重罚档（佣金 ×1.3、券源 ×0.7）', '风控最弱（强平线最紧，维持率 33%）'],
+        suitable: '赚情绪钱、追热点、喜欢热闹的人',
+        overrides: {
+          feeRate: 0.0001,
+          cooldownMs: 1500,
+          lockMs: 10000,
+          financeRatio: 0.5,
+          marginRatio: 0.5,
+          maintenance: 0.33,
+          lendCapacityMul: 0.9,
+          lendRateMul: 1,
+          autoSlots: 2,
+          newsVipLeadMs: 0,
+          openGift: 30000,
+          liquidationBuffer: 0.05,
+        },
+        // 人气 buff（§3.6）：本券商玩家在该股的成交额推高「论坛热度」，
+        // 热度再放大该股**散户 NPC 的跟风强度**（做多顺风、做空逆风——放大的是动量跟随，
+        // 不是方向）。严格只调制散户的交易行为，不碰公允价值与噪声（项目纪律）
+        heat: { enabled: true, refTurnoverPct: 0.02, decayPerTick: 0.004, retailMul: 0.35 },
+      },
+    },
+  },
 };
+

@@ -1,7 +1,18 @@
 /**
  * 随机消息系统：利多 / 利空，影响 NPC 情绪与公允价值
+ *
+ * 另承担**消息分层（信息不对称）**：消息「诞生」不等于「公开」，中间有一段落露期，
+ * 只有情报等级够高的参与者（L0 内幕 / L1 机构 / L2 情报玩家）在窗口里读得到它并提前动手。
+ * 详见 Doc/消息分层方案.md，落点全在本文件的 visibleFor 与三个读取口。
  */
 const config = require('./config');
+const { getLogger } = require('./logger');
+
+const log = getLogger('news');
+
+// 情报等级（消息分层方案 §4）。public 是默认等级——**不传 viewer 的老调用一律按公众**，
+// 所以引入本机制不会改动任何既有调用方的行为（回归红线，见方案 §10.3）。
+const TIERS = ['insider', 'inst', 'vip'];
 
 // 文案按 scope 分池：先定 scope 再取该池文案，避免「机构」scope 播宏观政策这类语义错配。
 // 全体 = 大盘（原型是恒生科技指数：港股科技 / 南向资金 / 美联储 / 中概股 / 平台经济）；
@@ -678,6 +689,42 @@ class NewsSystem {
     this.nextAtPhase = null; // nextAt 是按哪个阶段排的（null = 还没登记过阶段）
     this.active = []; // [{dir, scope, power, until, stockId, session}]
     this.recentByPool = new Map(); // 池 key -> 最近用过的文案，去重按池独立
+    // 泄露期的可观测性（方案 §7.2 的 MVP 验收口径）：记下消息进入泄露期那一刻的价，
+    // 公开时算一次漂移并**只落日志不落盘**——用来证明「消息公开前 N 秒价格已开始漂移」。
+    this.priceOf = null; // 由 Game 注入的跨股票取价函数
+    this.leakLog = []; // 最近若干条泄露期漂移记录（内存，供探针与调试读）
+  }
+
+  // ---------------- 消息分层：可见性 ----------------
+
+  /**
+   * 一条消息此刻对某个观察者是否可见。
+   *
+   * **不传 viewer 或 viewer.tier 为 public 时，行为与引入本机制之前逐位一致**：
+   * 老调用（含全部既有测试）读到的仍是「诞生即可见」。
+   *
+   * @param {object} n 消息
+   * @param {{tier?:string, leadMs?:number}|null} viewer 观察者；null = 公众
+   * @param {number} now
+   */
+  static visibleFor(n, viewer, now) {
+    if (!n) return false;
+    // 没有分层字段（老存档、或调用方直接塞进 active 的裸消息）→ 不分层，立即可见。
+    // 这是「引入本机制之前的行为」的等价表达，也是消息分层方案 §10.3 #5 的要求
+    if (n.publicAt == null) return true;
+    if (now >= n.publicAt) return true; // 已公开：人人可见
+    const tier = (viewer && viewer.tier) || 'public';
+    if (tier === 'public') return false; // 公众只能等到 t2
+    // 玩家的 L2 提前量由**券商声誉星级**给（broker.js），所以允许调用方直接覆盖
+    const lead = viewer && viewer.leadMs != null
+      ? (tier === 'vip' ? viewer.leadMs : 0)
+      : (n.lead && n.lead[tier]) || 0;
+    return now >= n.publicAt - lead;
+  }
+
+  /** 某消息此刻是否仍在泄露期（已对部分人可见、但还没公开） */
+  static inLeak(n, now) {
+    return !!n && n.publicAt != null && now < n.publicAt;
   }
 
   /**
@@ -798,6 +845,7 @@ class NewsSystem {
       ? `【${stock.alias}】${this.pickText(scope, dir, stock, session)}`
       : this.pickText(scope, dir, null, session);
     this.seq += 1;
+    const lead = this.leadsFor(scope);
     const news = {
       id: 'N' + this.seq,
       t: now,
@@ -810,12 +858,35 @@ class NewsSystem {
       text,
       session, // 盘前 / 盘中 / 午间 / 盘后（客户端标签；无时钟时为 null）
       until: Math.max(now + config.news.durationMs, untilFloor),
+      // ---- 消息分层：公开时刻与各等级提前量 ----
+      // 各等级的**可见起点** = publicAt − lead[tier]，于是：
+      //   孕育期 = [t, publicAt − lead_inst)、泄露期 = [.., publicAt)、公开期 = [publicAt, until)
+      // 折算后全员 lead 为 0（scope=全体，或没配时钟）→ publicAt = t，
+      // 于是「诞生即可见、人人同时知道」，与引入本机制之前完全一致。
+      lead,
+      publicAt: now + Math.max(0, lead.insider, lead.inst, lead.vip),
     };
     this.tape.unshift(news);
     if (this.tape.length > config.news.tapeSize) this.tape.length = config.news.tapeSize;
     this.active.push(news);
     this.active = this.active.filter((n) => n.until > now);
     return news;
+  }
+
+  /**
+   * 某 scope 下各等级的提前量（已按 scope 折扣并做最小生效值夹取）。
+   *
+   * **`全体`（大盘宏观）恒为 0**：政策/宏观没有内幕可言，强给提前量既不真实、
+   * 又会让指数在泄露期整体漂移（10 只一起动，观感像「大盘抽风」）。
+   */
+  leadsFor(scope) {
+    const lc = config.news.lead || {};
+    const mul = (config.news.leadByScope || {})[scope];
+    const q = (ms) => {
+      const v = (Number(ms) || 0) * (mul == null ? 0 : mul);
+      return v <= 0 ? 0 : Math.max(v, config.news.minLeadMs || 0);
+    };
+    return { insider: q(lc.insiderMs), inst: q(lc.instMs), vip: q(lc.vipMs) };
   }
 
   /**
@@ -830,10 +901,11 @@ class NewsSystem {
   }
 
   /** 某群体在某只股票上的当前情绪叠加 [-1, 1] */
-  sentiment(scope, now, stockId = null) {
+  sentiment(scope, now, stockId = null, viewer = null) {
     let s = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
+      if (!NewsSystem.visibleFor(n, viewer, now)) continue; // 还没轮到这一级看见
       if (n.scope !== '全体' && n.scope !== scope) continue;
       if (!NewsSystem.applies(n, stockId)) continue;
       // 影响随时间线性衰减
@@ -848,12 +920,13 @@ class NewsSystem {
    * 而不是只看自己 scope——利好出货、利空吸筹的前提是知道散户在追什么。
    * @returns {{ all: number, inst: number, retail: number }}
    */
-  sentimentByScope(now, stockId = null) {
+  sentimentByScope(now, stockId = null, viewer = null) {
     let all = 0;
     let inst = 0;
     let retail = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
+      if (!NewsSystem.visibleFor(n, viewer, now)) continue;
       if (!NewsSystem.applies(n, stockId)) continue;
       const remain = (n.until - now) / config.news.durationMs;
       const c = n.dir * n.power * remain;
@@ -870,10 +943,11 @@ class NewsSystem {
    * scope 与 sentiment() 保持同一语义：「全体」消息全额直接定价，
    * 只覆盖单一群体的消息只按其群体打折定价。
    */
-  fvDrift(now, stockId = null) {
+  fvDrift(now, stockId = null, viewer = null) {
     let d = 0;
     for (const n of this.active) {
       if (n.until <= now) continue;
+      if (!NewsSystem.visibleFor(n, viewer, now)) continue;
       if (!NewsSystem.applies(n, stockId)) continue;
       const remain = (n.until - now) / config.news.durationMs;
       d += n.dir * n.power * remain * config.news.fvDriftCoef * (SCOPE_FV_WEIGHT[n.scope] ?? 0.5);
@@ -881,9 +955,113 @@ class NewsSystem {
     return d;
   }
 
-  tapeSnapshot(limit = 50) {
-    return this.tape.slice(0, limit);
+  /**
+   * 消息磁带快照（下发给客户端的那一份）。
+   *
+   * **泄露期的消息绝不出现在公众视野里**——这正是三段式的灵魂：
+   * 玩家只看到价格莫名异动，看不到原因。老数据没有 `publicAt`（老存档），
+   * 视为「立即可见」，行为与引入本机制之前一致。
+   *
+   * @param {number} limit
+   * @param {number} now
+   * @param {{tier?:string, leadMs?:number, showDir?:boolean, viewerName?:string}} [viewer]
+   *   tier='vip' + leadMs 时，券商客户能在公开前看到**该股有事**；方向是否可见取决于
+   *   声誉星级是否到 maxPrivilegeStar（§8.1：4★ 给满额提前量，5★ 才给「标的方向」）。
+   */
+  tapeSnapshot(limit = 50, now = Date.now(), viewer = null) {
+    const pub = (n) => n.publicAt == null || n.publicAt <= now;
+    if (!viewer || viewer.tier !== 'vip' || !(viewer.leadMs > 0)) {
+      return this.tape.filter(pub).slice(0, limit);
+    }
+    const out = [];
+    for (const n of this.tape) {
+      if (out.length >= limit) break;
+      if (pub(n)) {
+        out.push(n);
+        continue;
+      }
+      if (now < n.publicAt - viewer.leadMs) continue; // 连泄露窗口都没进
+      out.push(viewer.showDir ? { ...n, early: true } : maskLeaked(n));
+    }
+    return out;
   }
+
+  /**
+   * 泄露期的可观测性指标（方案 §7.2 / §11 MVP 验收口径）：**只落日志不落盘**。
+   * 让「消息公开前 N 秒价格已开始漂移」这件事可被验证，而不是靠感觉。
+   * @param {number} now
+   */
+  noteLeakDrift(now = Date.now()) {
+    if (!this.priceOf) return;
+    for (const n of this.active) {
+      if (n.publicAt == null) continue;
+      const l = n.lead || {};
+      const maxLead = Math.max(l.insider || 0, l.inst || 0, l.vip || 0);
+      if (!(maxLead > 0)) continue;
+      // 进入泄露期的那一刻记下价格（取该消息最早可见等级的起点）
+      if (n.leakAt == null && now >= n.publicAt - maxLead && now < n.publicAt) {
+        n.leakAt = now;
+        n.leakPrice = this.priceOf(n.stockId);
+      }
+      // 公开那一刻结算一次漂移
+      if (!n.leakLogged && n.leakPrice > 0 && now >= n.publicAt) {
+        n.leakLogged = true;
+        const p = this.priceOf(n.stockId);
+        const driftPct = p > 0 ? ((p - n.leakPrice) / n.leakPrice) * 100 : 0;
+        const rec = {
+          id: n.id,
+          stockId: n.stockId,
+          scope: n.scope,
+          dir: n.dir,
+          leakMs: n.publicAt - n.leakAt,
+          driftPct: Math.round(driftPct * 1000) / 1000,
+        };
+        this.leakLog.unshift(rec);
+        if (this.leakLog.length > 50) this.leakLog.length = 50;
+        log.info(
+          `[消息分层] ${n.id} 公开：${n.stockId || '大盘'} ${n.type}，泄露期 ${rec.leakMs}ms 内价格漂移 ${rec.driftPct.toFixed(3)}%`
+        );
+      }
+    }
+  }
+
+  /** 泄露期的消息里，有哪些个股正在异动（供 §7.2 模糊提示用） */
+  leakingStocks(now = Date.now()) {
+    const out = new Map();
+    for (const n of this.active) {
+      if (n.until <= now) continue;
+      if (n.publicAt == null || n.publicAt <= now) continue;
+      if (!n.stockId) continue; // 大盘消息不提示（它本来就没有提前量）
+      const left = n.publicAt - now;
+      const prev = out.get(n.stockId);
+      if (!prev || left < prev.leftMs) out.set(n.stockId, { stockId: n.stockId, stockName: n.stockName, leftMs: left });
+    }
+    return out;
+  }
+}
+
+/**
+ * 泄露期消息对**未达 5★** 的情报玩家遮蔽成「知道有事、不知道方向」。
+ * 设计稿 §8.1：4★ 给满额提前量但「不给强度」，5★ 才额外给「标的方向」。
+ * 所以提前量本身是能看见「哪只股票有消息」的——那也是招伤最值钱的地方。
+ */
+function maskLeaked(n) {
+  return {
+    id: n.id,
+    t: n.t,
+    dir: 0,
+    type: '未明',
+    scope: n.scope,
+    power: 0,
+    stockId: n.stockId,
+    stockName: n.stockName,
+    text: n.stockName ? `【${n.stockName}】出现未公开信息，方向待确认` : '出现未公开信息，方向待确认',
+    session: n.session,
+    until: n.publicAt,
+    publicAt: n.publicAt,
+    early: true, // 公开前拿到 → 客户端标「内幕」并给倒计时
+    masked: true,
+  };
 }
 
 module.exports = { NewsSystem, TEMPLATES, STOCK_TEMPLATES, ANNOUNCE_TEMPLATES };

@@ -40,13 +40,18 @@ class Persister {
     this.st = {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
-          (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited)
+          (name, is_npc, role, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
+           broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day)
         VALUES
-          (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited)
+          (@name, @is_npc, @role, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
+           @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day)
         ON CONFLICT(name) DO UPDATE SET
           is_npc = @is_npc, role = @role, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
-          initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited
+          initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
+          broker = @broker, broker_changed_at = @broker_changed_at, broker_since_day = @broker_since_day,
+          broker_stats = @broker_stats, free_reselect_used = @free_reselect_used,
+          coupon_used_day = @coupon_used_day, free_interest_day = @free_interest_day
       `),
       delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
       insLedger: db.prepare(`
@@ -67,8 +72,8 @@ class Persister {
       setOrderState: db.prepare('UPDATE orders SET filled = ?, frozen = ?, status = ? WHERE id = ?'),
       delOrder: db.prepare('DELETE FROM orders WHERE id = ?'),
       insTrade: db.prepare(`
-        INSERT INTO trades (account, role, order_id, stock_id, action, side, price, qty, fee, trade_seq, t)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO trades (account, role, order_id, stock_id, action, side, price, qty, fee, trade_seq, t, broker, counter_broker)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       upsertMarket: db.prepare(`
         INSERT INTO market_state
@@ -139,8 +144,10 @@ class Persister {
       // 某只标的最近若干根日线（新到旧，读取侧再反转成时间升序）
       recentBars: db.prepare('SELECT * FROM daily_bars WHERE stock_id = ? ORDER BY day DESC LIMIT ?'),
       recentPrices: db.prepare('SELECT t, price, vol FROM prices WHERE stock_id = ? ORDER BY t DESC LIMIT ?'),
+      // 逐笔磁带的恢复：取主动方那一行，带上双方席位（broker / counter_broker）。
+      // 升级到版本 4 之前写下的行没有席位列（NULL），那段磁带的席位显示为空
       recentTape: db.prepare(`
-        SELECT trade_seq, t, price, qty, side FROM trades
+        SELECT trade_seq, t, price, qty, side, broker, counter_broker FROM trades
          WHERE role = 'taker' AND stock_id = ? ORDER BY trade_seq DESC LIMIT ?
       `),
     };
@@ -243,7 +250,8 @@ class Persister {
 
     for (const r of this.pendingTrades) {
       this.st.insTrade.run(
-        r.account, r.role, r.orderId, r.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t
+        r.account, r.role, r.orderId, r.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t,
+        r.broker || null, r.counterBroker || null
       );
     }
     this.pendingTrades.length = 0;
@@ -390,6 +398,17 @@ class Persister {
       last_order_at: acc.lastOrderAt,
       created_at: acc.createdAt,
       deposited: acc.deposited || 0,
+      // NPC 的券商是账户名派生的标签，**不落盘**（落盘会踩「NPC 逐 tick 标脏」的禁忌，
+      // 也会让存档里多出一份与账户名冗余、且可能不一致的副本）。重启后按账户名重算即可
+      broker: isNpc ? null : acc.broker || null,
+      broker_changed_at: isNpc ? null : acc.brokerChangedAt || null,
+      broker_since_day: isNpc ? null : (acc.brokerSinceDay == null ? null : acc.brokerSinceDay),
+      broker_stats: isNpc || !acc.brokerStats || !Object.keys(acc.brokerStats).length
+        ? null
+        : JSON.stringify(acc.brokerStats),
+      free_reselect_used: isNpc || acc.freeReselectUsed ? 1 : 0,
+      coupon_used_day: isNpc ? null : (acc.couponUsedDay == null ? null : acc.couponUsedDay),
+      free_interest_day: isNpc ? null : (acc.freeInterestDay == null ? null : acc.freeInterestDay),
     });
 
     // 按股票的融券/融资计息明细：整段重写（行数很少，省去逐行 diff 的复杂度）。

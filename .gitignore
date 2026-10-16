@@ -16,3 +16,9 @@ Server/data/
 
 # 工具缓存
 .playwright-cli/
+
+# 本地输出产物（截图/生成物，不入库）
+output/
+
+# 智能体工作目录（记忆 + 临时产物，不入库）
+.workbuddy/

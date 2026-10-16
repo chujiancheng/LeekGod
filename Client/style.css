@@ -167,7 +167,8 @@ input { font: inherit; color: inherit; }
 .main {
   grid-area: main;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 264px;
+  /* 右栏 300px：逐笔有 6 列（含买卖席位），264px 会把表头挤换行 */
+  grid-template-columns: minmax(0, 1fr) 300px;
   grid-template-rows: minmax(0, 1fr);
   gap: 8px;
   min-height: 0;
@@ -375,14 +376,19 @@ input { font: inherit; color: inherit; }
 
 /* ---------- 逐笔 ---------- */
 .tape-panel { flex: 1; min-height: 0; }
+/* 逐笔 6 列：时间 / 价格 / 量 / 方向 / 买席 / 卖席。席位列放最后两列，
+   所以右栏宽度要留够（见 .main 的 300px）——挤在 264px 里会把表头也挤换行。
+   席位列窄，简称字号单独压到 9.5px（图标 12px 已经在渲染层缩过） */
 .tape-head, .tape-row {
-  display: grid; grid-template-columns: 1.1fr 1fr 1fr .7fr;
-  padding: 3px 12px; font-size: 12px; font-variant-numeric: tabular-nums;
+  display: grid; grid-template-columns: 52px minmax(0, 1fr) 44px 26px 42px 42px;
+  gap: 2px; padding: 3px 10px; font-size: 12px; font-variant-numeric: tabular-nums;
 }
 .tape-head { color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); }
 .tape { flex: 1; overflow-y: auto; min-height: 0; }
 .tape-row span:nth-child(2), .tape-row span:nth-child(3) { text-align: right; }
-.tape-row span:last-child { text-align: right; }
+.tape-row span:nth-child(4), .tape-row span:nth-child(5), .tape-row span:nth-child(6) { text-align: right; }
+.tape-head span:nth-child(4), .tape-head span:nth-child(5), .tape-head span:nth-child(6) { text-align: right; }
+.tape-row .seat-abbr { font-size: 9.5px; }
 .tape-row .time { color: var(--muted); }
 .tape-row .side-B { color: var(--red); }
 .tape-row .side-S { color: var(--green); }
@@ -908,7 +914,7 @@ input { font: inherit; color: inherit; }
   .depth-table .qty { width: 46%; font-size: 10.5px; padding-right: 10px; }
   .mid-cell { padding: 5px 5px !important; }
   #depthLast { font-size: 16px; }
-  .tape-head, .tape-row { padding: 3px 8px; grid-template-columns: 1.2fr 1fr 0.9fr 0.6fr; font-size: 11px; }
+  .tape-head, .tape-row { padding: 3px 8px; grid-template-columns: 56px minmax(0, 1fr) 46px 24px 44px 44px; font-size: 11px; }
 
   /* 下单面板 */
   .order-panel { width: 100%; padding-bottom: 12px; }
@@ -974,4 +980,163 @@ input { font: inherit; color: inherit; }
   .idx-stat { justify-content: space-between; gap: 8px; }
   .idx-spark { height: 38px; }
   .idx-spark svg { height: 38px; }
+}
+
+/* ==================================================================
+   券商（出身门派）：登录卡片墙 / 我的券商卡 / 转户 / 席位
+   配色沿用 :root 的变量；图标一律「图标 + 两字简称」同时出现——
+   招伤与东风的红与行情「涨红」同色，只靠颜色区分会误读（§11.5）
+   ================================================================== */
+
+/* ---------- 登录：昵称 + 券商卡片墙 ---------- */
+.login-card-wide { width: min(780px, 94vw); max-height: 92vh; overflow-y: auto; }
+.nick-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 15px; text-align: left; }
+.nick-hint.bad { color: var(--red); }
+.login-hint.err { color: var(--red); }
+
+.broker-pick { margin: 14px 0 12px; text-align: left; }
+.broker-pick-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; font-size: 12.5px; color: var(--ink); margin-bottom: 8px;
+}
+.bp-note { color: var(--muted); font-size: 11px; margin-left: 8px; }
+.broker-wall { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+
+.broker-card {
+  position: relative; display: flex; flex-direction: column; gap: 6px;
+  padding: 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); cursor: pointer; transition: border-color .12s, background .12s;
+}
+.broker-card:hover { border-color: rgba(76, 141, 255, .5); }
+.broker-card.on { border-color: var(--blue); background: rgba(76, 141, 255, .12); }
+.broker-card.on::after {
+  content: '已选'; position: absolute; top: 8px; right: 8px;
+  font-size: 10px; color: var(--blue); border: 1px solid rgba(76, 141, 255, .5);
+  border-radius: 3px; padding: 0 4px;
+}
+.broker-card.dim { opacity: .55; }
+.broker-card.locked { cursor: default; }
+
+.bk-top { display: flex; align-items: center; gap: 8px; }
+.bk-ico { width: 30px; height: 30px; border-radius: 8px; flex: none; background: #0d1220; }
+.bk-ico.lg { width: 46px; height: 46px; border-radius: 11px; }
+.bk-ico.xs { width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; }
+.bk-name { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.bk-abbr { font-size: 10.5px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.bk-persona { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.bk-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  font-size: 10.5px; padding: 1px 5px; border-radius: 4px;
+  border: 1px solid var(--line); color: var(--muted);
+  /* 券商的代价/强项文案较长（如「零缓冲强平：破线立即全平…」），nowrap 会让它顶出卡片，
+     所以允许换行并按容器宽度收口 */
+  white-space: normal; max-width: 100%; overflow-wrap: anywhere;
+}
+.chip.good { color: var(--green); border-color: rgba(31, 185, 120, .4); }
+.chip.bad { color: var(--red); border-color: rgba(240, 70, 75, .4); }
+.chip.gold { color: var(--gold); border-color: rgba(240, 180, 41, .45); }
+.bk-metrics { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.6; }
+.bk-metrics b { color: var(--ink); font-weight: 500; }
+
+.bk-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.bk-crowd { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
+.crowd-bar {
+  display: inline-block; width: 46px; height: 4px; border-radius: 2px;
+  background: rgba(148, 163, 184, .25); overflow: hidden;
+}
+.crowd-bar b { display: block; height: 100%; background: var(--muted); }
+.broker-card .crowd-bar b.heavy { background: var(--red); }
+.broker-card .crowd-bar b.light { background: var(--gold); }
+.broker-card .crowd-bar b.normal { background: var(--blue); }
+.broker-card .crowd-bar b.subsidy { background: var(--green); }
+.crowd-tag { font-size: 10px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+.crowd-tag.heavy { color: var(--red); border-color: rgba(240, 70, 75, .4); }
+.crowd-tag.light { color: var(--gold); border-color: rgba(240, 180, 41, .4); }
+.crowd-tag.normal { color: var(--blue); border-color: rgba(76, 141, 255, .4); }
+.crowd-tag.subsidy { color: var(--green); border-color: rgba(31, 185, 120, .4); }
+.bk-clients { font-size: 10.5px; color: var(--muted); }
+.bk-weekly { font-size: 10px; color: var(--gold); border: 1px solid rgba(240, 180, 41, .45); border-radius: 3px; padding: 0 4px; }
+
+/* ---------- 我的券商卡（主页） ---------- */
+.my-broker-card { padding: 14px 16px; gap: 10px; }
+.mb-grid { display: grid; grid-template-columns: minmax(200px, 1.1fr) minmax(0, 1.6fr) minmax(180px, 1fr); gap: 14px; }
+.mb-id { display: flex; gap: 10px; align-items: flex-start; }
+.mb-name { font-size: 15px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mb-star { font-size: 12px; color: var(--gold); letter-spacing: 1px; }
+.mb-star .off { color: rgba(148, 163, 184, .35); }
+.mb-slogan { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.mb-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+.mb-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.mb-cell { background: var(--panel-2); border-radius: 8px; padding: 7px 8px; }
+.mb-cell label { display: block; font-size: 10.5px; color: var(--muted); margin-bottom: 2px; }
+.mb-cell b { font-size: 13px; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.mb-cell i { font-style: normal; font-size: 10px; color: var(--muted); margin-left: 4px; }
+
+.mb-priv { display: flex; flex-direction: column; gap: 5px; }
+.mb-priv-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.mb-priv-row label { color: var(--muted); flex: none; width: 66px; }
+.mb-priv-row .pv { color: var(--ink); font-variant-numeric: tabular-nums; }
+.mb-priv-row .pfull { color: var(--muted); font-size: 10.5px; }
+.mb-bar { flex: 1; height: 4px; border-radius: 2px; background: rgba(148, 163, 184, .25); overflow: hidden; min-width: 30px; }
+.mb-bar b { display: block; height: 100%; background: var(--gold); }
+.mb-note { font-size: 10.5px; color: var(--muted); line-height: 1.6; }
+.mb-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.mb-warn { color: var(--gold); font-size: 11px; }
+.mb-star.flat { letter-spacing: 0; }
+/* CSP 禁内联 style：需要一点上间距的地方一律给 class */
+.gap-top { margin-top: 8px; }
+
+/* ---------- 追保横幅 ---------- */
+.margin-banner { border-color: rgba(240, 180, 41, .45); background: rgba(240, 180, 41, .1); }
+.margin-banner .halt-tag { background: rgba(240, 180, 41, .22); color: var(--gold); }
+
+/* ---------- 转户弹窗 ---------- */
+.transfer-card { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; }
+.transfer-card .broker-wall { margin: 10px 0; }
+.transfer-note { font-size: 11.5px; color: var(--muted); line-height: 1.7; text-align: left; margin-top: 8px; }
+
+/* ---------- 席位：五档 / 逐笔 / 席位榜 ---------- */
+.seat-cell { display: inline-flex; align-items: center; gap: 3px; justify-content: flex-end; }
+.seat-cell .seat-abbr { font-size: 10px; color: var(--muted); }
+.seat-cell.none { color: rgba(148, 163, 184, .4); }
+/* 五档只放小图标（hover 显全名）：价格列很窄，再加文字会把价格挤花 */
+.depth-brokers { display: inline-flex; align-items: center; gap: 2px; margin-left: 5px; vertical-align: middle; }
+.depth-seat { display: inline-flex; }
+.depth-seat .bk-ico.xs { opacity: .85; }
+.depth-seat:hover .bk-ico.xs { opacity: 1; }
+
+.seat-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; }
+.seat-grid .grid-table td { text-align: right; }
+.seat-grid .grid-table th:first-child, .seat-grid .grid-table td:first-child { text-align: left; }
+.seat-grid .bk-inline { display: inline-flex; align-items: center; gap: 5px; }
+.seat-net.pos { color: var(--red); }
+.seat-net.neg { color: var(--green); }
+.seat-surge { color: var(--gold); }
+
+/* ---------- 消息：泄露期异动提示 / 内幕提前 ---------- */
+.news-hint {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--gold);
+  border: 1px dashed rgba(240, 180, 41, .45); border-radius: 6px;
+  padding: 4px 8px; margin-bottom: 6px;
+}
+.news-list li.nearly { border-left: 2px solid var(--gold); padding-left: 6px; }
+.news-list .nearly-tag {
+  font-size: 10px; color: var(--gold); border: 1px solid rgba(240, 180, 41, .45);
+  border-radius: 3px; padding: 0 4px; flex: none;
+}
+.news-list .nearly-dir { color: var(--muted); font-size: 11px; }
+
+@media (max-width: 1100px) {
+  .broker-wall { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mb-grid { grid-template-columns: minmax(0, 1fr); }
+  .seat-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 860px) {
+  .login-card-wide { width: min(96vw, 780px); padding: 20px 14px; }
+  .broker-wall { grid-template-columns: minmax(0, 1fr); }
+  .mb-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .transfer-card { width: min(96vw, 820px); }
 }

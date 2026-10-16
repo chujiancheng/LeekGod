@@ -9,6 +9,7 @@ const config = require('./config');
 const { logger } = require('./logger');
 const { ACTIONS } = require('./market');
 const { r2 } = require('./store');
+const broker = require('./broker');
 
 const TYPE_LABEL = { tps: '止盈止损', grid: '网格', ma: '双均线', dca: '定投' };
 
@@ -60,9 +61,11 @@ class AutoManager {
     if (!TYPE_LABEL[type]) return { ok: false, error: '未知策略类型' };
     const ctx = this.ctxOf(stockId);
     if (!ctx) return { ok: false, error: '未知股票' };
-    // 上限按账户跨股票合计（20 条是防刷的账户级配额，不是每只股票 20 条）
-    if (this.listFor(account.name).length >= config.auto.maxPerAccount) {
-      return { ok: false, error: `单账户最多 ${config.auto.maxPerAccount} 条策略，请先删除旧策略` };
+    // 上限按账户跨股票合计（防刷的账户级配额，不是每只股票一份）。
+    // 条数上限按**账户券商**取：设计稿的「策略槽」基准 2 槽 → 滑泰 4 槽（40 条）
+    const maxPerAccount = this.brokerOf(account, Date.now(), ctx.market).autoMax;
+    if (this.listFor(account.name).length >= maxPerAccount) {
+      return { ok: false, error: `单账户最多 ${maxPerAccount} 条策略，请先删除旧策略` };
     }
     const v = this.validate(type, paramsRaw, ctx);
     if (!v.ok) return v;
@@ -197,7 +200,8 @@ class AutoManager {
     if (!fire) return;
 
     const target = p.qty > 0 ? Math.min(p.qty, total) : total;
-    const avail = isLong ? acc.freeSellableLong(sid, now) : acc.coverableShort(sid);
+    // 锁仓时长按账户券商取：滑泰 5 秒 → 自动策略也能早 5 秒卖出，与手动下单同口径
+    const avail = isLong ? acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs) : acc.coverableShort(sid);
     const qty = Math.min(target, avail);
     if (qty <= 0) {
       if (!s.state.waiting) {
@@ -265,7 +269,7 @@ class AutoManager {
       const entry = st.buys[0];
       const target = gridSellPrice(p.base, p.stepPct, entry.level);
       if (last >= target && this.cooldownLeft(acc, now) <= 0) {
-        const sellable = acc.freeSellableLong(sid, now);
+        const sellable = acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs);
         const qty = Math.min(entry.shares, sellable);
         if (qty > 0) {
           // 买一已 ≥ 目标价就按买价打（锁定更高卖价），否则挂目标价等
@@ -291,7 +295,7 @@ class AutoManager {
       const level = st.nextLevel + 1;
       const bp = gridBuyPrice(p.base, p.stepPct, level);
       if (last <= bp && this.cooldownLeft(acc, now) <= 0) {
-        const need = r2(bp * p.qty * (1 + config.trade.feeRate));
+        const need = r2(bp * p.qty * (1 + this.brokerOf(acc, now, ctx.market).feeRate));
         if (acc.cash < need) {
           if (!st.cashWarned) {
             st.cashWarned = true;
@@ -378,7 +382,7 @@ class AutoManager {
       const price = this.pegBuy(ctx.market, last);
       const budget = acc.cash * (p.budgetPct / 100);
       const lot = ctx.stock.lotSize;
-      const qty = Math.floor(budget / (price * (1 + config.trade.feeRate)) / lot) * lot;
+      const qty = Math.floor(budget / (price * (1 + this.brokerOf(acc, now, ctx.market).feeRate)) / lot) * lot;
       if (qty < lot) {
         this.clearSignal(s, now, '金叉触发但按投入比例可买资金不足，放弃本次买入');
         return;
@@ -387,7 +391,7 @@ class AutoManager {
       if (r.ok) this.clearSignal(s, now, `金叉买入 ${qty}股 @${price}`);
       else if (!/频繁/.test(r.error || '')) this.clearSignal(s, now, `金叉买入失败: ${r.error}`);
     } else {
-      const qty = acc.freeSellableLong(sid, now);
+      const qty = acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs);
       if (qty <= 0) {
         if (acc.longQty(sid) <= 0) this.clearSignal(s, now, '死叉触发但无多头持仓，跳过本次卖出');
         return; // 锁仓中：等解锁后下个 tick 重试
@@ -421,7 +425,7 @@ class AutoManager {
     const price = this.pegBuy(ctx.market, last);
     const budget = Math.min(p.amount, acc.cash);
     const lot = ctx.stock.lotSize;
-    const qty = Math.floor(budget / (price * (1 + config.trade.feeRate)) / lot) * lot;
+    const qty = Math.floor(budget / (price * (1 + this.brokerOf(acc, now, ctx.market).feeRate)) / lot) * lot;
     if (qty < lot) {
       this.markDone(s, now, '可用资金不足以完成 1 手定投，策略自动结束');
       return;
@@ -447,9 +451,18 @@ class AutoManager {
 
   // ---------- 工具 ----------
 
-  cooldownLeft(acc, now) {
-    if (acc.lastOrderAt == null) return 0;
-    return Math.max(0, config.trade.cooldownMs - (now - acc.lastOrderAt));
+  /**
+   * 账户此刻的有效券商参数。自动策略也吃券商差异（冷却、费率、策略槽）——
+   * 它走的是 `market.place` 同一条下单路径，额度与冷却不按券商算会与手动下单不一致。
+   */
+  brokerOf(acc, now = Date.now(), market = null) {
+    const day = market && typeof market.dayNumber === 'function' ? market.dayNumber(now) : 0;
+    return broker.forAccount(acc, { day });
+  }
+
+  cooldownLeft(acc, now, market = null) {
+    if (!acc || acc.lastOrderAt == null) return 0;
+    return Math.max(0, this.brokerOf(acc, now, market).cooldownMs - (now - acc.lastOrderAt));
   }
 
   /**

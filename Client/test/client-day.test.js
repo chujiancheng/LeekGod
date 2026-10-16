@@ -83,7 +83,14 @@ src = src.replace(
     renderDay, renderClock, gameClockNow, fmtClockMs, dayInfo,
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
+    renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall,
+    renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     setState: (v) => { state = v; },
+    setBrokers: (m) => { brokerMeta = m; },
+    setPicked: (k) => { pickedBroker = k; },
+    brokerKeys,
+    activeTabOf: () => activeTab,
+    setActiveTab: (t) => { activeTab = t; },
     setDrift: (ms) => { lastStateAt = Date.now() - ms; },
     setChartMode: (m) => { chartMode = m; },
     dayLoadedSize: () => dayLoaded.size,
@@ -412,6 +419,257 @@ console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
   api.onState(mkState({ ...AUCTION_DAY, day: 16, phase: 'auction', label: '开盘集合竞价' }, null));
   assert(dailyCalls() === 3, `分时模式不拉日线（${dailyCalls()} 次）`);
   api.setChartMode('day');
+}
+
+// ---- 券商 UI：卡片墙 / 我的券商卡 / 席位 / 追保预警 / 提前消息 ----
+const BROKERS = [
+  ['zhongxin', '钟信证券', '钟信', 52, 'heavy', '重罚'],
+  ['huatai', '滑泰证券', '滑泰', 34, 'light', '轻罚'],
+  ['zhaoshang', '招伤证券', '招伤', 28, 'normal', '中性'],
+  ['tianfeng', '天疯证券', '天疯', 16, 'subsidy', '补贴'],
+  ['haitong', '嗨通证券', '嗨通', 22, 'normal', '中性'],
+  ['dongfeng', '东风财富', '东风', 68, 'heavy', '重罚'],
+].map(([key, name, abbr, crowdPct, crowdTier, crowdLabel]) => ({
+  key,
+  name,
+  abbr,
+  persona: name + '的人设',
+  slogan: name + '口号',
+  color: '#123456',
+  scale: '中',
+  virtualClients: 1000,
+  crowd: crowdPct / 100,
+  crowdPct,
+  crowdTier,
+  crowdLabel,
+  crowdFeeMul: 1,
+  crowdLendMul: 1,
+  icon: 'broker-' + key + '.png',
+  strengths: [name + '的强项'],
+  costs: [name + '的代价'],
+  suitable: '适合谁',
+  preview: {
+    feeRate: 0.0002,
+    cooldownMs: 2000,
+    lockMs: 10000,
+    leverage: 2,
+    financeRatio: 0.5,
+    maintenance: 0.3,
+    lendCapacityPct: 90,
+    newsLeadMs: key === 'zhaoshang' ? 3000 : 0,
+    autoSlots: 2,
+    autoMax: 20,
+    openGift: 0,
+    freeCouponPerDay: key === 'zhaoshang' ? 1 : 0,
+    forbidStocks: key === 'tianfeng' ? ['600006', '600010'] : [],
+  },
+}));
+
+console.log('\n[11] 券商：开户卡片墙');
+{
+  const meta = {};
+  for (const b of BROKERS) meta[b.key] = b;
+  meta.__selected = { dongfeng: 3 };
+  meta.__weekly = { key: 'zhaoshang', nextKey: 'tianfeng' };
+  api.setBrokers(meta);
+  api.setPicked('huatai');
+  api.renderBrokerWall();
+  api.renderBrokerWeeklyHint();
+  const html = api.el('brokerWall').innerHTML;
+  assert((html.match(/class="broker-card/g) || []).length === 6, '六张卡片都渲染出来');
+  assert(html.indexOf('/img/broker-zhongxin.png') >= 0, '图标按 key 拼路径');
+  assert(html.indexOf('已选') < 0 || html.indexOf('broker-card on') >= 0, '选中项带 on 类');
+  assert(html.indexOf('data-bk="huatai"') >= 0 && /data-bk="huatai"[^>]*class|class="broker-card on" data-bk="huatai"/.test(html), '选中态落在挑中的那家');
+  assert(html.indexOf('拥挤度 68%') >= 0, '东风拥挤度按元数据渲染（不参与计算，只展示）');
+  assert(html.indexOf('重罚') >= 0 && html.indexOf('补贴') >= 0, '拥挤度档位标签渲染');
+  assert(html.indexOf('本服 3 人已选') >= 0, '展示层用真实已选人数');
+  assert(html.indexOf('本周之星') >= 0, '当周之星角标渲染');
+  assert(html.indexOf('style=') < 0, '卡片里没有内联 style（CSP 禁）');
+  const hint = api.el('brokerWeeklyHint').textContent;
+  assert(hint.indexOf('招伤证券') >= 0 && hint.indexOf('佣金减半') >= 0, `本周之星提示：${hint}`);
+  // 没拉到元数据时不能报错
+  api.setBrokers({});
+  api.renderBrokerWall();
+  assert(api.el('brokerWall').innerHTML.indexOf('加载中') >= 0, '元数据未就绪时给出提示而不是空白/报错');
+
+  const meta2 = {};
+  for (const b of BROKERS) meta2[b.key] = b;
+  meta2.__selected = {};
+  meta2.__weekly = { key: 'zhaoshang', nextKey: 'tianfeng' };
+  api.setBrokers(meta2);
+}
+
+console.log('\n[12] 券商：我的券商卡');
+{
+  const bk = {
+    key: 'zhaoshang',
+    name: '招伤证券',
+    abbr: '招伤',
+    star: 3,
+    starMax: 5,
+    intensity: 75,
+    crowd: 0.28,
+    crowdPct: 28,
+    crowdTier: 'normal',
+    crowdLabel: '中性',
+    feeRate: 0.0002,
+    cooldownMs: 2000,
+    lockMs: 10000,
+    financeRatio: 0.5,
+    leverage: 2,
+    marginRatio: 0.5,
+    maintenance: 0.3,
+    lendCapacityPct: 60,
+    lendRateMul: 1.4,
+    autoMax: 20,
+    autoSlots: 2,
+    newsVipLeadMs: 2250,
+    newsVipVisible: false,
+    features: {},
+    privileges: [{ key: 'news', label: '消息提前量', now: '2.3s', full: '3.0s', pct: 75 }],
+    progress: { star: 3, next: 4, volume: 2e7, volumeNeed: 8e7, profit: 1e5, profitNeed: 5e5, noLiquidation: true, liquidations: 0, cancelRate: 0 },
+    weekly: { key: 'zhongxin', nextKey: 'huatai', isStar: false, feeMul: 1, financeBonus: 0, weekEndDay: 7 },
+    coupon: { perDay: 1, available: true, active: false, usedDay: null },
+    transfer: { feeRate: 0.001, feeCap: 50000, freeReselectUsed: false, options: [{ key: 'zhongxin', ok: true, free: false, fee: 1000, reason: '' }] },
+    stats: { volume: 2e7, profitBase: 0, liquidations: 0, orders: 10, cancels: 1 },
+  };
+  api.setState(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null));
+  api.setState(
+    Object.assign(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null), {
+      account: Object.assign(
+        mkState({}, null).account,
+        { equity: 1234567, broker: bk, marginCall: null }
+      ),
+      players: [
+        { name: 'me', equity: 1234567, broker: 'zhaoshang', brokerRank: 2, star: 3 },
+        { name: 'other', equity: 900000, broker: 'zhaoshang', brokerRank: 1, star: 1 },
+        { name: 'third', equity: 500000, broker: null, brokerRank: 1, star: 1 },
+      ],
+      brokerBoard: [
+        { key: 'zhaoshang', name: '招伤证券', abbr: '招伤', clients: 2, equity: 2134567, top: 'other', rank: 1 },
+        { key: 'huatai', name: '滑泰证券', abbr: '滑泰', clients: 0, equity: 0, top: null, rank: 2 },
+      ],
+    })
+  );
+  api.renderMyBroker();
+  const html = api.el('myBrokerCard').innerHTML;
+  assert(html.indexOf('招伤证券') >= 0, '卡片显示券商名');
+  assert((html.match(/★/g) || []).length >= 5, '渲染星级（满级位也占位）');
+  assert(html.indexOf('拥挤度 28%') >= 0, '显示拥挤度');
+  assert(html.indexOf('特权强度 75%') >= 0, '显示当前特权强度');
+  assert(html.indexOf('消息提前量') >= 0 && html.indexOf('满额 3.0s') >= 0, '特权清单带满额对照');
+  assert(html.indexOf('60%') >= 0 && html.indexOf('券息 ×1.4') >= 0, '券源与券息倍率都显示');
+  assert(html.indexOf('距 4★') >= 0, '显示下一星进度');
+  assert(html.indexOf('用免息券') >= 0, '有免息券按钮');
+  assert(
+    html.indexOf('本周之星') >= 0 && html.indexOf('钟信证券') >= 0 && html.indexOf('下周') >= 0,
+    '显示本周之星（非本家时给出下周轮换）'
+  );
+  assert(html.indexOf('style=') < 0, '没有内联 style（CSP 禁，进度条宽度走 CSSOM）');
+
+  // 未开户时不能报错
+  api.setState(
+    Object.assign(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null), {
+      account: Object.assign(mkState({}, null).account, { broker: null }),
+    })
+  );
+  api.renderMyBroker();
+  assert(api.el('myBrokerCard').innerHTML.indexOf('未开户') >= 0, '未开户时显示占位而不是报错');
+
+  // 排行行带券商与组内名次
+  api.setState(
+    Object.assign(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null), {
+      rules: Object.assign(mkState({}, null).rules, { initialCash: 1000000 }),
+      players: [
+        { name: 'other', equity: 900000, broker: 'zhaoshang', brokerRank: 1, star: 1 },
+        { name: 'third', equity: 500000, broker: null, brokerRank: 1, star: 1 },
+      ],
+    })
+  );
+  const rank = api.rankRowsHtml();
+  assert(rank.indexOf('组内 #1') >= 0, '玩家总榜带组内名次');
+  assert(rank.indexOf('未开户') >= 0, '无券商的行标未开户');
+}
+
+console.log('\n[13] 席位：五档图标 / 逐笔席位 / 席位榜 / 龙虎榜');
+{
+  assert(api.seatHtml(null).indexOf('none') >= 0, '没有席位时显示 --');
+  const s = api.seatHtml('dongfeng');
+  assert(s.indexOf('/img/broker-dongfeng-96.png') >= 0, '席位小图标走 96px 缩略图（高频位置不用 1024 原图）');
+  assert(s.indexOf('东风') >= 0, '席位必须带两字简称（招伤/东风的红与涨红同色，只靠颜色会误读）');
+
+  const seats = {
+    rows: [
+      { key: 'zhaoshang', abbr: '招伤', name: '招伤证券', buyAmt: 1e7, sellAmt: 2e6, net: 8e6, pct: 40, rank: 1 },
+      { key: 'dongfeng', abbr: '东风', name: '东风财富', buyAmt: 1e6, sellAmt: 5e6, net: -4e6, pct: 30, rank: 2 },
+    ],
+    surge: true,
+    changePct: 8.12,
+    total: 2e7,
+    top: { buy: [{ key: 'zhaoshang', abbr: '招伤', amt: 1e7 }], sell: [{ key: 'dongfeng', abbr: '东风', amt: 5e6 }] },
+  };
+  const st = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  st.markets[0].seats = seats;
+  st.account = Object.assign(st.account, { broker: { key: 'zhaoshang' } });
+  api.setState(st);
+  api.renderSeats();
+  const body = api.el('seatBody').innerHTML;
+  assert(body.indexOf('招伤证券') >= 0 && body.indexOf('东风财富') >= 0, '席位榜渲染券商名');
+  assert(body.indexOf('row-mine') >= 0, '我的席位高亮');
+  assert(body.indexOf('seat-net pos') >= 0 && body.indexOf('seat-net neg') >= 0, '净买入按正负着色');
+  assert(api.el('seatMeta').innerHTML.indexOf('我的席位：招伤') >= 0, '标题栏标出我的席位');
+  assert(api.el('surgeWrap').hidden === false, '涨跌超 7% 时龙虎榜展开');
+  assert(api.el('surgeBuyBody').innerHTML.indexOf('招伤') >= 0, '龙虎榜买入前五席位');
+
+  // 涨幅不足 → 不披露龙虎榜
+  st.markets[0].seats = Object.assign({}, seats, { surge: false, changePct: 1.2 });
+  delete st.markets[0].seats.top;
+  api.setState(JSON.parse(JSON.stringify(st)));
+  api.renderSeats();
+  assert(api.el('surgeWrap').hidden === true, '涨幅不足 ±7% 不披露龙虎榜');
+  // 老服务端没有 seats 段
+  const old = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  api.setState(old);
+  api.renderSeats();
+  assert(api.el('seatBody').innerHTML.indexOf('暂无') >= 0, '老服务端（无 seats 段）不报错');
+}
+
+console.log('\n[14] 追保预警与提前消息');
+{
+  const st = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  api.setState(st);
+  api.renderMarginCall();
+  assert(api.el('marginCallBanner').hidden === true, '没有预警时横幅隐藏');
+  st.account = Object.assign(st.account, {
+    marginCall: { broker: 'zhaoshang', name: '招伤证券', stockName: '大米集团', maintenance: 0.3, trigger: 0.25, exposure: 1e6, need: 50000, left: 20000, side: 'short' },
+  });
+  api.setState(JSON.parse(JSON.stringify(st)));
+  api.renderMarginCall();
+  const banner = api.el('marginCallBanner');
+  assert(banner.hidden === false, '跌破维持线时出现追保横幅');
+  const txt = api.el('marginCallText').textContent;
+  assert(txt.indexOf('追加保证金') >= 0 && txt.indexOf('大米集团') >= 0, `追保文案带上股票：${txt.slice(0, 40)}…`);
+  assert(txt.indexOf('再跌') >= 0, '给出距强平的最后一档空间');
+
+  // 泄露期异动提示
+  api.setState(
+    Object.assign(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null), {
+      newsHints: [{ stockId: STOCK, name: '大米集团', text: '大米集团 出现大额资金异动', leftMs: 3200 }],
+      news: [],
+    })
+  );
+  const hints = api.newsHintsHtml();
+  assert(hints.indexOf('大额资金异动') >= 0, '泄露期给出模糊异动提示（不点方向/原因/是谁）');
+  assert(hints.indexOf('距公开约 3 秒') >= 0, '提示带公开倒计时');
+  assert(hints.indexOf('利好') < 0 && hints.indexOf('利空') < 0, '提示里不含方向');
+  // 提前拿到的消息：未满 4★ 带 masked，满 5★ 给方向
+  const early = api.newsRowsHtml([
+    { id: 'E1', t: Date.now(), dir: 0, type: '未明', scope: '机构', power: 0, stockId: STOCK, stockName: '大米集团', text: '【大米集团】出现未公开信息，方向待确认', until: Date.now() + 3000, publicAt: Date.now() + 3000, early: true, masked: true },
+    { id: 'E2', t: Date.now(), dir: 1, type: '利好', scope: '机构', power: 0.5, stockId: STOCK, stockName: '大米集团', text: '【大米集团】利好', until: Date.now() + 60000, early: true },
+  ]);
+  assert(early.indexOf('未公开') >= 0, '未满 4★ 的提前消息标「未公开」且无方向');
+  assert(early.indexOf('nearly') >= 0, '提前条目左侧有强调');
+  assert(early.indexOf('提前') >= 0, '5★ 的提前消息标「提前」并带方向');
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

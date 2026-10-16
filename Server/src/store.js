@@ -27,6 +27,21 @@ class Account {
     this.tradeHistory = []; // 最近成交
     this.lastOrderAt = null; // 上次下单时间（冷却），null 表示从未下单
     this.createdAt = Date.now();
+
+    // ---- 券商（出身门派，见 Doc/券商方案.md）----
+    // 玩家：登录时必选，落库；NPC：由账户名哈希派生的**派生标签**，只缓存在内存（不落库）。
+    // 两者共用同一个字段，但 broker.forAccount 对 NPC 直接返回全局基准——
+    // 券商对 NPC 是「纯展示、零行为影响」（§11.4.3）。
+    this.broker = null;
+    this.brokerChangedAt = null;
+    // 当前券商的入会交易日号（免费重选窗口 / 转户冷却都按交易日算，不是墙钟）
+    this.brokerSinceDay = null;
+    // 每家券商各一份进度：{key: {volume, profitBase, liquidations, orders, cancels}}
+    this.brokerStats = {};
+    this.freeReselectUsed = false;
+    // 每日免息券：今天这张用掉没有 / 今天是否利息全免（都按交易日号）
+    this.couponUsedDay = null;
+    this.freeInterestDay = null;
   }
 
   /** 取某只股票的融券/计息明细（没有则建一条全零的） */
@@ -130,13 +145,23 @@ class Account {
     return p ? p.lots.reduce((s, l) => s + l.qty, 0) : 0;
   }
 
-  /** 可卖出的多头：已过锁仓时间且未被其他委托占用 */
-  sellableLong(stockId, now) {
+  /**
+   * 可卖出的多头：已过锁仓时间且未被其他委托占用。
+   *
+   * **锁仓时长必须由调用方按账户券商传入**（滑泰 5 秒 / 天疯 8 秒 / 基准 10 秒，
+   * 见 `broker.forAccount().lockMs`）。这里是撮合与 UI 共用的唯一判定点，
+   * 写死全局值会让券商的「T+锁仓砍半」变成一句文案——store 不能 require broker
+   * （会成环），所以只接收，不自己解析。
+   * 缺省回落全局基准：NPC 与无券商账户因此逐位等于引入券商之前的行为。
+   *
+   * @param {number} [lockMs] 该账户券商的锁仓时长
+   */
+  sellableLong(stockId, now, lockMs = config.trade.lockMs) {
     const p = this.longs.get(stockId);
     if (!p) return 0;
     let n = 0;
     for (const lot of p.lots) {
-      if (now - lot.ts >= config.trade.lockMs) {
+      if (now - lot.ts >= lockMs) {
         n += lot.qty - lot.reserved;
       }
     }
@@ -144,9 +169,9 @@ class Account {
   }
 
   /** 真正可卖：可卖多头中未挂入融券池的部分（挂借量按股票取） */
-  freeSellableLong(stockId, now) {
+  freeSellableLong(stockId, now, lockMs = config.trade.lockMs) {
     const offered = this.ledgerOf(stockId).lendOffered || 0;
-    return Math.max(0, this.sellableLong(stockId, now) - offered);
+    return Math.max(0, this.sellableLong(stockId, now, lockMs) - offered);
   }
 
   /**
@@ -168,14 +193,17 @@ class Account {
     return p.lots.reduce((s, l) => s + (l.qty - l.reserved), 0);
   }
 
-  /** 从多头 FIFO 中预留 qty（需可卖），成功返回 true */
-  reserveLong(stockId, qty, now) {
+  /**
+   * 从多头 FIFO 中预留 qty（需可卖），成功返回 true。
+   * `lockMs` 与 `sellableLong` 同口：由调用方传账户券商的锁仓时长，缺省回落全局基准
+   */
+  reserveLong(stockId, qty, now, lockMs = config.trade.lockMs) {
     let need = qty;
     const p = this.longs.get(stockId);
     if (!p) return false;
     for (const lot of p.lots) {
       if (need <= 0) break;
-      if (now - lot.ts < config.trade.lockMs) continue;
+      if (now - lot.ts < lockMs) continue;
       const avail = lot.qty - lot.reserved;
       if (avail <= 0) continue;
       const take = Math.min(avail, need);

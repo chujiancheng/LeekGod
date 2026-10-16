@@ -8,6 +8,7 @@ const config = require('./config');
 const { OrderBook } = require('./orderbook');
 const { r2 } = require('./store');
 const flow = require('./flow');
+const broker = require('./broker');
 
 const ACTIONS = {
   BUY_OPEN: 'buy_open', // 买入开多
@@ -54,6 +55,13 @@ class Market {
     this._auctionRunning = false;
     // 本交易日是否已经成交过（第一笔成交决定「今开」，日终归零）
     this.dayTradeCount = 0;
+    // 席位流水（§11.3）：当日各券商的买入/卖出成交额，日终清零。
+    // 只喂展示层（席位榜/龙虎榜），**不参与任何数值计算**
+    this.seatFlow = new Map();
+    // 东风的「论坛热度」（§3.6 人气 buff）：当日东风客户在本股的成交额 → 0~1 的热度，
+    // 再放大该股散户 NPC 的跟风强度。没有东风客户交易时恒为 0，行为与引入券商之前一致
+    this.dongfengTurnover = 0;
+    this.dongfengHeat = 0;
     // 由 Game 注入的持久化器；未注入时纯内存运行（测试脚本就是这样）
     this.journal = null;
     // 跨股票取价：风控要按**整个账户**算权益，就得知道账户在其它股票上的持仓值多少。
@@ -84,6 +92,26 @@ class Market {
     if (!this.journal) return;
     this.journal.touch(account);
     if (order) this.journal.orderChanged(order);
+    // 席位标识挂在委托对象上，让存档侧一并写进成交流水（§11.4.5）
+    if (order && account) order.broker = account.broker || null;
+  }
+
+  // ---------- 券商（per-账户覆盖） ----------
+
+  /** 当前交易日号（没有时钟时 0）：券商的星级/转户/免息券都按交易日算 */
+  dayNumber(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return 0;
+    return dc.locate(now).day;
+  }
+
+  /**
+   * 某账户此刻的有效券商参数。
+   * 账户没有 broker（老存档、NPC、测试里裸造的账户）→ 逐位回落全局基准，
+   * 行为与引入券商之前完全一致（§9 D6 两级兜底）。
+   */
+  brokerFor(account, now = Date.now()) {
+    return broker.forAccount(account, { day: this.dayNumber(now) });
   }
 
   /**
@@ -411,6 +439,11 @@ class Market {
     this.dayTradeCount = 0;
     // 当日内外盘随成交量额一起清零，新的一天重新累计
     flow.resetDayFlow(this);
+    // 席位流水同理：席位榜是「当日」口径（龙虎榜每天重排）
+    this.seatFlow.clear();
+    // 人气热度也按日重置（论坛热度是当日情绪，不跨夜累积）
+    this.dongfengTurnover = 0;
+    this.dongfengHeat = 0;
     let canceled = 0;
     if (cancelOrders) {
       for (const o of [...this.book.orders.values()]) {
@@ -500,6 +533,24 @@ class Market {
     return Math.max(0, this.lendTotal - this.lendBorrowed - this.lendReserved);
   }
 
+  /**
+   * 某账户**实际能借到**的券源：池子可借量与「本账户券源容量」取小。
+   *
+   * 券源容量 = 池子总容量 × 券商券源系数（§6「融券券源 | margin.lending 容量乘券商系数」）：
+   * 招伤只有 60%（再加上拥挤税 0.7 → 42%），天疯/嗨通 90%。
+   * 系数 ≥ 1 时上限恒不生效（单账户借出量永远 ≤ 池子总量），
+   * 所以 NPC 与无券商账户走这条路径时行为与引入券商之前逐位一致。
+   */
+  lendAvailableFor(account) {
+    const avail = this.lendAvailable();
+    if (!account) return avail;
+    const bk = this.brokerFor(account);
+    const mul = bk.lendCapacityMul;
+    if (!(mul < 1)) return avail;
+    const cap = Math.floor(this.lendTotal * mul) - account.shortQty(this.stockId);
+    return Math.max(0, Math.min(avail, cap));
+  }
+
   /** 池子紧张度 s ∈ [0,1]：已借出 / 总挂借 */
   lendUtilization() {
     return this.lendTotal > 0 ? Math.min(1, this.lendBorrowed / this.lendTotal) : 0;
@@ -511,6 +562,16 @@ class Market {
     if (!cfg || !cfg.enabled) return 0;
     const raw = cfg.baseMinuteRate * (1 + this.lendUtilization() * cfg.stressK);
     return Math.min(raw, cfg.maxMinuteRate);
+  }
+
+  /**
+   * 某账户实际承担的分钟利率 = 市场利率 × 本券商券息倍率（招伤「券息上浮」1.4×）。
+   * 上浮出来的那一部分是**券商的利差**，与融资利息一样从权益里蒸发（见 accrueLendingInterest）。
+   */
+  lendMinuteRateFor(account) {
+    const base = this.lendMinuteRate();
+    if (base <= 0 || !account) return base;
+    return base * (this.brokerFor(account).lendRateMul || 1);
   }
 
   /** 某账户在本股挂借中不可撤的量（已借出 + 在途开空占用，按池子比例分摊） */
@@ -536,7 +597,7 @@ class Market {
     qty = Math.floor(Number(qty));
     if (!Number.isFinite(qty) || qty <= 0) return { ok: false, error: '数量无效' };
     if (qty % lot !== 0) return { ok: false, error: `挂借数量必须为 ${lot} 股的整数倍` };
-    const free = account.freeSellableLong(this.stockId, now);
+    const free = account.freeSellableLong(this.stockId, now, this.brokerFor(account, now).lockMs);
     if (qty > free) return { ok: false, error: `可挂借不足，当前可挂借 ${free} 股` };
     const led = account.ledgerOf(this.stockId);
     led.lendOffered = (led.lendOffered || 0) + qty;
@@ -576,19 +637,22 @@ class Market {
     const tickRate = this.lendMinuteRate() * (config.tickIntervalMs / 60000);
     if (tickRate <= 0) return;
     const last = this.lastPrice;
-    // 总利息池 = 已借出市值 × tick 利率
+    // 总利息池 = 已借出市值 × tick 利率（**基准利率**，不含券商上浮）
     const totalInterest = this.lendBorrowed * last * tickRate;
     if (totalInterest <= 0) return;
+    const day = this.dayNumber(now);
 
     // 1) 向空头收取：按各账户空头市值占比分摊（借券部分 = min(shortQty, lendBorrowed 口径下全算借券）
-    //    allowNakedShort=false 时全部空头都来自池；=true 时不调用本函数的借券计息路径外的裸空不收息
+    //    allowNakedShort=false 时全部空头都来自池；=true 时不调用本函数的借券计息路径外的裸空不收息）
+    //    费率按**各账户自己的券商**取：招伤券息上浮 1.4×；每日免息券生效的账户这一档直接免收
     let collected = 0;
     const payers = [];
     for (const acc of this._allAccountsForInterest()) {
       const shortQty = acc.shortQty(this.stockId);
       if (shortQty <= 0) continue;
+      if (broker.interestWaived(acc, day)) continue;
       const share = shortQty / this.lendBorrowed;
-      const owed = totalInterest * share;
+      const owed = totalInterest * share * (this.brokerFor(acc, now).lendRateMul || 1);
       if (owed <= 0) continue;
       let pay = 0;
       const fromCash = Math.min(owed, Math.max(0, acc.cash));
@@ -616,8 +680,10 @@ class Market {
       if (pay > 0 || rest > 0) this.notifyInterest(acc);
     }
 
-    // 2) 向出借方分配：按挂借量占总挂借的比例（被借走的才真正参与计息分配）
-    if (collected > 0) this.payLenders(collected);
+    // 2) 向出借方分配：按挂借量占总挂借的比例（被借走的才真正参与计息分配）。
+    //    只分「基准利率那一份」：券商上浮收上来的利差与融资利息一样直接从权益里蒸发，
+    //    不能凭空转给出借人（那会无中生有地造钱）
+    if (collected > 0) this.payLenders(Math.min(collected, totalInterest));
   }
 
   /**
@@ -707,9 +773,12 @@ class Market {
     if (!cfg || !cfg.enabled) return;
     const tickRate = this.financeMinuteRate() * (config.tickIntervalMs / 60000);
     if (tickRate <= 0) return;
+    const day = this.dayNumber(now);
     for (const acc of this._allAccountsForInterest()) {
       const pos = acc.longs.get(this.stockId);
       if (!pos || !pos.lots.length) continue;
+      // 每日免息券生效中：这一天的融资利息全免（招伤自带 / 拥挤税补贴档）
+      if (broker.interestWaived(acc, day)) continue;
       let total = 0;
       for (const lot of pos.lots) total += lot.debt || 0;
       if (total <= 0) continue;
@@ -759,10 +828,20 @@ class Market {
     if (!Number.isFinite(price) || price <= 0) return { ok: false, error: '价格无效' };
     if (!Number.isInteger(qty) || qty <= 0) return { ok: false, error: '数量无效' };
 
+    // 本账户此刻的有效券商参数（两级兜底：broker 覆盖 → 全局默认）。
+    // 后面所有费率/冷却/保证金/融资/券源全部读它，不再直接读 config
+    const bk = this.brokerFor(account, now);
+
     const isOpen = action === ACTIONS.BUY_OPEN || action === ACTIONS.SELL_OPEN;
     const lot = this.stock.lotSize;
     if (isOpen && qty % lot !== 0) {
       return { ok: false, error: `开仓数量必须为 ${lot} 股的整数倍` };
+    }
+    // 券商的禁买名单（天疯「禁买 2 只小票」）：**只拦开仓**。
+    // 平仓放行是有意的——转户到禁买券商的玩家若手里正好持有这两只，
+    // 连开仓带平仓一起禁会把他永久锁在里面，那不是一个代价、是一个 bug
+    if (isOpen && bk.features && bk.features.forbidStocks && bk.features.forbidStocks.includes(this.stock.id)) {
+      return { ok: false, error: `${bk.name}不接受本股票的新开仓（禁买名单内）` };
     }
     if (!this.inBand(price)) {
       const b = this.band();
@@ -782,9 +861,12 @@ class Market {
       }
     }
 
-    // 下单冷却（NPC 不受限）
+    // 下单冷却（NPC 不受限）。冷却时长按**账户券商**取：滑泰 0.5 秒、钟信 3 秒。
+    // 嗨通证券的「偶发通道卡顿」也落在这里（约 2% 的报单多等 1 个 tick）——
+    // 设计稿 §9 D4 明确不做侵入撮合的「报单延迟 tick」，用冷却表达同源效果、零侵入。
+    // glitchDelay 只在「这一单本可以下」的边界上多要一个 tick（无券商/无该 feature 恒为 0）
     if (!account.isNPC && !opts.noCooldown && account.lastOrderAt != null) {
-      const wait = config.trade.cooldownMs - (now - account.lastOrderAt);
+      const wait = bk.cooldownMs + broker.glitchDelay(account, bk) - (now - account.lastOrderAt);
       if (wait > 0) {
         return { ok: false, error: `下单过于频繁，请 ${(wait / 1000).toFixed(1)} 秒后再试`, cooldownMs: wait };
       }
@@ -801,8 +883,12 @@ class Market {
       }
     }
 
-    const feeRate = config.trade.feeRate;
-    const { ratio, maintenance } = config.margin;
+    const feeRate = bk.feeRate;
+    const ratio = bk.marginRatio;
+    const maintenance = bk.maintenance;
+    // 自备比例按**账户券商**取：钟信 40%（2.5 倍）、天疯 30%（3.33 倍）、滑泰 60%（1.67 倍）。
+    // 声明在 switch 之外，因为下面的委托对象要用它把冻结口径锁在挂单那一刻
+    const finRatio = bk.financeRatio;
     let freeze = 0; // 冻结到 orderFrozen 的金额
     let precheck = '';
 
@@ -832,7 +918,7 @@ class Market {
           if (eq < need) return { ok: false, error: '保证金不足，无法融资买入' };
           // 自备资金 = 成交市值 × ratio，手续费随借入部分进负债（见 settleBuy）。
           // 冻结若额外含一份全款手续费，"2 倍"就买不到整 2 倍：满仓玩家会被最后几十元卡住
-          freeze = r2(price * qty * finCfg.ratio);
+          freeze = r2(price * qty * finRatio);
         } else {
           freeze = r2(price * qty * (1 + feeRate));
         }
@@ -840,11 +926,14 @@ class Market {
         break;
       }
       case ACTIONS.SELL_CLOSE: {
-        // 挂入融券池的券不能再卖：可卖 = freeSellableLong（可卖 − 已挂借）
-        const sellable = account.freeSellableLong(this.stock.id, now);
+        // 挂入融券池的券不能再卖：可卖 = freeSellableLong（可卖 − 已挂借）。
+        // 锁仓时长按**账户券商**取（滑泰 5 秒 / 天疯 8 秒 / 基准 10 秒）——
+        // 与下面那条提示文案、以及 reserveLong 必须同源，否则会出现
+        // 「提示说 5 秒、实际锁 10 秒」的自相矛盾
+        const sellable = account.freeSellableLong(this.stock.id, now, bk.lockMs);
         if (sellable < qty) {
           const locked = account.longQty(this.stock.id) - sellable;
-          precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${config.trade.lockMs / 1000} 秒锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
+          precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${bk.lockMs / 1000} 秒锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
           return { ok: false, error: precheck };
         }
         // 融资负债预检：深跌破位时卖出款可能盖不住将偿还的负债，此时要求现金补差。
@@ -852,7 +941,7 @@ class Market {
         // 必须先预览再预留：previewFinanceDebt 只看未预留批次，先 reserve 会把自己的
         // 预留段算成"他人占用"，预览金额直接归零（与 BUY_CLOSE 的保证金预览同一口径）
         const repayPreview = account.previewFinanceDebt(this.stock.id, qty);
-        if (!account.reserveLong(this.stock.id, qty, now)) {
+        if (!account.reserveLong(this.stock.id, qty, now, bk.lockMs)) {
           return { ok: false, error: '可卖数量不足' };
         }
         if (repayPreview > 0 && account.cash + price * qty < repayPreview + r2(price * qty * feeRate)) {
@@ -873,10 +962,13 @@ class Market {
           if (!config.margin.lending || !config.margin.lending.enabled) {
             return { ok: false, error: '融券做空未开放' };
           }
-          if (this.lendAvailable() < qty) {
+          // 券源按**账户券商**折算：招伤的券源只有池子的 60%、拥挤重罚档再打 0.7。
+          // 券源充裕时（系数 ≥1）这个上限恒不生效，所以 NPC 与无券商账户行为逐位不变
+          const avail = this.lendAvailableFor(account);
+          if (avail < qty) {
             return {
               ok: false,
-              error: `可借券源不足，当前可借 ${this.lendAvailable()} 股（请先有人挂借出）`,
+              error: `可借券源不足，当前可借 ${avail} 股（请先有人挂借出）`,
             };
           }
           this.lendReserved += qty; // 占用券源，成交/撤单时释放
@@ -954,6 +1046,13 @@ class Market {
       filled: 0,
       frozen: freeze,
       finance: action === ACTIONS.BUY_OPEN && !!opts.finance, // 融资开多标记（结算按此拆自备/借入）
+      // **结算按挂单时的券商参数**，与冻结口径锁死：
+      // 每周之星在交易日边界上轮换，A→B 那一刻若同一张挂单还活着，
+      // 用结算当刻的费率会与冻结的钱对不上（沿用 order.finance 那条既有推理）
+      feeRate,
+      finRatio,
+      marginRatio: ratio,
+      broker: account.broker || null, // 席位（§11.3）：随委托一路带到成交流水
       ts: now,
       status: 'live',
     };
@@ -1083,7 +1182,23 @@ class Market {
     }
     if (taker.filled >= taker.qty) this.finishOrder(taker);
 
-    this.onTrade(price, qty, aggressorSide, now);
+    // 席位（§11.3）：成交价 = 被动方挂单价，买卖双方各自的券商就是这笔的买卖席位
+    const buyOrder = taker.side === 'buy' ? taker : maker;
+    const sellOrder = taker.side === 'buy' ? maker : taker;
+    const buyBroker = buyOrder.account.broker || null;
+    const sellBroker = sellOrder.account.broker || null;
+    const amount = r2(price * qty);
+    this.addSeatFlow(buyBroker, sellBroker, amount);
+    // 券商进度（星级用）：只记玩家
+    this.addBrokerProgress(buyOrder.account, amount, now);
+    this.addBrokerProgress(sellOrder.account, amount, now);
+    // 东风人气 buff 的燃料：只统计**东风玩家的成交额**（NPC 的东风标签不算，
+    // 否则热度会由 NPC 自己凭空烧起来，与"本券商客户把论坛吵热"的设定不符）
+    for (const o of [buyOrder, sellOrder]) {
+      if (!o.account.isNPC && o.account.broker === 'dongfeng') this.dongfengTurnover += amount;
+    }
+
+    this.onTrade(price, qty, aggressorSide, now, buyBroker, sellBroker);
 
     // 记录双方成交：内存流水用于客户端展示，落库明细用于重启后恢复成交记录
     this.notifyChange(taker.account, taker);
@@ -1116,6 +1231,9 @@ class Market {
           fee: o.side === 'buy' ? feeBuy : feeSell,
           tradeSeq,
           t: now,
+          // 席位随成交流水落库，重启后磁带的买卖席位能原样恢复（§11.4.5）
+          broker: o.account.broker || null,
+          counterBroker: (o === taker ? maker : taker).account.broker || null,
         });
       }
     }
@@ -1125,7 +1243,64 @@ class Market {
     if (maker.account !== taker.account) this.maybeLiquidate(maker.account, now);
   }
 
-  onTrade(price, qty, aggressorSide, now) {
+  /**
+   * 席位流水累计（§11.3）：按券商聚合当日买入/卖出成交额。
+   *
+   * **只喂展示层**——席位榜与龙虎榜读它，拥挤度不读它（拥挤度是配置里的固有属性，§9 D3）。
+   * 系统兜底账户（SYSTEM）没有券商，不入账。
+   */
+  addSeatFlow(buyer, seller, amount) {
+    if (buyer && buyer !== 'SYSTEM') {
+      const row = this.seatFlow.get(buyer) || { buyAmt: 0, sellAmt: 0, buyVol: 0, sellVol: 0 };
+      row.buyAmt += amount;
+      this.seatFlow.set(buyer, row);
+    }
+    if (seller && seller !== 'SYSTEM') {
+      const row = this.seatFlow.get(seller) || { buyAmt: 0, sellAmt: 0, buyVol: 0, sellVol: 0 };
+      row.sellAmt += amount;
+      this.seatFlow.set(seller, row);
+    }
+  }
+
+  /**
+   * 玩家的券商进度累计（§5.4 星级 / 合规分）。
+   *
+   * **NPC 不计**：NPC 的券商只是展示标签，给它记进度毫无意义，还白白增加每 tick 的写入。
+   * 累计成交额是「在这家券商做的量」，所以转户后目标券商从零开始（这正是设计意图）。
+   */
+  addBrokerProgress(acc, amount, now) {
+    if (!acc || acc.isNPC || !acc.broker) return;
+    const rec = broker.statsOf(acc, acc.broker);
+    rec.volume = (rec.volume || 0) + amount;
+  }
+
+  /** 东风人气 buff 的配置（写在券商条目里，与券商的其它参数放在一起） */
+  dongfengHeatCfg() {
+    const b = config.brokers && config.brokers.list && config.brokers.list.dongfeng;
+    return (b && b.heat) || null;
+  }
+
+  /**
+   * 推进「论坛热度」（§3.6）：当日东风客户成交额占流通市值的比例 → 0~1 的热度，
+   * 每 tick 向目标值缓动（涨得快、退得慢）。
+   *
+   * **只调制散户 NPC 的交易行为**（跟风强度），绝不碰公允价值与噪声——项目纪律。
+   * 没有东风客户、或配置关掉时热度恒为 0，NPC 行为逐位不变。
+   */
+  updateDongfengHeat(now = Date.now()) {
+    const cfg = this.dongfengHeatCfg();
+    if (!cfg || !cfg.enabled) {
+      this.dongfengHeat = 0;
+      return 0;
+    }
+    const cap = this.stock.floatShares * this.stock.initPrice * (cfg.refTurnoverPct || 0.02);
+    const target = cap > 0 ? Math.min(1, this.dongfengTurnover / cap) : 0;
+    const rate = cfg.decayPerTick == null ? 0.004 : cfg.dongfengDecayPerTick || cfg.decayPerTick;
+    this.dongfengHeat = Math.max(0, this.dongfengHeat + (target - this.dongfengHeat) * rate);
+    return this.dongfengHeat;
+  }
+
+  onTrade(price, qty, aggressorSide, now, buyBroker, sellBroker) {
     // 本交易日第一笔成交决定「今开」，同时把最高/最低从昨收的占位值上摘下来
     if (this.dayTradeCount === 0) {
       this.open = price;
@@ -1146,6 +1321,9 @@ class Market {
       price,
       qty,
       side: aggressorSide, // 主动方向：buy=买盘主动(sell贴)、sell=卖盘主动
+      // 逐笔的「买方席位 / 卖方席位」（§11.3）
+      buyBroker: buyBroker || null,
+      sellBroker: sellBroker || null,
     });
     if (this.trades.length > config.market.tradeTapeSize) this.trades.length = config.market.tradeTapeSize;
   }
@@ -1153,26 +1331,28 @@ class Market {
   /** 买入方向结算（开多 / 平空） */
   settleBuy(order, price, qty, now) {
     const acc = order.account;
-    const fee = r2(price * qty * config.trade.feeRate);
+    const feeRate = order.feeRate != null ? order.feeRate : config.trade.feeRate;
+    const fee = r2(price * qty * feeRate);
     // 系统兜底账户只是虚拟对手盘，不参与建仓/持仓统计，否则会无限累积
     const isGhost = acc === SYSTEM_ACCOUNT;
 
     if (order.action === ACTIONS.BUY_OPEN) {
       const finCfg = config.margin.finance;
+      const finRatio = order.finRatio != null ? order.finRatio : finCfg.ratio;
       const fin = !!order.finance; // 按下单时的标记结算（冻结口径与之一致，不受配置热改影响）
       // 退回按挂单价冻结的资金，按实际成交价结算
-      const frozenPerShare = fin ? finCfg.ratio : 1 + config.trade.feeRate;
+      const frozenPerShare = fin ? finRatio : 1 + feeRate;
       const rel = this.releaseFrozen(order, r2(order.price * qty * frozenPerShare));
       const cost = r2(price * qty);
       // 融资单只支付自备部分（ratio × 成交市值），手续费不扣现金而是并入负债：
       // 冻结口径只含自备部分，若手续费另从现金扣，满仓时会因差几十元当场结算成负数
-      const selfPay = fin ? r2(cost * finCfg.ratio) : cost;
+      const selfPay = fin ? r2(cost * finRatio) : cost;
       const cashFee = fin ? 0 : fee;
       acc.cash = r2(acc.cash + rel - selfPay - cashFee);
       if (!isGhost) {
         // 新买入批次：以本次成交时间起算锁仓；融资单带负债（借入本金 + 开仓手续费，利息按 tick 摊入）。
         // principal 是其中借来的本金部分（固定不动），debt 随利息复利上浮，两者之差就是这批已计利息。
-        const borrow = fin ? r2(cost * (1 - finCfg.ratio) + fee) : 0;
+        const borrow = fin ? r2(cost * (1 - finRatio) + fee) : 0;
         acc.longPos(order.stockId).lots.push({
           qty,
           price,
@@ -1186,7 +1366,7 @@ class Market {
       }
     } else {
       // 平空：退回费用预估 + 释放保证金 + 支付买入款（盈亏只记账，现金里隐含在原始卖出去处）
-      const rel = this.releaseFrozen(order, r2(order.price * qty * config.trade.feeRate));
+      const rel = this.releaseFrozen(order, r2(order.price * qty * feeRate));
       const cons = acc.consumeShort(order.stockId, qty);
       acc.shortMargin = r2(acc.shortMargin - cons.margin);
       const pnl = r2(cons.openSum - price * cons.qty);
@@ -1207,24 +1387,26 @@ class Market {
   /** 卖出方向结算（平多 / 开空） */
   settleSell(order, price, qty, now) {
     const acc = order.account;
-    const fee = r2(price * qty * config.trade.feeRate);
+    const feeRate = order.feeRate != null ? order.feeRate : config.trade.feeRate;
+    const fee = r2(price * qty * feeRate);
     const isGhost = acc === SYSTEM_ACCOUNT;
 
     if (order.action === ACTIONS.SELL_CLOSE) {
-      const rel = this.releaseFrozen(order, r2(order.price * qty * config.trade.feeRate));
+      const rel = this.releaseFrozen(order, r2(order.price * qty * feeRate));
       const cons = acc.consumeLong(order.stockId, qty);
       // 只按实际扣减到的持仓入账：持仓不足时不得凭空产生现金
       const sold = Math.min(cons.qty, qty);
-      const soldFee = r2(price * sold * config.trade.feeRate);
+      const soldFee = r2(price * sold * feeRate);
       // 卖出款优先偿还该批次融资负债（利息已在摊入时计入 realizedPnL，这里只还钱）
       acc.cash = r2(acc.cash + price * sold + rel - cons.debt - soldFee);
       acc.realizedPnL = r2(acc.realizedPnL + (price * sold - cons.cost) - soldFee);
       // 按实际扣减到的数量计费，与被扣的手续费保持一致
       return soldFee;
     } else {
-      // 开空：卖出所得入账，按成交市值冻结保证金
+      // 开空：卖出所得入账，按成交市值冻结保证金。保证金率按账户券商（天疯 30% / 滑泰 60%）
+      const marginRatio = order.marginRatio != null ? order.marginRatio : config.margin.ratio;
       const proceeds = r2(price * qty);
-      const marginAdd = r2(proceeds * config.margin.ratio);
+      const marginAdd = r2(proceeds * marginRatio);
       acc.cash = r2(acc.cash + proceeds - marginAdd - fee);
       acc.shortMargin = r2(acc.shortMargin + marginAdd);
       if (!isGhost) {
@@ -1323,7 +1505,14 @@ class Market {
     // 阶段切换那一 tick 里 phase 已经翻到下一段，continuousNow() 会误判成"已进入连续竞价"，
     // 此时竞价撮合正在跑（runAuction 中），强平单会被交叉盘口拉飞，故全程冻结
     if (this._auctionRunning) return false;
-    const m = config.margin.maintenance;
+    const bk = this.brokerFor(account, now);
+    const feeRate = bk.feeRate;
+    const m = bk.maintenance;
+    // 强平触发线 = 维持线 − 缓冲。「预警 + 缓一档」：刚跌破维持线时只预警（见
+    // serializeAccount 的 marginCall），再低 5 个百分点才真强平，中间那段是留给
+    // 玩家补保证金/等反弹的窗口。天疯的「零缓冲强平」就是把这一档拿掉——破线即全平。
+    // 缓冲为 0 时触发线 = 维持线，与引入券商之前的判据逐位一致
+    const mTrig = m - (bk.liquidationBuffer || 0);
     const last = this.lastPrice;
     // 组合口径：权益含账户全部持仓（各股按各股最新价），敞口也按账户总空头/总融资多头计。
     // 多股票下若只看本股，一只股票的亏损不会惊动另一只的持仓，穿仓可以藏在没被扫到的股票里。
@@ -1335,8 +1524,8 @@ class Market {
     // 本股没有对应敞口就不由本市场处置（交给持有该敞口的市场去强平）
     const myShort = account.shortQty(this.stockId);
     const myLong = account.longQty(this.stockId);
-    const shortTriggered = shortMV > 0 && myShort > 0 && eq < m * shortMV;
-    const longTriggered = debt > 0 && longMV > 0 && myLong > 0 && eq < m * longMV;
+    const shortTriggered = shortMV > 0 && myShort > 0 && eq < mTrig * shortMV;
+    const longTriggered = debt > 0 && longMV > 0 && myLong > 0 && eq < mTrig * longMV;
     if (!shortTriggered && !longTriggered) return false;
 
     account._liquidating = true;
@@ -1360,7 +1549,7 @@ class Market {
         if (totalShort <= 0 || curEq >= m * totalShort) break;
 
         // 覆盖全部空头所需资金估算
-        const needCash = r2(needQty * this.lastPrice * (1 + config.trade.feeRate));
+        const needCash = r2(needQty * this.lastPrice * (1 + feeRate));
         // 挂借中的券不能强卖；全部挂借时跳过本分支直接走买入平空，
         // 否则 forceSellLong 返回 0 会 break 掉整个强平循环
         const sellableLong = account.forceSellableLong(this.stockId);
@@ -1373,7 +1562,7 @@ class Market {
         }
         // 买入平空（能负担多少平多少）
         const budget = account.cash + account.shortMargin;
-        const maxQty = Math.floor(budget / (this.lastPrice * (1 + config.trade.feeRate)));
+        const maxQty = Math.floor(budget / (this.lastPrice * (1 + feeRate)));
         const target = Math.min(needQty, Math.max(maxQty, 0));
         if (target <= 0) {
           // 完全没钱：穿仓兜底，允许现金为负，全部强平
@@ -1398,7 +1587,7 @@ class Market {
         // 需卖出市值 = (维持线 - 权益) / (维持率 - 手续费率)：
         // 卖出费用拉低权益、市值缩水同等拉低维持线，两者每元卖出净改善 (m - fee)。
         // 维持线用账户总多头，缺口按本股可卖量分摊消耗
-        const xNeed = (m * totalLong - curEq) / (m - config.trade.feeRate);
+        const xNeed = (m * totalLong - curEq) / (m - feeRate);
         const lot = this.stock.lotSize;
         const sellable = account.forceSellableLong(this.stockId);
         let qtyNeed = Math.ceil((Math.max(0, xNeed) / Math.max(this.lastPrice, 0.01) / lot)) * lot;
@@ -1417,8 +1606,44 @@ class Market {
       account.liquidations = account.liquidations || [];
       account.liquidations.unshift({ t: now, events });
       if (account.liquidations.length > 20) account.liquidations.length = 20;
+      // 爆仓记录计入券商进度：4★ / 5★ 的「无爆仓记录」这一档就是靠它守门（§9 D7）
+      if (account.broker && !account.isNPC) {
+        broker.statsOf(account, account.broker).liquidations += 1;
+      }
     }
     return events.length > 0;
+  }
+
+  /**
+   * 是否已跌破维持线、但还没到强平触发线 —— 也就是「预警」档（§7 追保通知）。
+   * 只读展示：客户端据此显示券商的追加保证金通知（文案随券商风格变），
+   * 天疯的缓冲是 0，所以它永远给不出预警，破线就是全平
+   */
+  marginCallState(account, now = Date.now()) {
+    if (!account || account === SYSTEM_ACCOUNT) return null;
+    const bk = this.brokerFor(account, now);
+    const m = bk.maintenance;
+    const mTrig = m - (bk.liquidationBuffer || 0);
+    if (mTrig >= m) return null; // 零缓冲：没有预警档
+    const eq = this.equityOf(account);
+    const shortMV = account.totalShortMV((sid) => this._price(sid));
+    const longMV = account.totalLongValue((sid) => this._price(sid));
+    const shortWarn = shortMV > 0 && eq < m * shortMV && eq >= mTrig * shortMV;
+    const longWarn = account.totalFinanceDebt() > 0 && longMV > 0 && eq < m * longMV && eq >= mTrig * longMV;
+    if (!shortWarn && !longWarn) return null;
+    const exposure = shortWarn ? shortMV : longMV;
+    const need = r2(m * exposure - eq);
+    return {
+      broker: bk.key,
+      name: bk.name,
+      maintenance: m,
+      trigger: mTrig,
+      exposure: r2(exposure),
+      need, // 需要补多少权益才能回到维持线上
+      // 距离强平触发线还有多少权益空间（跌到 0 就强平）
+      left: r2(eq - mTrig * exposure),
+      side: shortWarn ? 'short' : 'long',
+    };
   }
 
   /** 强卖多头（吃买盘，不足系统兜底），返回成交股数 */
@@ -1478,7 +1703,7 @@ class Market {
         price = ask.price;
         const afford = allowDebt
           ? need
-          : Math.min(need, Math.floor((account.cash + account.shortMargin) / (price * (1 + config.trade.feeRate))));
+          : Math.min(need, Math.floor((account.cash + account.shortMargin) / (price * (1 + this.brokerFor(account, now).feeRate))));
         if (afford <= 0) break;
         take = Math.min(afford, remain);
         if (!this.isSettleable(ask, take)) {
@@ -1488,7 +1713,7 @@ class Market {
       } else {
         price = this.clampPrice(this.lastPrice * (1 + config.margin.liquidationSlippage));
         if (!allowDebt) {
-          const afford = Math.floor((account.cash + account.shortMargin) / (price * (1 + config.trade.feeRate)));
+          const afford = Math.floor((account.cash + account.shortMargin) / (price * (1 + this.brokerFor(account, now).feeRate)));
           if (afford <= 0) break;
           take = Math.min(need, afford);
         } else {
@@ -1507,6 +1732,7 @@ class Market {
 
   /** 强平用的临时订单（不入簿） */
   makeForceOrder(account, action, price, qty) {
+    const bk = this.brokerFor(account);
     return {
       id: 'F' + Math.random().toString(36).slice(2, 8),
       stockId: this.stock.id,
@@ -1518,6 +1744,10 @@ class Market {
       qty,
       filled: 0,
       frozen: 0,
+      feeRate: bk.feeRate, // 强平也按账户券商的费率计费
+      finRatio: bk.financeRatio,
+      marginRatio: bk.marginRatio,
+      broker: account.broker || null,
       ts: Date.now(),
       status: 'live',
       force: true,
@@ -1543,10 +1773,96 @@ class Market {
     };
   }
 
+  /**
+   * 席位榜 / 龙虎榜（§11.3）：按券商聚合当日净买入排行。
+   * 个股当日涨跌超 ±7% 时额外披露「买卖前五席位」（真实龙虎榜就是这么披露的）。
+   * 数据只来自 seatFlow，**不参与任何数值计算**
+   */
+  seatBoard() {
+    const cfg = (config.brokers && config.brokers.seat) || {};
+    if (!cfg.enabled) return null;
+    let total = 0;
+    for (const v of this.seatFlow.values()) total += v.buyAmt + v.sellAmt;
+    const rows = [];
+    for (const b of broker.list()) {
+      const v = this.seatFlow.get(b.key);
+      if (!v) continue;
+      rows.push({
+        key: b.key,
+        abbr: b.abbr,
+        name: b.name,
+        buyAmt: r2(v.buyAmt),
+        sellAmt: r2(v.sellAmt),
+        net: r2(v.buyAmt - v.sellAmt),
+        pct: total > 0 ? Math.round(((v.buyAmt + v.sellAmt) / total) * 100) : 0,
+      });
+    }
+    rows.sort((a, b) => b.net - a.net || (a.key < b.key ? -1 : 1));
+    rows.forEach((r, i) => {
+      r.rank = i + 1;
+    });
+    const changePct = this.prevClose ? r2(((this.lastPrice - this.prevClose) / this.prevClose) * 100) : 0;
+    const surge = total > 0 && Math.abs(changePct) >= (cfg.surgePct || 7);
+    const out = {
+      rows: rows.slice(0, cfg.leaderboardRows || 6),
+      surge,
+      changePct,
+      total: r2(total),
+    };
+    if (surge) {
+      const top = (field) =>
+        [...rows]
+          .filter((r) => r[field] > 0)
+          .sort((a, b) => b[field] - a[field])
+          .slice(0, cfg.topRows || 5)
+          .map((r) => ({ key: r.key, abbr: r.abbr, amt: r[field] }));
+      out.top = { buy: top('buyAmt'), sell: top('sellAmt') };
+    }
+    return out;
+  }
+
+  /**
+   * 五档 + 每档的**挂单券商构成**（§11.3.1）：每档显示占比最高的前 N 家券商图标，
+   * 一眼看出这个价位是哪家在堆货。纯展示，不影响撮合。
+   */
+  depthWithBrokers(levels, topN) {
+    const agg = (book) => {
+      const out = [];
+      const idx = new Map();
+      for (const o of book) {
+        let row = idx.get(o.price);
+        if (row === undefined) {
+          // 书是按价格有序的，所以「已收满前 N 档后又见到新价」后面全是更远的档，直接跳过
+          if (out.length >= levels) continue;
+          row = { price: o.price, qty: 0, by: new Map() };
+          idx.set(o.price, row);
+          out.push(row);
+        }
+        const r = o.qty - (o.filled || 0);
+        if (r <= 0) continue;
+        row.qty += r;
+        const key = o.account && o.account.broker ? o.account.broker : null;
+        if (key) row.by.set(key, (row.by.get(key) || 0) + r);
+      }
+      for (const row of out) {
+        row.brokers = [...row.by.entries()]
+          .map(([key, qty]) => ({ key, qty, pct: row.qty > 0 ? Math.round((qty / row.qty) * 100) : 0 }))
+          .sort((a, b) => b.qty - a.qty || (a.key < b.key ? -1 : 1))
+          .slice(0, topN);
+        delete row.by;
+      }
+      return out;
+    };
+    return { bids: agg(this.book.bids), asks: agg(this.book.asks) };
+  }
+
   /** 行情快照（给客户端） */
   snapshot(depthLevels) {
     const levels = depthLevels || config.market.depthLevels;
-    const depth = this.book.depthAgg(levels);
+    const seatCfg = (config.brokers && config.brokers.seat) || {};
+    const depth = seatCfg.enabled
+      ? this.depthWithBrokers(levels, seatCfg.depthBrokers || 2)
+      : this.book.depthAgg(levels);
     const change = r2(this.lastPrice - this.prevClose);
     const changePct = this.prevClose ? r2((change / this.prevClose) * 100) : 0;
     return {
@@ -1571,6 +1887,8 @@ class Market {
       // 集合竞价阶段下发虚拟参考价（最大成交量价），客户端在盘口中显示为「虚拟开盘价」
       auction: this.auctionSnapshot(),
       lending: this.lendingSnapshot(),
+      // 席位榜 / 龙虎榜（§11.3）：当日各券商净买入排行
+      seats: this.seatBoard(),
     };
   }
 

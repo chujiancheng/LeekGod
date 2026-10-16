@@ -12,6 +12,7 @@ config.margin.allowNakedShort = true;
 
 const { Market, ACTIONS } = require('../src/market');
 const { Account } = require('../src/store');
+const broker = require('../src/broker');
 
 let passed = 0;
 let failed = 0;
@@ -44,6 +45,13 @@ function pad(name) {
   const acc = new Account(name, true);
   acc.cash = 100000000;
   return acc;
+}
+
+/** 某家券商的**有效通道参数**（不带星级/每周之星的干扰：day=0、账户无成交记录） */
+function brokerCfgOf(key) {
+  const acc = new Account('cfg', false, 'player');
+  acc.broker = key;
+  return broker.forAccount(acc, { day: 0 });
 }
 
 // ---- 1. 限价撮合 ----
@@ -924,6 +932,90 @@ console.log('\n[34] 旧档多空并存：只许平仓，不再新增任何一侧
   assert(!A.sideLock(stock.id).long, '多头方向已释放');
   const ru = m.place(A, { action: ACTIONS.BUY_OPEN, qty: lot, price: 21, now: 9003, noCooldown: true });
   assert(!ru.ok && /空头/.test(ru.error), '仍持空时买开依旧被拒');
+}
+
+// ---- 35. 券商通道差异：锁仓时长与「偶发卡顿」都要真的落在撮合层 ----
+// 这两条曾经是「配置里写了、文案里写了，撮合层却没读」：锁仓判定写死全局 10 秒
+// （滑泰 5 秒只在提示文案里出现），glitchDelay 是零调用方的死函数。这条用例把
+// 「per-broker 的通道参数必须由 market/store 真正消费」钉住。
+console.log('\n[35] 券商通道（锁仓时长 / 偶发卡顿）落在撮合层');
+{
+  const lot = stock.lotSize;
+  const base = 1000000;
+  const m = new Market(stock);
+  m.lastPrice = 20;
+
+  // (1) 滑泰：锁仓砍半 5 秒 → 6 秒前的批次应当已可卖
+  const A = new Account('滑泰玩家');
+  A.broker = 'huatai';
+  A.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  m.place(pad('垫单甲'), { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base - 1, noCooldown: true });
+  const s1 = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(s1.ok && s1.order.filled === lot, `滑泰 5 秒锁仓：6 秒前的批次已可卖${s1.ok ? '' : '（' + s1.error + '）'}`);
+
+  // (2) 对照：没有券商的账户仍是全局基准 10 秒，同样 6 秒必须被拒
+  const B = new Account('基准玩家');
+  B.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  const s2 = m.place(B, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(!s2.ok && /10 秒锁仓/.test(s2.error), `无券商账户 6 秒仍锁着，且文案是基准的 10 秒（${s2.error}）`);
+
+  // (3) 滑泰自己也不能提前：4 秒仍然锁着，且文案是券商的 5 秒（不是全局 10 秒）
+  const C = new Account('滑泰玩家2');
+  C.broker = 'huatai';
+  C.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 4000, reserved: 0 });
+  const s3 = m.place(C, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(!s3.ok && /5 秒锁仓/.test(s3.error), `滑泰 4 秒仍锁着，文案 = 券商的 5 秒（${s3.error}）`);
+
+  // (4) 天疯：锁仓 8 秒 → 6 秒被拒、9 秒放行
+  const D = new Account('天疯玩家');
+  D.broker = 'tianfeng';
+  D.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  const s4 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(!s4.ok && /8 秒锁仓/.test(s4.error), `天疯 6 秒仍锁着（8 秒锁仓，${s4.error}）`);
+  D.longPos(stock.id).lots[0].ts = base - 9000;
+  const s5 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(s5.ok, `天疯 9 秒后可卖${s5.ok ? '' : '（' + s5.error + '）'}`);
+
+  // (5) 挂借闸门与卖出闸门同源：滑泰 5 秒过后就能挂借，基准账户 6 秒还不能
+  const L1 = new Account('滑泰挂借');
+  L1.broker = 'huatai';
+  L1.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  const l1 = m.lendShares(L1, lot, base);
+  assert(l1.ok, `滑泰 6 秒后可挂借${l1.ok ? '' : '（' + l1.error + '）'}`);
+  const L2 = new Account('基准挂借');
+  L2.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  const l2 = m.lendShares(L2, lot, base);
+  assert(!l2.ok, `无券商账户 6 秒不能挂借（${l2.error}）`);
+
+  // (6) 嗨通：偶发通道卡顿 —— 命中时这一单要多等 1 个 tick。
+  // 用一个固定值的 Math.random 替身把「命中 / 不命中」两条分支都走成确定性的
+  const H = new Account('嗨通玩家');
+  H.broker = 'haitong';
+  H.cash = 1000000;
+  const origRandom = Math.random;
+  const cd = brokerCfgOf('haitong').cooldownMs;
+  H.lastOrderAt = base - cd - 100; // 冷却刚过 100ms：本该放行
+  Math.random = () => 0.5; // 0.5 > 2% → 不卡顿
+  const h1 = m.place(H, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base });
+  assert(h1.ok, `嗨通：未命中卡顿时冷却期满即可下单${h1.ok ? '' : '（' + h1.error + '）'}`);
+  H.lastOrderAt = base - cd - 100;
+  Math.random = () => 0.001; // 0.001 < 2% → 卡顿
+  const h2 = m.place(H, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base });
+  assert(!h2.ok && /频繁/.test(h2.error), `嗨通：命中卡顿时多等 1 个 tick（${h2.error}）`);
+  Math.random = () => 0.5;
+  const h3 = m.place(H, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base });
+  assert(h3.ok, '下一次尝试（未命中）即放行——卡顿只多要 1 个 tick，不累积');
+  Math.random = origRandom;
+
+  // (7) 其他券商不吃这个卡顿（features 里没有 glitchRate）
+  const Z = new Account('钟信玩家');
+  Z.broker = 'zhongxin';
+  Z.cash = 1000000;
+  Z.lastOrderAt = base - brokerCfgOf('zhongxin').cooldownMs - 100;
+  Math.random = () => 0.001;
+  const z1 = m.place(Z, { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base });
+  Math.random = origRandom;
+  assert(z1.ok, `钟信 0.1% 随机数也不受影响${z1.ok ? '' : '（' + z1.error + '）'}`);
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

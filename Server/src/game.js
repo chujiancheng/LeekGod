@@ -13,8 +13,7 @@ const { AutoManager } = require('./auto');
 const { IndexFeed } = require('./indexfeed');
 const { DayCycle } = require('./daycycle');
 const flow = require('./flow');
-
-const NAME_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{1,16}$/;
+const broker = require('./broker');
 
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
@@ -24,6 +23,18 @@ const MAX_SESSIONS_PER_ACCOUNT = 5;
 const HOLDER_SNAPSHOT_LIMIT = 30;
 // 每份快照记多少名股东：覆盖当前前十并留余量，否则刚被挤出前十的股东算不出变动
 const HOLDER_SNAPSHOT_ROWS = 30;
+
+/** JSON 列读回：坏了就当空对象，不让一条脏数据把整局卡死在启动阶段 */
+function safeParseJson(text, fallback) {
+  if (!text) return fallback;
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === 'object' ? v : fallback;
+  } catch (e) {
+    logger.warn(`[我是股神] 存档里的 JSON 列无法解析，已按空值处理：${String(text).slice(0, 80)}`);
+    return fallback;
+  }
+}
 
 class Game {
   /**
@@ -58,6 +69,9 @@ class Game {
     }
     this.news = new NewsSystem(this.stocks);
     for (const npc of this.npcs.values()) npc.news = this.news;
+    // 泄露期的可观测性指标（消息分层 §7.2 MVP 验收口径）：让消息系统能取到价格，
+    // 在每条消息公开时算一次「泄露期内的价格漂移」并落日志，证明机制真的在起作用
+    this.news.priceOf = (stockId) => (stockId ? this.priceOf(stockId) : this.index.lastPrice);
 
     this.index = new IndexFeed(this.stocks);
     this.markets.set(this.index.stockId, this.index); // 指数也进 markets：取价、落盘、广播一视同仁
@@ -180,6 +194,15 @@ class Game {
       acc.lastOrderAt = row.last_order_at;
       acc.createdAt = row.created_at;
       acc.deposited = row.deposited || 0;
+      // 券商：老档（版本 3 升级上来）这些列是 NULL，表示"还没选过"，
+      // 该玩家下次登录时补选（§9 D2 登录必须选券商）
+      acc.broker = row.broker || null;
+      acc.brokerChangedAt = row.broker_changed_at || null;
+      acc.brokerSinceDay = row.broker_since_day == null ? null : row.broker_since_day;
+      acc.brokerStats = safeParseJson(row.broker_stats, {});
+      acc.freeReselectUsed = !!row.free_reselect_used;
+      acc.couponUsedDay = row.coupon_used_day == null ? null : row.coupon_used_day;
+      acc.freeInterestDay = row.free_interest_day == null ? null : row.free_interest_day;
       this.store.put(acc);
       byName.set(acc.name, acc);
     }
@@ -263,6 +286,10 @@ class Game {
         price: t.price,
         qty: t.qty,
         side: t.side,
+        // 买方/卖方席位（§11.3）：主动方那一行的 broker 是主动方，counter_broker 是被动方。
+        // 版本 4 之前写下的行没有这两列 → 席位为空，前端留空不显示
+        buyBroker: t.side === 'buy' ? t.broker || null : t.counter_broker || null,
+        sellBroker: t.side === 'sell' ? t.broker || null : t.counter_broker || null,
       }));
     }
 
@@ -352,6 +379,9 @@ class Game {
         });
       }
       npc.tickCount = 0;
+      // 券商归属（席位数据源）与消息情报等级都是**由账户名确定性派生**的派生标签，
+      // 不落盘，所以恢复时按同一套账户名重算一遍即可（§11.4.1）
+      npc.applyTags();
       // 公允价值/重心/趋势阶段/情绪结构不落盘（随机游走的中间量），重新锚到现价
       npc.fairValue = market.lastPrice;
       npc.fund = market.lastPrice;
@@ -452,6 +482,9 @@ class Game {
       const news = this.news.maybeEmit(now, bias, { phaseKey, untilFloor });
       if (news) this.lastNews = news;
     }
+    // 泄露期漂移的可观测性：进入泄露期时记价格、公开时算一次漂移并落日志（不落盘）。
+    // 这是「消息公开前 N 秒价格已开始漂移」唯一不靠感觉的验证口径
+    this.news.noteLeakDrift(now);
 
     const allAccounts = this.store.all();
 
@@ -482,6 +515,8 @@ class Game {
       }
       // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
       market.sampleShortInterest(now);
+      // 东风人气热度推进（只影响散户 NPC 的跟风强度；无东风客户时恒为 0）
+      market.updateDongfengHeat(now);
 
       // 分时序列（每 tick 一个点，vol 为累计成交量供客户端算柱）；停牌补平线，走势图不断点
       const h = market.priceHistory;
@@ -643,20 +678,104 @@ class Game {
     return crypto.randomBytes(24).toString('hex');
   }
 
+  /** 当前交易日号（没有挂交易日时钟时返回 0）。券商的星级/转户/免息券都按交易日算 */
+  dayNumber(now = Date.now()) {
+    if (!this.day || !this.day.ok) return 0;
+    return this.day.locate(now).day;
+  }
+
+  /** 某账户此刻的有效券商参数——market/npc/auto/game 的统一读取入口（见 broker.js） */
+  brokerOf(acc, now = Date.now()) {
+    return broker.forAccount(acc, { day: this.dayNumber(now) });
+  }
+
+  /**
+   * 泄露期的「异动提示」（消息分层 §7.2 公平窗口）。
+   *
+   * 给公众一条**模糊**提示：不点方向、不点原因、不说是谁。它存在的意义是让「偷偷买进」
+   * 不沦为纯黑箱——普通玩家至少知道这只股票有事，可以选择跟不上但别踩进去。
+   * `config.news.irregularHint=false` 时整体关闭（保留"读盘口才是真本事"的口径）。
+   */
+  newsHints(now) {
+    const cfg = config.news || {};
+    if (!cfg.irregularHint) return [];
+    const minLeft = cfg.irregularHintMinMs || 0;
+    const out = [];
+    for (const it of this.news.leakingStocks(now).values()) {
+      if (minLeft > 0 && it.leftMs > minLeft) continue;
+      out.push({
+        stockId: it.stockId,
+        name: it.stockName,
+        text: `${it.stockName} 出现大额资金异动`,
+        leftMs: Math.max(0, Math.round(it.leftMs)),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 把账户挂到某家券商上（开户或转户都走这里）。
+   *
+   * 两件事必须一起做，否则「每升一级解锁 1/4 特权」会瞬间失效：
+   * ① `brokerSinceDay` 记成**当前交易日号**（免费重选窗口与转户冷却按交易日算）；
+   * ② 该券商的进度把 `profitBase` 锚到**此刻的已实现盈亏**——星级里的「累计盈利」
+   *    是"在这家券商赚的"，不是账户一辈子的总盈亏。不锚的话老玩家一开户就接近满星。
+   */
+  assignBroker(acc, key, opts = {}) {
+    const entry = broker.get(key);
+    if (!entry) return { ok: false, error: '券商不存在' };
+    const day = opts.day == null ? this.dayNumber() : opts.day;
+    // 转户：离开的这家与要去的那家，进度都从零开始（§5.2「清空该券商的特权进度与声誉星级」）。
+    // 不清的话「先选热门攒够星级 → 转去冷门吃组内榜 → 再转回来」就是一条免成本的后门
+    if (!opts.initial) {
+      if (acc.broker) delete acc.brokerStats[acc.broker];
+      delete acc.brokerStats[key];
+    }
+    acc.broker = key;
+    acc.brokerChangedAt = opts.now == null ? Date.now() : opts.now;
+    acc.brokerSinceDay = day;
+    const rec = broker.statsOf(acc, key);
+    rec.profitBase = acc.realizedPnL || 0;
+    // 开户礼（体验金）：**同时加进现金与已实现盈亏**，保住「权益 = 初始资金 + 已实现盈亏
+    // + 浮动盈亏」这条不变量。只加现金的话，账上会凭空多出一笔对不上任何科目的权益
+    const gift = entry.overrides && entry.overrides.openGift ? entry.overrides.openGift : 0;
+    if (opts.initial && gift > 0) {
+      acc.cash = r2(acc.cash + gift);
+      acc.realizedPnL = r2(acc.realizedPnL + gift);
+      rec.profitBase = acc.realizedPnL;
+    }
+    this.persist?.touch(acc);
+    return { ok: true, key, gift: opts.initial ? gift : 0 };
+  }
+
   /**
    * 登录：输入账号名即进入，同名始终对应同一个账户（首次输入即创建）。
    * 无密码设计；令牌仅用于把请求绑定到会话，不做账号独占。
+   *
+   * **首次登录必须一并选券商**（§9 D2）：不给"跳过用默认"——否则被默认的那家会被动成为
+   * 最大的一家。老档（升级前建的号）没有券商，这次登录也要求补选。
    */
-  login(name) {
+  login(name, brokerKey) {
     name = String(name || '').trim();
-    if (!NAME_RE.test(name)) {
-      return { ok: false, error: '账号需为 1-16 位中文、字母、数字或下划线' };
-    }
-    const existing = this.store.get(name);
+    const existing = this.store.get(name) || null;
+    const nick = broker.validateNick(name, !!existing);
+    if (!nick.ok) return { ok: false, error: nick.error };
     if (!existing && this.store.playerCount >= config.account.maxAccounts) {
       return { ok: false, error: '本局账号已达上限，请稍后再试' };
     }
+
+    const needBroker = !existing || !existing.broker;
+    if (needBroker) {
+      const key = String(brokerKey || '').trim();
+      if (!key) return { ok: false, needBroker: true, error: '请选择一家券商开户' };
+      if (!broker.has(key)) return { ok: false, needBroker: true, error: '券商不存在' };
+    }
+
     const acc = this.store.createOrGet(name);
+    if (needBroker) {
+      const r = this.assignBroker(acc, brokerKey, { initial: true });
+      if (!r.ok) return { ok: false, needBroker: true, error: r.error };
+    }
     // 新账户立刻纳入落盘范围，避免仅登录不下单的账号在重启后消失
     this.persist?.touch(acc);
     const t = this.newToken();
@@ -667,8 +786,90 @@ class Game {
     // 快照按 (账号, 股票) 存，所以这里要逐只记，不能只记一只
     for (const stock of this.stocks) this.snapshotHolders(acc, 'login', stock.id);
     if (!existing) this.refreshStats();
-    return { ok: true, name: acc.name, token: t };
+    return { ok: true, name: acc.name, token: t, broker: acc.broker };
   }
+
+  /**
+   * 转户（§5.2 / §9 D5）：1 个交易日冷却 + 转户费 = 总资产 × 0.1%（上限 5 万），
+   * 免费重选 1 次且仅限开户后首个交易日内。转户清空新旧两家的特权进度与声誉星级。
+   */
+  transferBroker(acc, targetKey, now = Date.now()) {
+    if (!acc) return { ok: false, error: '账户不存在' };
+    const day = this.dayNumber(now);
+    const check = broker.canTransfer(acc, targetKey, { day, equity: this.equityOf(acc) });
+    // canTransfer 是纯函数，用 `reason` 表达拒绝原因；对外接口统一用 `error`
+    // （前端只读 error，混着两套字段会让「被拦住了但界面没提示」）
+    if (!check.ok) return { ok: false, error: check.reason || '无法转户', fee: check.fee, needDay: check.needDay };
+    if (check.fee > 0 && acc.cash < check.fee) {
+      return { ok: false, error: `转户费 ¥${check.fee} 超过可用资金`, fee: check.fee };
+    }
+    const from = acc.broker;
+    if (check.fee > 0) acc.cash = r2(acc.cash - check.fee);
+    // 任何一次转户都消耗掉「免费重选」这份一次性权益：不置位的话，
+    // 同一天在新券商上又能满足「开户首日 + 未用过」而免费再转一次，转户费形同虚设
+    acc.freeReselectUsed = true;
+    this.assignBroker(acc, targetKey, { initial: false, day, now });
+    // 转户也是"我的操作"，给每只股票各记一份股东快照基线（与 login 同口径）
+    for (const stock of this.stocks) this.snapshotHolders(acc, 'transfer', stock.id);
+    logger.info(`[我是股神] ${acc.name} 转户：${from || '（未选）'} → ${targetKey}，费用 ¥${check.fee}${check.free ? '（首日免费重选）' : ''}`);
+    return { ok: true, from, to: targetKey, fee: check.fee, free: check.free, day };
+  }
+
+  /**
+   * 使用当日的免息券（招伤自带；拥挤税补贴档的券商也送）。
+   * 券是"当日融资/融券利息全免"，用掉之后这一天不再计杠杆利息。
+   */
+  useCoupon(acc, now = Date.now()) {
+    if (!acc) return { ok: false, error: '账户不存在' };
+    const day = this.dayNumber(now);
+    const bk = this.brokerOf(acc, now);
+    if (!bk.freeCouponPerDay) return { ok: false, error: '本券商不提供免息券' };
+    if (!bk.freeCouponAvailable) return { ok: false, error: '今天的免息券已经用过了' };
+    acc.couponUsedDay = day;
+    acc.freeInterestDay = day;
+    this.persist?.touch(acc);
+    return { ok: true, day };
+  }
+
+  /** 券商开户卡片墙的元数据（登录前可读，不含任何账户信息） */
+  brokersFor() {
+    return {
+      ok: true,
+      enabled: !!config.brokers.enabled,
+      brokers: broker.describeAll(),
+      nickPattern: '3~16 位，字母开头，仅英文/数字/下划线/连字符',
+      weekly: broker.weeklyPick(this.dayNumber()),
+      starLevels: (config.brokers.star || {}).levels || [],
+      // 展示层的「本服已有 N 人开户」：只读真实占比，**不参与任何数值计算**（§9 D3）
+      selected: this.brokerSelectionCounts(),
+    };
+  }
+
+  /** 选择页的参考值：本服各券商已开户的真实人数（纯提示，不进任何公式） */
+  brokerSelectionCounts() {
+    const out = {};
+    for (const a of this.store.players()) {
+      if (!a.broker) continue;
+      out[a.broker] = (out[a.broker] || 0) + 1;
+    }
+    return out;
+  }
+
+  /** 转户（带令牌的入口） */
+  transferBrokerFor(token, key) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    const r = this.transferBroker(acc, String(key || '').trim());
+    return r;
+  }
+
+  /** 使用免息券（带令牌的入口） */
+  useCouponFor(token) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    return this.useCoupon(acc);
+  }
+
 
   /** 同一账户只保留最近的若干令牌，避免 sessions 无限增长 */
   trimSessions(name) {
@@ -895,9 +1096,11 @@ class Game {
 
   // ---------- 状态快照 ----------
 
+  /** 下单冷却剩余毫秒（按账户券商的冷却，不是全局值） */
   cooldownLeft(acc, now) {
-    if (acc.lastOrderAt == null) return 0;
-    return Math.max(0, config.trade.cooldownMs - (now - acc.lastOrderAt));
+    if (!acc || acc.lastOrderAt == null) return 0;
+    const cd = this.brokerOf(acc, now).cooldownMs;
+    return Math.max(0, cd - (now - acc.lastOrderAt));
   }
 
   /** 全部标的的行情快照（10 只股票 + 指数）。每 tick 只算一次，给所有 SSE 连接共用 */
@@ -917,6 +1120,14 @@ class Game {
     if (!this._stats) this.refreshStats();
     const stats = this._stats;
     const primary = this.markets.get(this.stocks[0].id);
+    // 券商参数按账户解析（两级兜底：broker 覆盖 → 全局默认）。
+    // 未登录（acc=null）时必须给**纯基准**并把「每周之星」也关掉——day:0 让 weeklyPick 不生效，
+    // 否则登录页会看到一个被当周之星减半的费率
+    const bk = acc ? this.brokerOf(acc, now) : broker.forAccount(null, { day: 0 });
+    const vipLead = bk.newsVipLeadMs || 0;
+    const viewer = vipLead > 0
+      ? { tier: 'vip', leadMs: vipLead, showDir: !!bk.newsVipVisible }
+      : null;
     const base = {
       serverTime: now,
       startedAt: this.startedAt,
@@ -926,14 +1137,20 @@ class Game {
       day: this.day.snapshot(now),
       // 兼容字段：老客户端只认单个 market。取第一只股票，新客户端一律走 markets
       market: markets[0],
-      news: this.news.tapeSnapshot(50),
-      lastNews: this.lastNews,
+      // 消息磁带：**泄露期的消息不出现在公众视野里**（消息分层三段式的灵魂）。
+      // 达到 L2 情报等级的券商客户能在公开前看到"哪只股票有消息"；方向是否可见
+      // 取决于声誉星级到没到 4★ 以上（§8.1）
+      news: this.news.tapeSnapshot(50, now, viewer),
+      lastNews: NewsSystem.visibleFor(this.lastNews, viewer, now) ? this.lastNews : null,
+      // 公平窗口（§7.2）：泄露期里给公众一条**模糊**提示，不点方向、不点原因、不点谁。
+      // 「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割
+      newsHints: this.newsHints(now),
       rules: {
-        feeRate: config.trade.feeRate,
-        cooldownMs: config.trade.cooldownMs,
-        lockMs: config.trade.lockMs,
-        marginRatio: config.margin.ratio,
-        maintenance: config.margin.maintenance,
+        feeRate: bk.feeRate,
+        cooldownMs: bk.cooldownMs,
+        lockMs: bk.lockMs,
+        marginRatio: bk.marginRatio,
+        maintenance: bk.maintenance,
         allowNakedShort: !!config.margin.allowNakedShort,
         lending: {
           enabled: !!(config.margin.lending && config.margin.lending.enabled),
@@ -942,7 +1159,7 @@ class Game {
         },
         finance: {
           enabled: !!(config.margin.finance && config.margin.finance.enabled),
-          ratio: config.margin.finance ? config.margin.finance.ratio : 1,
+          ratio: bk.financeRatio,
           baseMinuteRate: config.margin.finance ? config.margin.finance.baseMinuteRate : 0,
           maxMinuteRate: config.margin.finance ? config.margin.finance.maxMinuteRate : 0,
           // 当前分钟息（百分数，0.01 = 0.01%/分）：1e6/1e4 比 r2 更干净地消掉浮点尾数。
@@ -962,6 +1179,23 @@ class Game {
           lotSize: s.lotSize,
           floatShares: s.floatShares,
         })),
+        // 六家券商的展示元数据（登录卡片墙与「我的券商」卡共用）。放在 rules 里是为了
+        // 与 stocks 同构；未登录时也能拿到，所以登录页不需要额外接口
+        brokers: broker.describeAll(),
+        brokerMeta: {
+          enabled: !!config.brokers.enabled,
+          baseSlots: config.brokers.baseSlots,
+          starMax: (config.brokers.star || {}).max || 5,
+          maxPrivilegeStar: (config.brokers.star || {}).maxPrivilegeStar || 4,
+          nickPattern: '3~16 位，字母开头，仅英文/数字/下划线/连字符',
+          transfer: config.brokers.transfer,
+          weekly: {
+            daysPerWeek: (config.brokers.weekly || {}).daysPerWeek,
+            feeMul: (config.brokers.weekly || {}).feeMul,
+            financeBonus: (config.brokers.weekly || {}).financeBonus,
+          },
+          seat: config.brokers.seat,
+        },
         deposit: {
           enabled: !!config.account.deposit.enabled,
           maxLifetime: config.account.deposit.maxLifetime,
@@ -969,13 +1203,15 @@ class Game {
           presets: config.account.deposit.presets,
         },
         auto: {
-          maxPerAccount: config.auto.maxPerAccount,
+          maxPerAccount: bk.autoMax,
           dcaMinIntervalMs: config.auto.dcaMinIntervalMs,
           grid: config.auto.grid,
           ma: config.auto.ma,
         },
       },
       players: stats.players,
+      // 券商榜：总榜在 players 里，这里给按券商聚合的一份（§5.3）
+      brokerBoard: this.brokerBoard(),
       online: this.store.playerCount,
       // 股东榜改为按需拉取（/api/holders?stock=X）：10 只股票 × 前 30 名每 tick 全推会把帧撑爆
       halt: primary.haltInfo(now),
@@ -990,10 +1226,15 @@ class Game {
   }
 
   /** 账户在某只股票上的持仓切片 */
-  serializePosition(acc, stock, now) {
+  serializePosition(acc, stock, now, bk) {
     const sid = stock.id;
     const market = this.markets.get(sid);
     const last = market.lastPrice;
+    // 锁仓时长按账户券商解析（滑泰 5 秒 / 天疯 8 秒 / 基准 10 秒）。
+    // 这里与 market.place 的卖出闸门必须同源：早先两处各读各的（这里写死全局根值），
+    // 出现了「rules.lockMs 显示 5 秒、lockedUntil 与可卖却按 10 秒算」的自相矛盾
+    const brokerCfg = bk || this.brokerOf(acc, now);
+    const lockMs = brokerCfg.lockMs;
     const longPos = acc.longs.get(sid);
     const shortPos = acc.shorts.get(sid);
     let longCost = 0;
@@ -1001,7 +1242,7 @@ class Game {
     if (longPos) {
       for (const lot of longPos.lots) {
         longCost += lot.qty * lot.price;
-        const lockedUntil = lot.ts + config.trade.lockMs;
+        const lockedUntil = lot.ts + lockMs;
         longLots.push({
           qty: lot.qty,
           price: r2(lot.price),
@@ -1086,7 +1327,7 @@ class Game {
         value: longValue,
         pnl: r2(longValue - longCost),
         lots: longLots,
-        sellable: acc.freeSellableLong(sid, now),
+        sellable: acc.freeSellableLong(sid, now, lockMs),
       },
       short: {
         qty: shortQty,
@@ -1102,14 +1343,16 @@ class Game {
       financeInterest: r2(led ? led.financeInterestAccrued || 0 : 0), // 该股累计已计利息（展示用）
       liquidationPrice,
       liquidationPriceLong,
-      lending: this.serializeLending(acc, sid),
+      lending: this.serializeLending(acc, sid, lockMs),
     };
   }
 
   serializeAccount(acc, now) {
+    // 券商参数在**账户粒度**算一次，给 10 只股票的持仓切片共用（锁仓时长 / 可卖口径都读它）
+    const bk = this.brokerOf(acc, now);
     const positions = [];
     for (const stock of this.stocks) {
-      const p = this.serializePosition(acc, stock, now);
+      const p = this.serializePosition(acc, stock, now, bk);
       if (p) positions.push(p);
     }
     const priceOf = (s) => this.markets.get(s).lastPrice;
@@ -1165,6 +1408,96 @@ class Game {
       trades,
       liquidations: (acc.liquidations || []).slice(0, 5),
       auto: this.auto.serializeAll(acc.name, now),
+      broker: this.serializeBroker(acc, now),
+      // 追保预警（§7 彩蛋）：跌破维持线但还没到强平线时给一条通知，
+      // 文案随券商风格变（钟信=正式公函体、天疯=没有这一档，破线即全平）
+      marginCall: this.marginCallFor(acc, now),
+    };
+  }
+
+  /** 账户级的追保预警：遍历持有敞口的市场，取最急的那一条 */
+  marginCallFor(acc, now) {
+    let worst = null;
+    for (const stock of this.stocks) {
+      if (!acc.longs.has(stock.id) && !acc.shorts.has(stock.id)) continue;
+      const m = this.markets.get(stock.id).marginCallState(acc, now);
+      if (!m) continue;
+      m.stockId = stock.id;
+      m.stockName = stock.name;
+      if (!worst || m.left < worst.left) worst = m;
+    }
+    return worst;
+  }
+
+  /**
+   * 「我的券商」卡片需要的全部信息：名称/星级/拥挤度/特权清单/本周加成/转户状态。
+   * 也顺带给出**下一星的进度**与免息券可用性，前端不用自己算。
+   */
+  serializeBroker(acc, now) {
+    const day = this.dayNumber(now);
+    const bk = broker.forAccount(acc, { day });
+    const list = broker.privilegeList(acc, { day });
+    const weeks = broker.weeklyPick(day);
+    const transfer = {
+      // 能否转、转给谁花多少：前端把六家都算一遍就能直接标注"免费/¥N"
+      cooldownDay: acc.brokerSinceDay == null ? null : acc.brokerSinceDay + ((config.brokers.transfer || {}).cooldownDays || 1),
+      freeReselectUsed: !!acc.freeReselectUsed,
+      freeReselectDay: acc.brokerSinceDay,
+      feeRate: (config.brokers.transfer || {}).feeRate,
+      feeCap: (config.brokers.transfer || {}).feeCap,
+      options: Object.keys(config.brokers.list || {}).map((k) => {
+        const c = broker.canTransfer(acc, k, { day, equity: this.equityOf(acc) });
+        return { key: k, ok: c.ok, free: !!c.free, fee: c.fee || 0, reason: c.reason || '' };
+      }),
+    };
+    return {
+      key: acc.broker,
+      name: bk.name || (acc.broker ? acc.broker : ''),
+      abbr: bk.abbr || '',
+      star: bk.star,
+      starMax: (config.brokers.star || {}).max || 5,
+      intensity: Math.round(bk.intensity * 100),
+      crowd: bk.crowd.value,
+      crowdPct: bk.crowd.pct,
+      crowdTier: bk.crowd.tier,
+      crowdLabel: bk.crowd.label,
+      tier: bk.crowd.tier,
+      // 有效数值（已含拥挤税与每周加成、已按星级折算）
+      feeRate: bk.feeRate,
+      cooldownMs: bk.cooldownMs,
+      lockMs: bk.lockMs,
+      financeRatio: bk.financeRatio,
+      leverage: broker.leverageOf(bk.financeRatio),
+      marginRatio: bk.marginRatio,
+      maintenance: bk.maintenance,
+      lendCapacityPct: Math.round(bk.lendCapacityMul * 100),
+      lendRateMul: bk.lendRateMul,
+      autoMax: bk.autoMax,
+      autoSlots: bk.autoSlots,
+      newsVipLeadMs: bk.newsVipLeadMs,
+      newsVipVisible: bk.newsVipVisible,
+      features: bk.features,
+      strengths: (bk.entry && bk.entry.strengths) || [],
+      costs: (bk.entry && bk.entry.costs) || [],
+      privileges: list.rows,
+      progress: broker.starProgress(acc, acc.broker),
+      weekly: {
+        key: weeks.key,
+        nextKey: weeks.nextKey,
+        isStar: bk.weekly.isStar,
+        feeMul: bk.weekly.feeMul,
+        financeBonus: bk.weekly.financeBonus,
+        weekEndDay: weeks.weekEndDay,
+      },
+      coupon: {
+        perDay: bk.freeCouponPerDay,
+        available: bk.freeCouponAvailable,
+        active: !!bk.freeInterestOn,
+        usedDay: acc.couponUsedDay == null ? null : acc.couponUsedDay,
+      },
+      transfer,
+      sinceDay: acc.brokerSinceDay,
+      stats: broker.statsOf(acc, acc.broker),
     };
   }
 
@@ -1183,7 +1516,7 @@ class Game {
   }
 
   /** 账户在某只股票上的融券视角：可挂借、挂借中、被借走、可撤、累计利息 */
-  serializeLending(acc, stockId) {
+  serializeLending(acc, stockId, lockMs) {
     const m = this.markets.get(stockId);
     const stock = this.stocksById.get(stockId);
     const led = acc.ledger.get(stockId);
@@ -1191,7 +1524,12 @@ class Game {
     const lentOut = Math.floor(offered * m.lendUtilization());
     // 可撤口径必须与撤借闸门一致（含在途开空占用），否则 UI 显示可撤、点撤借却被拒
     const removable = m.lendRemovableQty(acc);
-    const free = acc.freeSellableLong(stockId, Date.now());
+    // 可挂借口径必须与 market.lendShares 的闸门同源——两处都按**账户券商的锁仓时长**
+    const free = acc.freeSellableLong(
+      stockId,
+      Date.now(),
+      lockMs == null ? this.brokerOf(acc).lockMs : lockMs
+    );
     return {
       stockId,
       offered,
@@ -1205,13 +1543,34 @@ class Game {
   }
 
   /** 玩家资产排行（组合口径：跨全部股票的总权益） */
-  leaderboard() {
+  leaderboard(limit = 20) {
     const priceOf = (s) => this.markets.get(s).lastPrice;
-    return this.store
+    const all = this.store
       .players()
-      .map((a) => ({ name: a.name, equity: r2(a.equity(priceOf)) }))
-      .sort((x, y) => y.equity - x.equity)
-      .slice(0, 20);
+      .map((a) => ({
+        name: a.name,
+        equity: r2(a.equity(priceOf)),
+        broker: a.broker || null,
+        star: a.broker ? broker.starOf(a, a.broker) : 1,
+      }))
+      .sort((x, y) => y.equity - x.equity);
+    // 组内名次：同一家券商内部再排一次。这是**最有效的软分流**——冷门券商的组内名次
+    // 天然更容易靠前，头部玩家的「争榜」动机于是把人往冷门赶（§5.3）
+    const seen = new Map();
+    for (const r of all) {
+      const k = r.broker || '__none';
+      const n = (seen.get(k) || 0) + 1;
+      seen.set(k, n);
+      r.brokerRank = n;
+    }
+    this._brokerBoard = broker.groupBoard(all);
+    return all.slice(0, limit);
+  }
+
+  /** 券商榜（§5.3）：按券商聚合客户数与总权益，含组内第一名 */
+  brokerBoard() {
+    if (!this._brokerBoard) this.leaderboard();
+    return this._brokerBoard || [];
   }
 
   /** 某只股票的前十大股东（走 tick 缓存） */

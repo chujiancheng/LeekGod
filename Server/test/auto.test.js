@@ -44,10 +44,10 @@ N(g).step(g.startedAt);
 // 仿真若干 tick 让盘口成型
 for (let i = 0; i < 30; i++) g.tick();
 
-const lr = g.login('量化玩家');
+const lr = g.login('quantuser', 'zhaoshang');
 assert(lr.ok && !!lr.token, '玩家登录成功');
 const token = lr.token;
-const acc = g.store.get('量化玩家');
+const acc = g.store.get('quantuser');
 
 let clock = Date.now();
 const nextT = () => (clock += 3000); // 每步推进 3 秒，避开下单冷却
@@ -260,8 +260,8 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   const g1 = new Game({ persist: p1 });
   g1.start();
   g1.stop();
-  const login1 = g1.login('存档玩家');
-  const acc1 = g1.store.get('存档玩家');
+  const login1 = g1.login('saveruser', 'zhaoshang');
+  const acc1 = g1.store.get('saveruser');
   const cr = g1.auto.create(acc1, 'tps', { position: 'long', tp: 999, sl: 1 }, STOCK.id);
   const cr2 = g1.auto.create(acc1, 'grid', { stepPct: 3, qty: 100, maxLevels: 5 }, STOCK.id);
   assert(cr.ok && cr2.ok, '存档局创建两条策略');
@@ -274,17 +274,55 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   const g2 = new Game({ persist: p2 });
   g2.start();
   g2.stop();
-  const restored = g2.auto.listFor('存档玩家');
+  const restored = g2.auto.listFor('saveruser');
   assert(restored.length === 2, `重启后恢复 2 条策略（实际 ${restored.length}）`);
   const rTps = restored.find((s) => s.type === 'tps');
   const rGrid = restored.find((s) => s.type === 'grid');
   assert(rTps && rTps.params.tp === 999 && rTps.params.sl === 1, '止盈止损参数完整恢复');
   assert(rGrid && rGrid.enabled === false, '暂停状态随档恢复');
-  const acc2 = g2.store.get('存档玩家');
+  const acc2 = g2.store.get('saveruser');
   const equityAfter = acc2.equity(STOCK.id, P(g2).lastPrice);
   assert(Math.abs(equityAfter - equityBefore) < 0.5, `重启前后权益守恒（${equityBefore} → ${equityAfter}）`);
   p2.close();
   cleanup();
+}
+
+// ---- 8. 自动策略的锁仓口径按账户券商取（滑泰 5 秒 / 基准 10 秒） ----
+// 自动策略走的是 market.place 同一条下单路径，锁仓闸门必须与手动下单同源：
+// 早先 auto 只读全局 10 秒，滑泰玩家手动能卖、策略却要干等到 10 秒，两边打架。
+console.log('\n[8] 自动策略的锁仓口径按账户券商取');
+{
+  const lot = stock.lotSize;
+  // 时刻显式指定：批次 ts = T − 6000，则 now − ts 恰好 6000ms，
+  // 落在「滑泰 5 秒已解锁」与「基准 10 秒仍锁着」之间，两侧各验一次
+  const sellAt6s = (nick, brokerKey) => {
+    const T = nextT();
+    g.day.reanchor(T - 120000); // 锚回上午连续竞价，避免长跑后漂到休市被整体冻结
+    const lr = g.login(nick, brokerKey);
+    assert(lr.ok, `${brokerKey} 玩家 ${nick} 登录成功`);
+    const a = g.store.get(nick);
+    a.longPos(stock.id).lots.push({
+      qty: lot, price: P(g).lastPrice, ts: T - 6000, reserved: 0, debt: 0, principal: 0,
+    });
+    const cr = g.auto.create(a, 'tps', { position: 'long', tp: 0.01, sl: 0, qty: 0 }, STOCK.id);
+    assert(cr.ok, `${nick} 止盈止损策略创建成功`);
+    const s = g.auto.byId.get(cr.id);
+    g.auto.step(T);
+    return { acc: a, s };
+  };
+
+  // 滑泰：锁仓砍半 5 秒 → 6 秒后策略就能卖
+  const ht = sellAt6s('autohuatai', 'huatai');
+  assert(ht.s.done, '滑泰：6 秒后自动策略即卖出（锁仓 5 秒生效）');
+  assert(ht.acc.orders.size > 0 || ht.acc.longQty(stock.id) < lot, '滑泰：已发出卖出委托或持仓减少');
+
+  // 对照：钟信（10 秒锁仓）同样 6 秒，策略只能等
+  const zx = sellAt6s('autozhongxin', 'zhongxin');
+  assert(!zx.s.done, '钟信：6 秒仍锁着，策略未完成');
+  assert(zx.s.state.waiting === true, '钟信：策略转入「等待解锁」而不是空转卖出');
+  assert(zx.acc.orders.size === 0 && zx.acc.longQty(stock.id) === lot, '钟信：没有发出任何卖单，持仓原样');
+  g.auto.remove(ht.acc, ht.s.id);
+  g.auto.remove(zx.acc, zx.s.id);
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

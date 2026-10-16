@@ -19,6 +19,25 @@ const STATIC_FILES = {
   '/style.css': { file: 'style.css', type: 'text/css; charset=utf-8' },
 };
 
+/**
+ * 券商图标：`/img/broker-<key>.png`（1024 原图，登录卡片墙 / 我的券商卡用）与
+ * `/img/broker-<key>-96.png`（96px 缩略图，五档 / 逐笔 / 排行榜这些高频小位置用——
+ * 原图 262KB~990KB，十档盘口每帧都要画几十个 12px 图标，用原图是纯浪费）。
+ *
+ * **按券商 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
+ * 也不能走出指定目录（避免 `../` 穿越）。图标文件缺失时不注册，请求落到 404，
+ * 前端只会看到空图标而不会报错。
+ */
+const BROKER_ICONS = new Map();
+for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
+  for (const [suffix, size] of [['', 'lg'], ['-96', 'sm']]) {
+    const name = `broker-${key}${suffix}.png`;
+    if (fs.existsSync(path.join(CLIENT_DIR, 'img', name))) {
+      BROKER_ICONS.set(`/img/${name}`, { file: path.join('img', name), type: 'image/png', size });
+    }
+  }
+}
+
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -244,8 +263,19 @@ function createServer(game) {
       if (p === '/api/login' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.login)) return;
         const body = await readBody(req);
-        const r = game.login(body.name);
+        // 首次登录必须一并提交券商（§9 D2）。响应里的 needBroker=true 告诉客户端
+        // 「还差一步选券商」，前端据此把卡片墙亮出来而不是当普通失败处理
+        const r = game.login(body.name, body.broker);
         return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 券商开户卡片墙的展示元数据：**登录前**就要能拿到，所以不做鉴权 ----
+      // 只包含对外可见的文案与数值预览，没有任何账户信息或内幕字段
+      if (p === '/api/brokers' && req.method === 'GET') {
+        if (rl.enabled && !limiters.state.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        return json(res, 200, game.brokersFor());
       }
 
       if (p === '/api/state' && req.method === 'GET') {
@@ -371,6 +401,21 @@ function createServer(game) {
         return json(res, r.ok ? 200 : 400, r);
       }
 
+      // ---- 券商：转户 / 每日免息券（都要求已登录）----
+      if (p === '/api/broker/transfer' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.order)) return;
+        const body = await readBody(req);
+        const r = game.transferBrokerFor(bearerToken(req), body.broker);
+        if (!r.ok) logger.info(`[我是股神] 转户被拒(${ip}): ${r.error}`);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      if (p === '/api/broker/coupon' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.order)) return;
+        const r = game.useCouponFor(bearerToken(req));
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
       // ---- 运维：停牌 / 复牌（口令见 config.admin.tokenFile）----
       if (p === '/api/admin/halt' || p === '/api/admin/resume') {
         if (req.method !== 'POST') return json(res, 405, { ok: false, error: '仅支持 POST' });
@@ -410,6 +455,25 @@ function createServer(game) {
         // 首帧立即推送（行情全量 + 账户快照；分时按需拉 /api/history）
         hub.send(conn, 'state', game.stateFor(token));
         req.on('close', () => hub.remove(conn));
+        return;
+      }
+
+      // ---- 券商图标（白名单，见 BROKER_ICONS）----
+      if (req.method === 'GET' && BROKER_ICONS.has(p)) {
+        const spec = BROKER_ICONS.get(p);
+        fs.readFile(path.join(CLIENT_DIR, spec.file), (err, buf) => {
+          if (err) {
+            res.writeHead(404, withSecurity({ 'Content-Type': 'text/plain; charset=utf-8' }));
+            res.end('Not Found');
+            return;
+          }
+          res.writeHead(200, withSecurity({
+            'Content-Type': spec.type,
+            // 图标是构建产物、内容不变，可以放心长缓存（与小图/原图各自独立）
+            'Cache-Control': 'public, max-age=86400',
+          }));
+          res.end(buf);
+        });
         return;
       }
 

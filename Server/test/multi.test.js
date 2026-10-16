@@ -144,7 +144,7 @@ console.log('\n[2] 大盘指数：基点 1000，按流通市值加权合成');
 console.log('\n[3] 指数不可交易：下单/挂借都被拒，但可以看分时');
 {
   const g = fresh();
-  const lr = g.login('指数玩家');
+  const lr = g.login('indexuser', 'zhaoshang');
   const tk = lr.token;
   const r = g.placeOrder(tk, {
     stockId: config.index.code,
@@ -164,8 +164,8 @@ console.log('\n[3] 指数不可交易：下单/挂借都被拒，但可以看分
 console.log('\n[4] 委托按股票路由：互不串簿、互不串号');
 {
   const g = fresh();
-  const tk = g.login('路由玩家').token;
-  const acc = g.store.get('路由玩家');
+  const tk = g.login('routeuser', 'zhaoshang').token;
+  const acc = g.store.get('routeuser');
   const a = mkt(g, STOCK_A);
   const b = mkt(g, STOCK_B);
   const bidsABefore = a.book.bids.length;
@@ -199,8 +199,8 @@ console.log('\n[4] 委托按股票路由：互不串簿、互不串号');
 console.log('\n[5] 组合保证金：权益跨股票汇总，敞口也按账户合计');
 {
   const g = fresh();
-  const tk = g.login('组合玩家').token;
-  const acc = g.store.get('组合玩家');
+  const tk = g.login('portfoliouser', 'zhaoshang').token;
+  const acc = g.store.get('portfoliouser');
   const a = mkt(g, STOCK_A);
   const b = mkt(g, STOCK_B);
 
@@ -291,10 +291,10 @@ console.log('\n[5b] 强平价必须真的骑在维持线上（否则显示与强
   };
 
   // 空头侧：A、B 各一笔空头 → B 的强平价要同时并进 A 的敞口
-  const sh = g.store.createOrGet('强平价玩家');
+  const sh = g.store.createOrGet('liqpriceuser');
   mkShort(sh, STOCK_A, 1000);
   mkShort(sh, STOCK_B, 1000);
-  const posB = g.stateFor(g.login('强平价玩家').token).account.positions.find((p) => p.stockId === STOCK_B.id);
+  const posB = g.stateFor(g.login('liqpriceuser', 'zhaoshang').token).account.positions.find((p) => p.stockId === STOCK_B.id);
   const at = (p) => {
     mB.lastPrice = p;
     return { eq: g.equityOf(sh), need: m * sh.totalShortMV(priceOf) };
@@ -311,11 +311,11 @@ console.log('\n[5b] 强平价必须真的骑在维持线上（否则显示与强
   assert(below.eq > below.need, '低于显示价不触发强平');
 
   // 多头（融资）侧：B 带融资负债 + A 有多头 → 同理
-  const lg = g.store.createOrGet('融资强平价玩家');
+  const lg = g.store.createOrGet('finliquser');
   lg.cash = 100000;
   lg.longPos(STOCK_A.id).lots.push({ qty: 1000, price: STOCK_A.initPrice, ts: 0, reserved: 0, debt: 0, principal: 0 });
   lg.longPos(STOCK_B.id).lots.push({ qty: 2000, price: STOCK_B.initPrice, ts: 0, reserved: 0, debt: 1000000, principal: 1000000 });
-  const posB2 = g.stateFor(g.login('融资强平价玩家').token).account.positions.find((p) => p.stockId === STOCK_B.id);
+  const posB2 = g.stateFor(g.login('finliquser', 'zhaoshang').token).account.positions.find((p) => p.stockId === STOCK_B.id);
   const PL = posB2.liquidationPriceLong;
   assert(PL > 0, `多头强平价非空（${PL}）`);
   mB.lastPrice = PL;
@@ -328,8 +328,8 @@ console.log('\n[5b] 强平价必须真的骑在维持线上（否则显示与强
 console.log('\n[6] 融券池按股票隔离：挂借、借出、取息都不串池');
 {
   const g = fresh();
-  const tk = g.login('融券玩家').token;
-  const acc = g.store.get('融券玩家');
+  const tk = g.login('lenderuser', 'zhaoshang').token;
+  const acc = g.store.get('lenderuser');
   const a = mkt(g, STOCK_A);
   const b = mkt(g, STOCK_B);
 
@@ -423,7 +423,7 @@ console.log('\n[8] 停牌全市场一致：10 只股票一起停、一起复');
   );
   assert(g.index.lastPrice === idxBefore, '指数随成分股冻结走平');
 
-  const tk = g.login('停牌玩家').token;
+  const tk = g.login('halteduser', 'zhaoshang').token;
   const r = g.placeOrder(tk, {
     stockId: STOCK_A.id,
     action: ACTIONS.BUY_OPEN,
@@ -456,8 +456,8 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
     g1.day.reanchor(Date.now() - 120000);
   g1.stop();
 
-  const tk = g1.login('多股玩家').token;
-  const acc1 = g1.store.get('多股玩家');
+  const tk = g1.login('multiuser', 'zhaoshang').token;
+  const acc1 = g1.store.get('multiuser');
   // 在 A 股建仓并挂借，同时给 B 股留一条自动策略。
   // 成交股数按实际成交算（不假设吃满），挂借量跟着实际持仓走
   acc1.lastOrderAt = null;
@@ -501,7 +501,7 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
   g2.start();
     g2.day.reanchor(Date.now() - 120000);
   g2.stop();
-  const acc2 = g2.store.get('多股玩家');
+  const acc2 = g2.store.get('multiuser');
   assert(acc2.cash === beforeCash, `现金原样恢复 ${acc2.cash}`);
   assert(acc2.longQty(STOCK_A.id) === beforeLongA, 'A 股持仓原样恢复');
   assert(
@@ -510,7 +510,7 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
   );
   assert(!acc2.longs.has(STOCK_B.id), 'B 股没有凭空多出持仓');
 
-  const autos = g2.auto.listFor('多股玩家');
+  const autos = g2.auto.listFor('multiuser');
   assert(autos.length === 1 && autos[0].stockId === STOCK_B.id, '自动策略连同所属股票一起恢复');
   // 每只股票的 NPC 池都重建了报价对象
   const perStock = Object.values(config.npc.types).reduce((s, t) => s + t.count, 0);
@@ -533,8 +533,8 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
 console.log('\n[10] 强平撤单按委托所属股票路由：不留幽灵单、券源占用不串池');
 {
   const g = fresh();
-  const tk = g.login('跨股强平').token;
-  const acc = g.store.get('跨股强平');
+  const tk = g.login('crossliquser', 'zhaoshang').token;
+  const acc = g.store.get('crossliquser');
   const mA = mkt(g, STOCK_A);
   const mB = mkt(g, STOCK_B);
   const mC = mkt(g, STOCK_C);
@@ -619,8 +619,8 @@ console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
   // 交易日时钟锚到「上午连续竞价」段（start() 会把它锚到本轮开盘＝集合竞价）
   g1.day.reanchor(Date.now() - 120000);
   g1.stop();
-  const tk1 = g1.login('删股票玩家').token;
-  const acc1 = g1.store.get('删股票玩家');
+  const tk1 = g1.login('delstockuser', 'zhaoshang').token;
+  const acc1 = g1.store.get('delstockuser');
   const m1 = g1.markets.get(LAST.id);
   acc1.lastOrderAt = null;
   const buy = g1.placeOrder(tk1, {
@@ -648,7 +648,7 @@ console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
   assert(started, '带旧档启动不抛异常');
   if (started) {
     g2.stop();
-    const acc2 = g2.store.get('删股票玩家');
+    const acc2 = g2.store.get('delstockuser');
     assert(!acc2.longs.has(LAST.id), `已下线标的的持仓不再恢复（遗留 ${acc2.longQty(LAST.id)} 股）`);
     const eq = g2.equityOf(acc2);
     assert(Number.isFinite(eq), `权益仍可计算（${eq.toFixed(2)}）`);
@@ -732,8 +732,8 @@ console.log('\n[12] NPC 批次合并：账实等价，玩家账户不受影响')
   assert(maxLots <= 1, `${npcAccounts} 个 NPC 账户的批次数都 ≤ 1（实际最多 ${maxLots}：${worst}）`);
 
   // 玩家：手搓两条批次，跑几步后必须原样保留（不被合并）
-  const tk = g2.login('不合并玩家').token;
-  const pl = g2.store.get('不合并玩家');
+  const tk = g2.login('nomerguser', 'zhaoshang').token;
+  const pl = g2.store.get('nomerguser');
   pl.longPos(sid).lots.push({ qty: 100, price: 19, ts: 0, reserved: 0, debt: 0, principal: 0 });
   pl.longPos(sid).lots.push({ qty: 200, price: 21, ts: 0, reserved: 0, debt: 0, principal: 0 });
   for (let i = 0; i < 6; i++) g2.tick();

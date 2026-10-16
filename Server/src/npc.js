@@ -8,6 +8,7 @@ const config = require('./config');
 const { logger } = require('./logger');
 const { ACTIONS } = require('./market');
 const { Account, r2 } = require('./store');
+const broker = require('./broker');
 
 function gauss() {
   // 标准正态近似
@@ -105,6 +106,10 @@ class NpcManager {
     this._quotedOnce = false;
     this._mul = { aggro: 1, qty: 1, requote: 1, spread: 1 };
     this._topUpCool = 0; // 买盘空档补款的冷却（tick）
+    // 全池最早能看见消息的那一级（消息分层 §4）。机构每个池都有，所以常态是 'inst'；
+    // 池里恰好抽中 L0 内幕时抬到 'insider'。公允价值是**池级共享量**，所以它的消息推力
+    // 按「池里知道得最早的人」走——这正是"股价先动"的来源
+    this.poolViewer = null;
     // 多股票：把「基准股」（流通 1 亿股 @ 20 元）口径的做市资金与报单量折算到本股。
     // 不折算的话，同一笔钱在 43 亿的阿里上是小溪、在 20 亿的大米上是大河，
     // 各股票的盘口深度会差出一倍多。资金按流通市值缩、股数按流通股数缩。
@@ -116,6 +121,19 @@ class NpcManager {
   /** 按类型取行为档案（初始化时已挂到 n.profile） */
   profileOf(n) {
     return n.profile || config.npc.types[n.type] || config.npc.types.small;
+  }
+
+  /**
+   * 东风人气 buff（§3.6）：本券商客户在该股的成交量推高「论坛热度」，
+   * 热度再放大**散户** NPC 的跟风强度——做多时顺风、做空时逆风（放大的是动量跟随，不是方向）。
+   *
+   * 热度为 0（没有东风客户交易）时恒返回 1，NPC 行为与引入券商之前逐位一致。
+   */
+  heatMul(typeKey) {
+    const cfg = this.market.dongfengHeatCfg ? this.market.dongfengHeatCfg() : null;
+    if (!cfg || !cfg.enabled || typeKey !== 'small') return 1;
+    const h = this.market.dongfengHeat || 0;
+    return h > 0 ? 1 + h * (cfg.retailMul || 0) : 1;
   }
 
   /**
@@ -261,6 +279,48 @@ class NpcManager {
         });
       }
     }
+    this.applyTags();
+  }
+
+  /**
+   * 给全池补上两张**派生标签**（都在 `init` 之后调用一次，也可以在恢复存档后单独调）：
+   *
+   * ① **券商**（席位系统的数据源，§11.4）：由账户名确定性哈希派生 → 不落盘、不占存档
+   *    版本号、不触发逐 tick 标脏；重启后按同一套账户名重算即得同一张分配表。
+   * ② **消息情报等级**（消息分层 §4）：机构 = L1（`inst`），机构里再按哈希抽
+   *    `config.news.insiderFrac` 的一小撮当 L0 内幕（`insider`），其余 = 公众。
+   *
+   * ⚠️ 两者都**只读**：券商不改变 NPC 的任何交易行为（§11.4.3「纯展示、零行为影响」），
+   * 情报等级只决定"什么时候读得到消息"，不碰公允价值与噪声公式。
+   */
+  applyTags() {
+    const entries = this.npcs.map((n) => ({ name: n.acc.name, role: n.type }));
+    const map = broker.allocateNpcBrokers(entries);
+    const insiderFrac = (config.news && config.news.insiderFrac) || 0;
+    // L0 内幕：从本池机构里按哈希取前 k 个（k = round(机构数 × insiderFrac)，至少 1）。
+    // 用「取前 k 名」而不是「哈希 < frac」是为了**每股恰好 1 个**（§4「10 股共 10 个」）——
+    // 后者会让某些股票抽不到内幕，那几个池的公允价值就会晚 2 秒才动，
+    // 十只股票的提前量参差不齐。
+    const inst = this.npcs.filter((n) => n.type === 'inst');
+    const k = insiderFrac > 0 ? Math.max(1, Math.round(inst.length * insiderFrac)) : 0;
+    const insiders = new Set(
+      inst
+        .map((n) => ({ name: n.acc.name, h: broker.hashUnit('insider:' + n.acc.name) }))
+        .sort((a, b) => a.h - b.h || (a.name < b.name ? -1 : 1))
+        .slice(0, k)
+        .map((r) => r.name)
+    );
+    let best = null;
+    for (const n of this.npcs) {
+      const name = n.acc.name;
+      n.broker = map.get(name) || null;
+      // 缓存在内存账户对象上（不落盘）：下单/成交时读一次即可
+      n.acc.broker = n.broker;
+      n.newsTier = insiders.has(name) ? 'insider' : n.type === 'inst' ? 'inst' : 'public';
+      n.newsViewer = n.newsTier === 'public' ? null : { tier: n.newsTier };
+      if (n.newsTier === 'insider' || (n.newsTier === 'inst' && !best)) best = n.newsViewer;
+    }
+    this.poolViewer = best;
   }
 
   /** 每 tick 推进市场模拟 */
@@ -339,7 +399,9 @@ class NpcManager {
     // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
     // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
     fv *= 1 + this.trendDrift * trendMul;
-    fv *= 1 + this.news.fvDrift(now, this.stock.id); // 消息推力（乘性，只算本股 + 大盘消息）
+    // 消息推力（乘性，只算本股 + 大盘消息）。viewer = 全池最早知道的那一级：
+    // 公允价值是池级共享量，机构（L1）在公开前 4s 就把它推起来 → 「股价先动、消息后到」
+    fv *= 1 + this.news.fvDrift(now, this.stock.id, this.poolViewer);
     fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
     fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
     fv += (this.fund - fv) * cfg.fvAnchor; // 向重心回归
@@ -726,14 +788,17 @@ class NpcManager {
 
     if (p.publicNewsFade != null) {
       // 聪明钱：看见公开消息（全体+散户盘）但对倒——利好出货、利空吸筹；
-      // 机构专属消息仍小幅同向（知情盘）
-      const sb = this.news.sentimentByScope(now, this.stock.id);
+      // 机构专属消息仍小幅同向（知情盘）。
+      // viewer 传**本账户自己的等级**：拿到提前量之后，这条「对倒」升级成
+      // 「利好正式公开前先抢筹拉高 → 公开时散户跟风 → 机构反手出货」，
+      // 即教科书式的「利好出尽是利空」，与既有机制同源、不打架
+      const sb = this.news.sentimentByScope(now, this.stock.id, n.newsViewer);
       const publicS = Math.max(-1, Math.min(1, sb.all + sb.retail));
       s -= publicS * p.publicNewsFade;
       s += sb.inst * (p.instNewsFollow != null ? p.instNewsFollow : 0.35);
     } else {
       const scope = p.newsScope || (n.type === 'inst' ? '机构' : '散户');
-      s = this.news.sentiment(scope, now, this.stock.id);
+      s = this.news.sentiment(scope, now, this.stock.id, n.newsViewer);
       s *= p.sentimentScale != null ? p.sentimentScale : n.type === 'retail' ? 1.2 : 0.8;
     }
 
@@ -795,7 +860,7 @@ class NpcManager {
       if (ref > 0) {
         const mom = (this.market.lastPrice - ref) / ref;
         const cl = config.npc.momentumClamp;
-        const gain = config.npc.momentumGain * (p.momentumGainMul || 1);
+        const gain = config.npc.momentumGain * (p.momentumGainMul || 1) * this.heatMul(n.type);
         s += Math.max(-cl, Math.min(cl, mom * gain));
       }
     }

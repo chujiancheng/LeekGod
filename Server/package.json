@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node test/market.test.js && node test/game.test.js && node test/persist.test.js && node test/multi.test.js && node test/flow.test.js"
+    "test": "node test/market.test.js && node test/game.test.js && node test/persist.test.js && node test/multi.test.js && node test/flow.test.js && node test/broker.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

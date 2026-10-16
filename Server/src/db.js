@@ -8,10 +8,12 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { logger } = require('./logger');
 
+// 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -22,6 +24,9 @@ CREATE TABLE IF NOT EXISTS meta (
 -- 账户：玩家与 NPC 共用（NPC 的现金/持仓必须落盘，否则流通盘对不上）
 -- 多股票后这里是**账户级**口径：现金、冻结、空头保证金合计、已实现盈亏都是跨股票汇总的
 -- 一个数（玩家只有一份钱）；按股票拆分的融券/融资计息见 stock_ledger
+--
+-- 券商几列只对**玩家**有意义。NPC 的券商是由账户名哈希派生的派生标签（§11.4.1），
+-- 不落盘——落盘会踩「NPC 逐 tick 标脏」这条禁忌，也让存档版本无谓抬升。
 CREATE TABLE IF NOT EXISTS accounts (
   name          TEXT PRIMARY KEY,
   is_npc        INTEGER NOT NULL DEFAULT 0,
@@ -34,7 +39,20 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_order_at INTEGER,
   created_at    INTEGER NOT NULL,
   -- 终身累计加钱额
-  deposited     REAL NOT NULL DEFAULT 0
+  deposited     REAL NOT NULL DEFAULT 0,
+  -- 券商（出身门派）：登录时必选，转户可改。NULL = 老档还没选过，下次登录时补选
+  broker             TEXT,
+  broker_changed_at  INTEGER,
+  -- 当前券商的入会**交易日号**：免费重选窗口与转户冷却都按交易日算（不是墙钟）
+  broker_since_day   INTEGER,
+  -- 每家券商各一份进度 {key:{volume,profitBase,liquidations,orders,cancels}}（JSON）。
+  -- 转户后目标券商天然从零开始，这就是「清空该券商特权进度」的落点
+  broker_stats       TEXT,
+  -- 免费重选（仅限开户后首个交易日内可用 1 次）
+  free_reselect_used INTEGER NOT NULL DEFAULT 0,
+  -- 每日免息券：今天这张用掉没有 / 今天是否利息全免（都按交易日号）
+  coupon_used_day    INTEGER,
+  free_interest_day  INTEGER
 );
 
 -- 按股票的账户明细：融券挂借与各类利息累计（都已经是「按股票」的口径）
@@ -87,7 +105,9 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account, seq);
 
--- 成交流水：一笔成交记两行（主动方 / 被动方），是玩家成交记录的来源
+-- 成交流水：一笔成交记两行（主动方 / 被动方），是玩家成交记录与逐笔磁带的来源
+-- broker / counter_broker 是**席位**口径（§11.3）：本行账户的券商 + 对手方券商。
+-- 两行都记，磁带恢复时取 role='taker' 那一行即可还原「买方席位 / 卖方席位」
 CREATE TABLE IF NOT EXISTS trades (
   id        INTEGER PRIMARY KEY,
   account   TEXT NOT NULL,
@@ -100,7 +120,9 @@ CREATE TABLE IF NOT EXISTS trades (
   qty       INTEGER NOT NULL,
   fee       REAL NOT NULL DEFAULT 0,
   trade_seq INTEGER NOT NULL,
-  t         INTEGER NOT NULL
+  t         INTEGER NOT NULL,
+  broker        TEXT,
+  counter_broker TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_trades_account ON trades(account, id);
 CREATE INDEX IF NOT EXISTS idx_trades_tape ON trades(role, trade_seq);
@@ -182,11 +204,33 @@ CREATE INDEX IF NOT EXISTS idx_auto_account ON auto_strategies(account);
 `;
 
 /**
+ * 版本 3 → 4 的**原地升级**：券商相关的新列。
+ *
+ * 与前几轮不同，这次可以用 ALTER 补出来——全是「可空」或「带默认值」的新列，
+ * 没有主键/表结构变更（版本 2→3 换过 prices 的主键、版本 3 加的是 NOT NULL 列且
+ * 无法从旧数据推出，所以那两次只能开新局）。老档能原地升级意味着**正在跑的这一局
+ * 不会因为引入券商而被强制清掉**；`broker` 留 NULL 表示"还没选券商"，
+ * 该玩家下次登录时补选（§9 D2 登录必须选券商）。
+ *
+ * 升级前的成交流水没有席位列（NULL），那段磁带的席位显示为空——已知且可接受。
+ */
+const MIGRATION_4 = `
+ALTER TABLE accounts ADD COLUMN broker TEXT;
+ALTER TABLE accounts ADD COLUMN broker_changed_at INTEGER;
+ALTER TABLE accounts ADD COLUMN broker_since_day INTEGER;
+ALTER TABLE accounts ADD COLUMN broker_stats TEXT;
+ALTER TABLE accounts ADD COLUMN free_reselect_used INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN coupon_used_day INTEGER;
+ALTER TABLE accounts ADD COLUMN free_interest_day INTEGER;
+ALTER TABLE trades ADD COLUMN broker TEXT;
+ALTER TABLE trades ADD COLUMN counter_broker TEXT;
+`;
+
+/**
  * 打开（必要时创建）数据库并保证表结构就绪。
  *
- * 版本 2 起不再做增量列迁移：多股票把 prices 的主键、融券记账的表都换了，
- * 版本 3 又在 market_state 上加了资金流向列，这类改动无法用 ALTER 补出来，
- * 旧档只能开新局（版本不匹配时直接拒绝启动，报错里给出删档指引）。
+ * 版本 2 及更早**直接拒绝启动**（那几次改的是主键与非空列，ALTER 补不出来，
+ * 报错里给出删档指引）；版本 3 走 MIGRATION_4 原地升级到 4。
  */
 function openDatabase(file) {
   const dir = path.dirname(path.resolve(file));
@@ -200,6 +244,11 @@ function openDatabase(file) {
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
   if (!row) {
     db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+  } else if (Number(row.value) === 3) {
+    const from = Number(row.value);
+    db.exec(MIGRATION_4);
+    db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));
+    logger.info(`[我是股神] 存档表结构已从版本 ${from} 原地升级到 ${SCHEMA_VERSION}（新增券商与席位列，数据保留）`);
   } else if (Number(row.value) !== SCHEMA_VERSION) {
     db.close();
     throw new Error(
