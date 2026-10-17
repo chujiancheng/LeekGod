@@ -67,6 +67,29 @@
   padding: 14px 16px;
 }
 
+.decision-card {
+  border-color: color-mix(in srgb, #5eead4 35%, var(--line, #2a3540));
+}
+
+.decision-line {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 4px 0 10px;
+  color: var(--ink, #e8eef5);
+  word-break: break-all;
+}
+
+.decision-line .lbl {
+  color: var(--muted, #8a96a3);
+  margin-right: 8px;
+}
+
+table.whale-table .note-cell {
+  white-space: normal;
+  max-width: 220px;
+  color: var(--muted, #8a96a3);
+}
+
 .whale-top {
   display: flex;
   flex-wrap: wrap;

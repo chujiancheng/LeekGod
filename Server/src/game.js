@@ -1900,6 +1900,9 @@ class Game {
       phase: day ? day.phase.key : null,
       phaseLabel: day ? day.phase.label : null,
       llmEnabled: !!(config.npc.llm && config.npc.llm.enabled),
+      lastDecision: this.whales && this.whales.lastDecisionSnapshot
+        ? this.whales.lastDecisionSnapshot()
+        : null,
       whales,
     };
   }

@@ -486,8 +486,8 @@ const config = {
       model: process.env.NPC_LLM_MODEL || 'mimo-v2.6-flash',
       // 决策要的是稳定而不是文采，0.7 会让同一张盘面来回翻立场
       temperature: 0.6,
-      // 实测 mimo-v2.6-flash 单次决策约 8s（含 reasoning tokens），8s 会频繁踩超时
-      timeoutMs: 12000,
+      // 实测 mimo-v2.6-flash 含 reasoning 单次 8~25s；四脑串行时单次给足 35s，避免踩超时
+      timeoutMs: 35000,
       // 瞬时故障（429/5xx/超时）重试次数，0 = 不重试
       retry: 1,
       // 单次输入字符上限：超了**丢弃本轮**（不发请求），防 snapshot 变大后静默烧 token

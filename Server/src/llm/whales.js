@@ -122,6 +122,8 @@ class WhaleManager {
     this.lastPlanDay = new Map(); // whaleId -> day:phaseKey
     this._callDay = null;
     this._callCount = 0;
+    /** 上一轮完整决策（供观测页）：{t, day, phase, phaseLabel, merged, decisions[]} */
+    this.lastRound = null;
     this._preTimer = null; // 收盘决策的提前排程（见 preTrigger）
   }
 
@@ -283,20 +285,20 @@ class WhaleManager {
       (dayState.phase.label || dayState.phase.key) +
       (phaseKey !== dayState.phase.key ? `→${phaseKey}` : '');
 
-    // 先同步扣预算、再并发发请求：预算不足的脑直接不参与本轮
-    const pending = [];
+    // 串行决策：四脑并发打同一 API 极易互相拖超时（日志里常见「3/4 timeout」），
+    // 串行后每个脑独享 timeoutMs，成功率高得多；总耗时 ≈ 4×单次，仍在阶段窗口内可接受
+    const t0 = Date.now();
+    const results = [];
     for (const whale of this.cfg.whales) {
       if (this._already(dayState.day, phaseKey, whale.id)) continue;
       if (!this._budgetOk(now)) {
         logger.warn('[LLM] 主力脑今日调用已达预算上限，跳过剩余决策');
         break;
       }
-      pending.push(this._decide(whale, snapshot, clampCfg));
+      results.push(await this._decide(whale, snapshot, clampCfg));
     }
-    if (!pending.length) return;
+    if (!results.length) return;
 
-    const t0 = Date.now();
-    const results = await Promise.all(pending);
     const good = results.filter((r) => r && r.plan);
 
     for (const r of results) {
@@ -315,6 +317,14 @@ class WhaleManager {
     }
     if (!good.length) {
       logger.warn('[LLM] 本轮无可用决策，保持量化规则');
+      this.lastRound = {
+        t: Date.now(),
+        day: dayState.day,
+        phase: phaseKey,
+        phaseLabel,
+        merged: null,
+        decisions: results.map((r) => this._decisionRecord(r, dayState, phaseKey, phaseLabel, false)),
+      };
       return;
     }
 
@@ -333,7 +343,62 @@ class WhaleManager {
     );
 
     // 软计划写回之后再各自下单：账户层保留"每个脑按自己观点交易"的差异化
-    for (const { whale, plan } of good) this._executeWhaleOrders(plan, whale);
+    const orderPlaced = new Map();
+    for (const { whale, plan } of good) {
+      orderPlaced.set(whale.id, this._executeWhaleOrders(plan, whale));
+    }
+
+    // 供观测页展示「上一轮 AI 决策」
+    this.lastRound = {
+      t: Date.now(),
+      day: dayState.day,
+      phase: phaseKey,
+      phaseLabel,
+      merged: {
+        bias: merged.bias,
+        aggro: merged.aggro,
+        stocks: merged.stocks,
+        notes: merged.notes,
+      },
+      decisions: results.map((r) =>
+        this._decisionRecord(r, dayState, phaseKey, phaseLabel, true, orderPlaced.get(r.whale && r.whale.id) || 0)
+      ),
+    };
+  }
+
+  _decisionRecord(r, dayState, phaseKey, phaseLabel, ok, placed = 0) {
+    const plan = r && r.plan;
+    const stockNames = {};
+    for (const s of this.game.stocks) stockNames[s.id] = s.name;
+    const stocks = plan
+      ? Object.entries(plan.stocks || {}).map(([id, sub]) => ({
+          stockId: id,
+          stockName: stockNames[id] || id,
+          stance: sub.stance,
+          intent: sub.intent,
+          weight: sub.weight,
+        }))
+      : [];
+    return {
+      whaleId: r.whale.id,
+      label: r.whale.label,
+      ok: !!plan,
+      error: r.error || null,
+      bias: plan ? plan.bias : null,
+      intent: plan ? plan.intent : null,
+      intentChance: plan ? plan.intentChance : null,
+      aggressiveness: plan ? plan.aggro : null,
+      note: plan ? plan.note || '' : '',
+      stocks,
+      ordersPlaced: placed,
+      ms: r.ms || 0,
+      tokens: r.usage
+        ? { prompt: r.usage.prompt_tokens || 0, completion: r.usage.completion_tokens || 0 }
+        : null,
+      day: dayState.day,
+      phase: phaseKey,
+      phaseLabel,
+    };
   }
 
   async _decide(whale, snapshot, clampCfg) {
@@ -502,6 +567,58 @@ class WhaleManager {
       }
     }
     if (placed) logger.info(`[LLM] ${whale.label} 本轮挂单 ${placed} 张`);
+    return placed;
+  }
+
+  /** 最近一轮决策快照（观测页用）；内存态不落盘 */
+  lastDecisionSnapshot() {
+    const round = this.lastRound;
+    if (!round) return null;
+    const stockNames = {};
+    for (const s of this.game.stocks) stockNames[s.id] = s.name;
+    const mergedStocks = {};
+    if (round.merged && round.merged.stocks) {
+      for (const [id, s] of Object.entries(round.merged.stocks)) {
+        mergedStocks[id] = {
+          stockId: id,
+          stockName: stockNames[id] || id,
+          stance: s.stance,
+          intent: s.intent,
+          weight: s.weight,
+          bias: s.bias,
+        };
+      }
+    }
+    return {
+      t: round.t,
+      day: round.day,
+      phase: round.phase,
+      phaseLabel: round.phaseLabel,
+      merged: round.merged
+        ? {
+            bias: round.merged.bias,
+            aggro: round.merged.aggro,
+            stocks: mergedStocks,
+            notes: round.merged.notes || [],
+          }
+        : null,
+      decisions: (round.decisions || []).map((d) => ({
+        whaleId: d.whaleId,
+        label: d.label,
+        ok: d.ok,
+        error: d.error,
+        bias: d.bias,
+        intent: d.intent,
+        aggressiveness: d.aggressiveness,
+        note: d.note,
+        stocks: d.stocks,
+        ordersPlaced: d.ordersPlaced,
+        ms: d.ms,
+        tokens: d.tokens,
+        phaseLabel: d.phaseLabel,
+        day: d.day,
+      })),
+    };
   }
 
   _snapshot(dayState) {

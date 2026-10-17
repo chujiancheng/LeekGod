@@ -285,6 +285,19 @@ def whales():
         f"AI 主力组合 | 第 {data.get('day')} 交易日 · {data.get('phaseLabel')} | "
         f"LLM={'开' if data.get('llmEnabled') else '关'}"
     )
+    dec = data.get("lastDecision")
+    if dec:
+        print(
+            f"上一轮决策: {dec.get('phaseLabel')} day{dec.get('day')} "
+            f"bias={dec.get('merged') and dec['merged'].get('bias')}"
+        )
+        for d in dec.get("decisions") or []:
+            mark = "✓" if d.get("ok") else "✗"
+            stocks = ",".join(s.get("stockName", "") for s in d.get("stocks") or []) or "-"
+            note = (d.get("note") or d.get("error") or "")[:40]
+            print(f"  {mark} {d.get('label')}: bias={d.get('bias')} {stocks} 挂单{d.get('ordersPlaced') or 0} {note}")
+    else:
+        print("上一轮决策: （内存无记录，等下一阶段触发）")
     print("-" * 72)
     for w in data.get("whales", []):
         print(
