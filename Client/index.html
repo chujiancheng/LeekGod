@@ -170,6 +170,8 @@
             <button class="primary-btn" id="goTradeBtn">进入交易</button>
             <button class="ghost-btn big" id="goPositionBtn">查看持仓</button>
             <button class="ghost-btn big deposit-btn" id="addCashBtn" hidden>加钱</button>
+            <!-- 游戏规则：所有数值读 state.rules 现算，不写死（改配置那天说明书不会变成骗人的） -->
+            <button class="ghost-btn big rules-entry" id="rulesBtn" title="看完整规则：交易 / 融资融券 / 交易日 / 券商 / 自动化">游戏规则</button>
             <!-- 开户过场漫画的回看入口：4 套随时能翻，不占新手流程（见 openComic 的 replay 模式） -->
             <button class="ghost-btn big" id="comicReplayBtn" title="回看开户时的四格漫画（4 套可翻）">看漫画</button>
           </div>
@@ -635,6 +637,25 @@
         </div>
       </div>
       <button class="deposit-cancel" id="companyCloseBtn">关闭</button>
+    </div>
+  </div>
+
+  <!-- 游戏规则弹窗：主页「规则」入口打开。
+       左侧分类 = 一屏只讲一件事；正文全部由 app.js 的 renderRules() 按 state.rules 现算 -->
+  <div id="rulesOverlay" class="overlay deposit-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rulesTitle">
+    <div class="login-card deposit-card rules-card">
+      <div class="rules-head">
+        <div class="rules-title-wrap">
+          <div class="deposit-title" id="rulesTitle">游戏规则</div>
+          <div class="login-sub" id="rulesSub">数值按你当前券商的有效参数实时生成</div>
+        </div>
+        <button class="rules-x" id="rulesCloseX" type="button" aria-label="关闭规则">×</button>
+      </div>
+      <div class="rules-wrap">
+        <nav class="rules-nav" id="rulesNav"></nav>
+        <div class="rules-body" id="rulesBody"></div>
+      </div>
+      <button class="deposit-cancel" id="rulesCloseBtn">知道了，开干</button>
     </div>
   </div>
 

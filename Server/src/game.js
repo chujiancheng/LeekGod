@@ -1360,6 +1360,23 @@ class Game {
         maxDeviation: config.trade.maxDeviation,
         cagePct: config.trade.cagePct,
         priceLimit: config.priceLimit,
+        // 交易日规则表：客户端「游戏规则」面板要逐段展示时长与能否下单，
+        // 而**客户端不许自己算阶段**（见 §3.1），所以阶段表也只能由服务端下发
+        day: {
+          enabled: !!config.day.enabled,
+          totalMs: config.day.phases.reduce((sum, p) => sum + p.ms, 0),
+          phases: config.day.phases.map((p) => ({
+            key: p.key,
+            label: p.label,
+            ms: p.ms,
+            gameTime: p.gameTime || '',
+            trading: !!p.trading,
+            auction: p.auction || null,
+            cancelLockMs: p.cancelLockMs || 0,
+          })),
+        },
+        // 强平撮合不到对手盘时的系统兜底滑点（规则面板要讲清"强平不保证成交在你看到的价格"）
+        liquidationSlippage: config.margin.liquidationSlippage,
         index: { code: this.index.stockId, name: this.index.stock.name, base: this.index.base },
         stocks: this.stocks.map((s) => ({
           id: s.id,

@@ -3085,6 +3085,367 @@
     $('marginCallLeft').textContent = '';
   }
 
+  // ==================================================================
+  // 游戏规则（主页「规则」入口 + 分类弹窗）
+  // 数值一律读 state.rules：佣金 / 冷却 / 锁仓 / 保证金这些都是 **per-broker 的有效值**，
+  // 在客户端写死一份，改配置那天就会静默变成"骗人的说明书"。
+  // 交易日阶段表同理——客户端不许自己算阶段（§3.1），所以阶段表也只能吃 rules.day。
+  // ==================================================================
+  const RULES_SEEN_KEY = 'gushen_rules_seen';
+  let rulesSeen = false;
+  let rulesTabKey = 'start';
+
+  const trimNum = (v, digits) => {
+    const s = Number(v).toFixed(digits);
+    return s.indexOf('.') >= 0 ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+  };
+  // 注意：时长格式化复用下方交易日模块的 fmtDur（函数声明会提升，规则面板先用到没问题）——
+  // 两处各写一份的话，倒计时显示「10 分 20 秒」而规则页显示「10分20秒」，观感会分家
+  /** 0.0001 → "0.01%"：费率 / 分钟息这类**比例**值（finance.minuteRate 已经是百分数，别走这里） */
+  const fmtRatePct = (v, digits) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '--';
+    return trimNum(n * 100, digits == null ? 2 : digits) + '%';
+  };
+  /** 0.5 → "50%" */
+  const fmtRatio = (v, digits) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '--';
+    return trimNum(n * 100, digits == null ? 0 : digits) + '%';
+  };
+
+  const ruleKv = (k, v, note) =>
+    '<div class="rule-kv"><span class="rk">' + k + '</span><span class="rv">' + v +
+    (note ? '<em>' + note + '</em>' : '') + '</span></div>';
+
+  const ruleTable = (heads, rows) =>
+    '<div class="rule-table"><table><thead><tr>' +
+    heads.map((h) => '<th>' + h + '</th>').join('') +
+    '</tr></thead><tbody>' +
+    rows.map((cells) => '<tr>' + cells.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('') +
+    '</tbody></table></div>';
+
+  /** 快速上手：目标 + 三步走 + 五条底层设定 */
+  function rulesStartHtml(S) {
+    const r = S.rules || {};
+    const lot = r.lotSize || 100;
+    const stocks = (r.stocks || []).length || 10;
+    const cash = Number(r.initialCash);
+    const cashText = Number.isFinite(cash) ? fmtMoney(cash) : '1000000.00';
+    return (
+      '<div class="rule-lead">同服所有人的起跑线一样：<b>¥' + cashText + '</b> 虚拟本金、<b>' + stocks +
+        '</b> 只股票、一群不知疲倦的对手盘。没有剧本、没有人发牌——<b>收盘时总权益最高的人，就是股神</b>。</div>' +
+      '<div class="rule-h">三步上手</div>' +
+      '<div class="rule-steps">' +
+        '<div class="rule-step"><i>1</i><div><b>挑一只股票</b><span>主页「行情列表」点任意一行进交易终端，顶部切换栏可以随时换盘口。</span></div></div>' +
+        '<div class="rule-step"><i>2</i><div><b>选方向下单</b><span>看涨买入开多，看跌卖出开空。数量按「手」算，1 手 = ' + lot + ' 股。</span></div></div>' +
+        '<div class="rule-step"><i>3</i><div><b>盯盘或者托管</b><span>手动挂单，或建一条自动化策略让服务端替你跑（下线也照跑）。</span></div></div>' +
+      '</div>' +
+      '<div class="rule-h">先记住这五件事</div>' +
+      '<div class="rule-grid">' +
+        '<div class="rule-cell"><b>一份本金，十个盘口</b><span>现金全股票共用、持仓按股票分账。重仓一只，别的股票就没子弹了。</span></div>' +
+        '<div class="rule-cell"><b>同股只能一个方向</b><span>同一只股票要么做多要么做空（含在途开仓单），不能自己跟自己对着干。</span></div>' +
+        '<div class="rule-cell"><b>一天只有 ' + fmtDur((r.day && r.day.totalMs) || 620000) + '</b><span>开盘竞价 → 上午 → 午休 → 下午 → 收盘竞价 → 夜间结算。</span></div>' +
+        '<div class="rule-cell"><b>赚差价，也付利息</b><span>融资融券都按分钟计息，扛得越久，成本越高。</span></div>' +
+        '<div class="rule-cell"><b>指数看得见，摸不着</b><span>大盘指数由十只股票加权合成，只做参照，不能下单。</span></div>' +
+      '</div>' +
+      '<div class="rule-tip"><b>涨红跌绿</b>：红色 = 涨，绿色 = 跌（A 股口径，和美股正好相反）。</div>'
+    );
+  }
+
+  /** 交易规则：四个方向 + 撮合约束 */
+  function rulesTradeHtml(S) {
+    const r = S.rules || {};
+    const lot = r.lotSize || 100;
+    const cd = r.cooldownMs == null ? 2000 : r.cooldownMs;
+    const lock = r.lockMs == null ? 10000 : r.lockMs;
+    const dev = r.maxDeviation == null ? 0.5 : r.maxDeviation;
+    const cage = r.cagePct == null ? 0.05 : r.cagePct;
+    const pl = r.priceLimit || {};
+    const fin = r.finance || {};
+    const own = fin.ratio == null ? 0.5 : fin.ratio;
+    const dirTable = ruleTable(['方向', '做什么', '前提'], [
+      ['<b>买入开多</b><span class="rule-sub">buy_open</span>', '用现金买股票，涨了赚', '现金够（勾了融资则只需自备 ' + fmtRatio(own) + '）'],
+      ['<b>卖出平多</b><span class="rule-sub">sell_close</span>', '把手上的多头卖掉兑现', '过了锁仓期、数量不超过可平'],
+      ['<b>卖出开空</b><span class="rule-sub">sell_open</span>', '先借券卖出，跌了再买回还券', '该股券源可借 + 保证金够'],
+      ['<b>买入平空</b><span class="rule-sub">buy_close</span>', '买回股票还给借出方', '有对应的空头持仓'],
+    ]);
+    return (
+      '<div class="rule-lead">四种方向决定你是<b>开仓</b>还是<b>平仓</b>；能不能开，还要看方向锁与券源。</div>' +
+      dirTable +
+      '<div class="rule-h">撮合与约束</div>' +
+      ruleKv('交易单位', '1 手 = ' + lot + ' 股', '金额随股价不同，下单面板会自动折算') +
+      ruleKv('手续费', fmtFeeRate(r.feeRate), '买卖都收，没有最低 5 元') +
+      ruleKv('下单冷却', fmtDur(cd), '跨股票共享：冷却里换一只股票下，也算同一笔') +
+      ruleKv('买入锁仓', 'T+' + fmtDur(lock), '按成交时间算，锁仓期内不能卖') +
+      ruleKv('委托价偏离', '±' + fmtRatio(dev), '相对最新价，防止手滑打错价格') +
+      ruleKv('价格笼子', '±' + fmtRatio(cage, 1), '单笔成交价相对最新价的偏离上限') +
+      ruleKv('涨跌停', pl.enabled === false ? '本服未开启' : '±' + fmtRatio(pl.pct == null ? 0.1 : pl.pct), '相对昨收，集合竞价也受它约束') +
+      ruleKv('交易方向', '多空双向', '当天买当天就能卖（过了锁仓期即可）') +
+      '<div class="rule-warn"><b>挂得远，不等于成交得远。</b>脱离价格笼子的委托会留在盘口等着，' +
+        '等最新价靠近它才可能成交；想马上成交，就把价格挂在笼子里。</div>' +
+      '<div class="rule-tip"><b>同股多空互斥：</b>一只股票上持有多头（或有买入开仓在途）就不能再卖出开空，' +
+        '反之亦然。想反手，先把这一侧平干净。平仓与同向加仓不受限制。</div>'
+    );
+  }
+
+  /** 融资融券：杠杆、爆仓、券源 */
+  function rulesMarginHtml(S) {
+    const r = S.rules || {};
+    const fin = r.finance || {};
+    const lend = r.lending || {};
+    const own = fin.ratio == null ? 0.5 : fin.ratio;
+    const margin = r.marginRatio == null ? 0.5 : r.marginRatio;
+    const maint = r.maintenance == null ? 0.3 : r.maintenance;
+    const slip = r.liquidationSlippage == null ? 0.005 : r.liquidationSlippage;
+    const lev = own > 0 ? trimNum(1 / own, 2) : '--';
+    const finNow = Number(fin.minuteRate);
+    const finBase = Number(fin.baseMinuteRate);
+    const finMax = Number(fin.maxMinuteRate);
+    const lendBase = Number(lend.baseMinuteRate);
+    const lendMax = Number(lend.maxMinuteRate);
+    return (
+      '<div class="rule-lead">钱不够可以<b>融资</b>，看跌没股票可以<b>融券</b>。两样都是借来的，都要付利息，也都可能被强平。</div>' +
+      '<div class="rule-h">融资（加杠杆做多）</div>' +
+      ruleKv('自备比例', fmtRatio(own), '剩下的由券商垫，最高 ' + lev + ' 倍杠杆') +
+      ruleKv('利息', fmtRatePct(finBase) + '/分',
+        Number.isFinite(finBase)
+          ? '约 ' + fmtRatePct(finBase * 1440, 1) + '/日 · 现金越紧张越贵，封顶 ' + fmtRatePct(finMax) + '/分'
+          : '') +
+      (Number.isFinite(finNow) ? ruleKv('当前利率', trimNum(finNow, 2) + '%/分', '按全市场资金紧张度实时浮动') : '') +
+      ruleKv('爆仓线', '权益 < ' + fmtRatio(maint) + ' × 多头市值', '跌破即强平，卖股还债') +
+      '<div class="rule-h">融券（做空）</div>' +
+      ruleKv('保证金', '卖出市值 × ' + fmtRatio(margin), '开空先冻结这笔钱，平仓后释放') +
+      ruleKv('维持保证金率', fmtRatio(maint), '权益扛不住这个比率就爆仓') +
+      ruleKv('券源', '每只股票一口独立的池子', '只能借到别人挂出来的券，借不到就开不了空') +
+      ruleKv('融券利息', fmtRatePct(lendBase) + '/分 起',
+        '池子越紧张越贵，封顶 ' + fmtRatePct(lendMax) + '/分') +
+      ruleKv('挂借收息', '可卖持仓挂出去借给空头', '按分钟计息，在「融券」标签页挂借 / 撤借') +
+      ruleKv('裸空', r.allowNakedShort ? '本服开启（无券也能空）' : '本服关闭（必须借到券）', '') +
+      '<div class="rule-warn"><b>强平不讲价。</b>系统在爆仓时直接挂单平掉你的仓位，' +
+        '如果盘口没有足够的对手盘，会按 ' + fmtRatio(slip, 1) + ' 的滑点兜底成交——实际成交价可能比你看到的最差价还差。' +
+        '跌破维持线但还没到强平线时，会先弹一条「追保预警」。</div>' +
+      '<div class="rule-tip">利息按分钟滚，两个方向都是。小仓位扛一天，利息可能比你想的贵——' +
+        '下单面板的「杠杆利息」会把这一笔的真实成本算给你。</div>'
+    );
+  }
+
+  /** 交易日：六段节奏、集合竞价、结算与跳空 */
+  function rulesDayHtml(S) {
+    const r = S.rules || {};
+    const day = r.day || {};
+    const phases = Array.isArray(day.phases) ? day.phases : [];
+    const curKey = S.day && S.day.enabled ? S.day.phase : null;
+    const rows = phases.map((p) => {
+      const name = esc(p.label) +
+        (p.auction ? '<span class="rule-badge">集合竞价</span>' : '') +
+        (p.key === curKey ? '<span class="rule-now">当前</span>' : '');
+      const trade = p.trading ? '<span class="rule-yes">可以</span>' : '<span class="rule-no">不可</span>';
+      return [name, esc(p.gameTime || '--'), fmtDur(p.ms), trade];
+    });
+    const table = rows.length
+      ? ruleTable(['阶段', '盘面时刻', '真实时长', '能下单'], rows)
+      : '<div class="rule-warn">本服务端没有下发交易日阶段表，可能未开启交易日时钟。</div>';
+    const total = fmtDur(day.totalMs || 620000);
+    return (
+      '<div class="rule-lead">一天被切成六段，共 <b>' + total + '</b>。段与段之间发生的事完全不同：' +
+        '竞价只入簿不撮合、午休与夜间完全冻结、收盘那一 tick 结算全天。</div>' +
+      table +
+      '<div class="rule-h">集合竞价怎么算价</div>' +
+      ruleKv('报价', '只入簿，不撮合', '盘口允许买卖价交叉，看到的就是「虚拟成交价」') +
+      ruleKv('开盘价', '最大成交量原则', '能成交最多的那个价，并列时取最接近昨收的') +
+      ruleKv('成交', '所有单按同一个价成交', '挂得低的卖方也享受这个价') +
+      ruleKv('撤单', '最后 10 秒不能撤', '复刻真实市场 09:20 那条硬线，逼你认账') +
+      '<div class="rule-h">收盘结算会发生什么</div>' +
+      ruleKv('昨收', '收盘价滚动成新昨收', '次日涨跌停区间跟着换') +
+      ruleKv('委托', '当日委托全部作废', '没成交的单不会活到明天') +
+      ruleKv('K 线', '当天定格成一根日线', '日线图从这个时刻起才算数') +
+      '<div class="rule-tip"><b>隔夜跳空是设计出来的：</b>午休与夜间不撮合、不报价，但消息照发、' +
+        '定价重心继续迁移。所以第二天开盘价常和昨收差一截——跳空是真规则，不是 bug。</div>'
+    );
+  }
+
+  /** 券商：六家的差异 + 星级 / 每周之星 / 转户 */
+  function rulesBrokerHtml(S) {
+    const r = S.rules || {};
+    const list = Array.isArray(r.brokers) ? r.brokers : [];
+    const meta = r.brokerMeta || {};
+    const tr = meta.transfer || {};
+    const weekly = meta.weekly || {};
+    const myKey = S.account && S.account.broker ? S.account.broker.key : '';
+    const rows = list.map((b) => {
+      const p = b.preview || {};
+      const name = '<b>' + esc(b.name) + '</b>' +
+        (b.key === myKey ? '<span class="rule-now">我的</span>' : '') +
+        '<span class="rule-sub">' + esc(b.persona || '') + '</span>';
+      return [
+        name,
+        fmtFeeRate(p.feeRate),
+        p.leverage ? trimNum(p.leverage, 2) + '×' : '--',
+        p.maintenance == null ? '--' : fmtRatio(p.maintenance),
+        p.lockMs == null ? '--' : fmtDur(p.lockMs),
+        p.lendCapacityPct == null ? '--' : p.lendCapacityPct + '%',
+      ];
+    });
+    const table = rows.length
+      ? ruleTable(['券商', '佣金', '融资上限', '维持率', '锁仓', '券源'], rows)
+      : '<div class="rule-warn">本服未开启券商玩法，所有账户按基准参数交易。</div>';
+    return (
+      '<div class="rule-lead">开户时选的<b>券商（出身门派）</b>不是贴纸：佣金、冷却、锁仓、融资额度、保证金、券源、' +
+        '消息提前量全都不一样。表里是每家养成到满额后能拿到的数值。</div>' +
+      table +
+      '<div class="rule-h">声誉星级</div>' +
+      ruleKv('怎么升', '按本券商的累计成交额 + 累计盈利', '还有一条硬门槛：爆过仓就上不去高星') +
+      ruleKv('有什么用', '1~' + (meta.starMax || 5) + '★ 逐步解锁特权', '「更好」的一面按星级递进，「更差」的代价立刻生效') +
+      ruleKv('转户', '冷却 ' + (tr.cooldownDays == null ? 1 : tr.cooldownDays) + ' 个交易日',
+        '费用 = 总资产 × ' + fmtRatePct(tr.feeRate, 1) + '（上限 ¥' + fmtMoney(tr.feeCap == null ? 50000 : tr.feeCap) + '），两边星级与进度清空') +
+      ruleKv('免费重选', '开户后 ' + (tr.freeReselectDays == null ? 1 : tr.freeReselectDays) + ' 个交易日内 1 次', '之后再换就要付转户费') +
+      '<div class="rule-h">每周之星</div>' +
+      ruleKv('轮换', '每 ' + (weekly.daysPerWeek == null ? 7 : weekly.daysPerWeek) + ' 个交易日换一家', '轮换表在开户卡片墙与「我的券商」卡上') +
+      ruleKv('加成', '佣金 ×' + (weekly.feeMul == null ? 0.5 : weekly.feeMul) +
+        ' · 融资额度 +' + (weekly.financeBonus == null ? 0.5 : weekly.financeBonus) + ' 倍', '轮到谁谁便宜，与你选哪家无关') +
+      '<div class="rule-tip"><b>拥挤税：</b>人气越旺的券商，佣金与券源越差——人多的地方，券少价高。</div>'
+    );
+  }
+
+  /** 自动化策略 */
+  function rulesAutoHtml(S) {
+    const r = S.rules || {};
+    const auto = r.auto || {};
+    const grid = auto.grid || {};
+    const ma = auto.ma || {};
+    const dcaMs = auto.dcaMinIntervalMs == null ? 5000 : auto.dcaMinIntervalMs;
+    const maxN = auto.maxPerAccount == null ? 20 : auto.maxPerAccount;
+    return (
+      '<div class="rule-lead">不想盯盘？把规则交给服务端。策略<b>由服务端每 tick 执行</b>，你关掉页面、人不在，它照样下单。</div>' +
+      ruleTable(['类型', '逻辑'], [
+        ['<b>止盈止损</b>', '价格达到设定的盈利 % 或亏损 % 时自动平仓'],
+        ['<b>网格</b>', '在区间内每跌一档买、每涨一档卖，反复薅震荡'],
+        ['<b>双均线</b>', '快线上穿慢线开仓、下穿平仓，趋势跟随'],
+        ['<b>定投</b>', '每隔一段时间固定金额买入，摊平成本'],
+      ]) +
+      '<div class="rule-h">约束</div>' +
+      ruleKv('配额', '每个账户最多 ' + maxN + ' 条', '跨股票合计，含已完成的历史策略') +
+      ruleKv('绑定', '一条策略只服务一只股票', '在哪个盘口建的，就只对那只股票下单') +
+      ruleKv('下单口径', '走正常撮合，没有后门', '该收的手续费、该守的锁仓与方向锁一样不少') +
+      ruleKv('网格参数', (grid.minStepPct == null ? 0.3 : grid.minStepPct) + '% ~ ' + (grid.maxStepPct == null ? 20 : grid.maxStepPct) + '% 间距',
+        '最多 ' + (grid.maxLevels == null ? 50 : grid.maxLevels) + ' 格') +
+      ruleKv('均线参数', '快线 ' + (ma.minFast == null ? 10 : ma.minFast) + '~' + (ma.maxFast == null ? 300 : ma.maxFast) +
+        ' · 慢线最大 ' + (ma.maxSlow == null ? 900 : ma.maxSlow),
+        '快慢线至少间隔 ' + (ma.minSlowGap == null ? 10 : ma.minSlowGap) + ' 根') +
+      ruleKv('定投间隔', '不少于 ' + fmtDur(dcaMs), '') +
+      '<div class="rule-tip">休市期（午休 / 夜间）策略会跳过，不在冻结的盘口上干等；竞价段照常可用。</div>'
+    );
+  }
+
+  /** 称号 / 里程碑：只讲机制，不抄门槛（门槛会随运营调整，主页卡片上有实时进度） */
+  function rulesEggHtml() {
+    return (
+      '<div class="rule-lead">收盘结算时，系统会翻一遍你的账户，把这一天的<b>里程碑</b>记下来，' +
+        '并对得上的称号发一条播报。判定<b>只在收盘那一刻</b>，不会在盘中跳出来打断你。</div>' +
+      ruleTable(['族', '记什么'], [
+        ['<b>发家线</b>', '收盘权益向上跨过档位：从「保本出关」一路到「封神」'],
+        ['<b>绝对水位</b>', '收盘权益跌破档位：从「出师不利」一路到「倒欠券商」'],
+        ['<b>回撤</b>', '相对历史最高收盘权益的回撤幅度，越过 30% / 50% / 70% / 90% 依次点亮'],
+        ['<b>风险度</b>', '收盘风险度逼近强平线、擦边过关、以及首次被强平'],
+      ]) +
+      '<div class="rule-tip">称号在主页「股神里程碑」卡里看：当前称号、下一档还差多少、历史最大回撤都在那儿。' +
+        '刷新页面不会重播旧的播报。</div>'
+    );
+  }
+
+  const RULES_TABS = [
+    { key: 'start', label: '快速上手', html: rulesStartHtml },
+    { key: 'trade', label: '交易规则', html: rulesTradeHtml },
+    { key: 'margin', label: '融资融券', html: rulesMarginHtml },
+    { key: 'day', label: '交易日', html: rulesDayHtml },
+    { key: 'broker', label: '券商', html: rulesBrokerHtml },
+    { key: 'auto', label: '自动化', html: rulesAutoHtml },
+    {
+      key: 'egg',
+      label: '称号',
+      html: rulesEggHtml,
+      when: (S) => !!(S && S.rules && S.rules.milestones && S.rules.milestones.enabled),
+    },
+  ];
+
+  function renderRules() {
+    const S = state;
+    const nav = $('rulesNav');
+    const body = $('rulesBody');
+    if (!S || !nav || !body) return;
+    const tabs = RULES_TABS.filter((t) => !t.when || t.when(S));
+    if (!tabs.some((t) => t.key === rulesTabKey)) rulesTabKey = tabs[0].key;
+    nav.innerHTML = tabs
+      .map(
+        (t) =>
+          '<button class="rules-tab' + (t.key === rulesTabKey ? ' on' : '') + '" type="button" data-tab="' +
+          t.key + '">' + esc(t.label) + '</button>'
+      )
+      .join('');
+    const cur = tabs.find((t) => t.key === rulesTabKey) || tabs[0];
+    body.innerHTML = cur ? cur.html(S) : '';
+    body.scrollTop = 0;
+    // 副标题点明"这些数字是你的券商的"——同一个规则对不同券商有不同的值
+    const sub = $('rulesSub');
+    if (sub) {
+      const bkName = S.account && S.account.broker ? S.account.broker.name : '';
+      sub.textContent = bkName
+        ? '按「' + bkName + '」的有效参数生成 · 运营调整后自动跟着变'
+        : '数值按服务端当前配置生成';
+    }
+  }
+
+  /** 入口上的"新"点：没点开过规则的人看得见，点过就不再提示 */
+  function syncRulesEntry() {
+    const btn = $('rulesBtn');
+    if (btn) btn.classList.toggle('has-new', !rulesSeen);
+  }
+
+  function markRulesSeen() {
+    if (rulesSeen) return;
+    rulesSeen = true;
+    try { localStorage.setItem(RULES_SEEN_KEY, '1'); } catch (e) { /* 隐私模式忽略 */ }
+    syncRulesEntry();
+  }
+
+  function openRules(tab) {
+    if (!state || !state.rules) {
+      toast('行情还没连上，稍等一下再看规则', 'err');
+      return;
+    }
+    if (tab) rulesTabKey = tab;
+    renderRules();
+    $('rulesOverlay').classList.remove('hidden');
+    markRulesSeen();
+  }
+
+  function closeRules() {
+    $('rulesOverlay').classList.add('hidden');
+  }
+
+  function bindRules() {
+    try { rulesSeen = localStorage.getItem(RULES_SEEN_KEY) === '1'; } catch (e) { rulesSeen = false; }
+    syncRulesEntry();
+    $('rulesBtn').addEventListener('click', () => openRules());
+    $('rulesCloseBtn').addEventListener('click', closeRules);
+    $('rulesCloseX').addEventListener('click', closeRules);
+    // 点遮罩空白处关闭（点卡片本身不关）
+    $('rulesOverlay').addEventListener('click', (e) => {
+      if (e.target === $('rulesOverlay')) closeRules();
+    });
+    // 分类切换：tab 是每帧重建的，事件必须挂在容器上
+    $('rulesNav').addEventListener('click', (e) => {
+      const btn = e.target.closest ? e.target.closest('.rules-tab') : null;
+      if (!btn || !btn.dataset) return;
+      rulesTabKey = btn.dataset.tab;
+      renderRules();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !$('rulesOverlay').classList.contains('hidden')) closeRules();
+    });
+  }
+
   function renderHome() {
     const a = state && state.account;
     if (!a) return;
@@ -4859,6 +5220,7 @@
     bindTransfer();
     bindEggs();
     bindCompanyProfile();
+    bindRules();
     renderChartMode();
     // 恢复上次的主题与吉祥物（都没选过=默认：深夜终端 + 跟随主题）
     try { currentMascot = localStorage.getItem(MASCOT_KEY); } catch (e) { /* 忽略 */ }

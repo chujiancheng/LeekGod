@@ -197,6 +197,15 @@ src = src.replace(
     minuteRangeOf: () => minuteRange,
     // 账号 / 昵称 / 登录开户
     doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
+    // 游戏规则（主页入口 + 分类弹窗）
+    renderRules, openRules, closeRules,
+    rulesTabs: () => RULES_TABS.map((t) => t.key),
+    rulesTabOf: () => rulesTabKey,
+    rulesBodyHtml: () => $('rulesBody').innerHTML,
+    rulesNavHtml: () => $('rulesNav').innerHTML,
+    rulesEntryNew: () => $('rulesBtn').classList.contains('has-new'),
+    rulesOverlayShown: () => !$('rulesOverlay').classList.contains('hidden'),
+    rulesSubText: () => $('rulesSub').textContent,
     // 开户过场漫画
     openComic, closeComic, pickComic, switchComic, nextComic, finishComic,
     comicSets: () => COMICS.map((c) => ({ id: c.id, title: c.title, short: c.short, n: c.panels.length })),
@@ -1352,6 +1361,160 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     api.finishComic();
     assert(api.comicGoText() === '开始开户', `过场播完仍是「开始开户」（${api.comicGoText()}）`);
     assert(fire('comicGoBtn', 'click') === 1 && api.el('comicOverlay').classList.contains('hidden') === true, '「开始开户」照旧收场');
+  }
+
+  console.log('\n[19] 游戏规则：主页入口 + 分类弹窗（数值全部读 state.rules）');
+  {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+
+    // ---- 骨架 ----
+    ['rulesBtn', 'rulesOverlay', 'rulesNav', 'rulesBody', 'rulesCloseBtn', 'rulesCloseX'].forEach((id) => {
+      assert(html.indexOf(`id="${id}"`) >= 0, `HTML 里有 #${id}`);
+    });
+    assert(/id="rulesOverlay" class="overlay deposit-overlay hidden"/.test(html), '规则层默认隐藏');
+    assert(/id="rulesBtn"/.test(html) && /hero-actions[\s\S]{0,900}id="rulesBtn"/.test(html), '规则入口在主页 hero 按钮组里');
+    assert(/\.rules-card\s*\{[^}]*max-height/s.test(css), '弹层限高（长内容靠正文滚动，不是把页面撑长）');
+    assert(/\.rules-body\s*\{[^}]*overflow-y:\s*auto/s.test(css), '只有正文滚动，头尾常驻');
+    assert(/@media \(max-width: 860px\)[\s\S]*\.rules-wrap\s*\{[^}]*flex-direction:\s*column/s.test(css), '窄屏把左侧分类改成横向条');
+
+    // ---- 一份"从服务端来"的 state：数值故意与默认值不同，用来抓前端写死 ----
+    const rich = mkState(AUCTION_DAY, null);
+    rich.rules = Object.assign({}, rich.rules, {
+      feeRate: 0.0003,
+      cooldownMs: 3000,
+      lockMs: 5000,
+      marginRatio: 0.4,
+      maintenance: 0.25,
+      lotSize: 100,
+      initialCash: 1000000,
+      maxDeviation: 0.5,
+      cagePct: 0.05,
+      priceLimit: { enabled: true, pct: 0.1 },
+      liquidationSlippage: 0.005,
+      stocks: [{ id: '600001', name: '大米集团' }],
+      finance: { enabled: true, ratio: 0.4, baseMinuteRate: 0.0001, maxMinuteRate: 0.0004, minuteRate: 0.01 },
+      lending: { enabled: true, baseMinuteRate: 0.0001, maxMinuteRate: 0.0004 },
+      day: {
+        enabled: true,
+        totalMs: 620000,
+        phases: [
+          { key: 'auction', label: '开盘集合竞价', ms: 30000, gameTime: '09:15', trading: true, auction: 'open', cancelLockMs: 10000 },
+          { key: 'morning', label: '上午连续竞价', ms: 230000, gameTime: '09:30', trading: true, auction: null, cancelLockMs: 0 },
+          { key: 'lunch', label: '午间休市', ms: 40000, gameTime: '11:30', trading: false, auction: null, cancelLockMs: 0 },
+          { key: 'afternoon', label: '下午连续竞价', ms: 260000, gameTime: '13:00', trading: true, auction: null, cancelLockMs: 0 },
+          { key: 'closeAuction', label: '收盘集合竞价', ms: 20000, gameTime: '14:57', trading: true, auction: 'close', cancelLockMs: 10000 },
+          { key: 'night', label: '休市结算', ms: 40000, gameTime: '15:00', trading: false, auction: null, cancelLockMs: 0 },
+        ],
+      },
+      auto: {
+        maxPerAccount: 12,
+        dcaMinIntervalMs: 5000,
+        grid: { minStepPct: 0.3, maxStepPct: 20, maxLevels: 50 },
+        ma: { minFast: 10, maxFast: 300, minSlowGap: 10, maxSlow: 900 },
+      },
+      brokers: [
+        { key: 'zhongxin', name: '中信证券', persona: '稳健派', preview: { feeRate: 0.0001, leverage: 2, maintenance: 0.3, lockMs: 10000, lendCapacityPct: 100 } },
+        { key: 'huatai', name: '华泰证券', persona: '科技派', preview: { feeRate: 0.0002, leverage: 2.5, maintenance: 0.28, lockMs: 8000, lendCapacityPct: 120 } },
+      ],
+      brokerMeta: {
+        starMax: 5,
+        transfer: { feeRate: 0.001, feeCap: 50000, cooldownDays: 1, freeReselectDays: 1 },
+        weekly: { daysPerWeek: 7, feeMul: 0.5, financeBonus: 0.5 },
+      },
+      milestones: { enabled: true, tone: 'savage' },
+    });
+    rich.account = Object.assign({}, rich.account, { broker: { key: 'huatai', name: '华泰证券' } });
+    rich.day = AUCTION_DAY;
+    api.setState(rich);
+    // DOM 桩不解析 index.html 的 class，这里手工补上「默认隐藏」这个初始态
+    api.el('rulesOverlay').classList.add('hidden');
+
+    const body = () => api.rulesBodyHtml();
+    const clickTab = (key) => fire('rulesNav', 'click', { target: { closest: () => ({ dataset: { tab: key } }) } });
+
+    // ---- 没连上行情时不硬开（避免渲染半张空说明书）----
+    api.setState(null);
+    api.openRules();
+    assert(api.rulesOverlayShown() === false, '没有 state 时点规则不会开出空弹层');
+    api.setState(rich);
+
+    // ---- 首次进入：入口带「新」点 ----
+    assert(api.rulesEntryNew() === true, '没点开过规则时入口挂「新」点');
+    assert(api.rulesOverlayShown() === false, '规则层默认关着');
+
+    assert(fire('rulesBtn', 'click') === 1, '主页「规则」按钮挂着监听器');
+    assert(api.rulesOverlayShown() === true, '点入口打开规则层');
+    assert(api.rulesEntryNew() === false, '点开过之后「新」点消失');
+    assert(localStorageStub.getItem('gushen_rules_seen') === '1', '看过规则写进 localStorage（刷新不再提示）');
+    assert(api.rulesTabOf() === 'start', `默认停在快速上手（实际 ${api.rulesTabOf()}）`);
+    assert(/三步上手/.test(body()) && /一份本金/.test(body()), '快速上手讲清了目标与底层设定');
+    assert(/10 分 20 秒/.test(body()), '一天时长取 rules.day.totalMs（10 分 20 秒）');
+    assert(api.rulesTabs().length === 7, `七个分类（实际 ${api.rulesTabs().length}）`);
+    assert((api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 7, '分类栏渲染出七个按钮');
+    assert(/rules-tab on"[^>]*>快速上手/.test(api.rulesNavHtml()), '当前分类高亮');
+
+    // ---- 交易规则：手续费 / 冷却 / 锁仓全部跟着 rules 走 ----
+    clickTab('trade');
+    assert(api.rulesTabOf() === 'trade', '切到交易规则');
+    assert(/万3/.test(body()), '手续费取 rules.feeRate（万3，不是写死的万1）');
+    assert(/T\+5 秒/.test(body()), '锁仓取 rules.lockMs（T+5 秒）');
+    assert(/3 秒/.test(body()), '下单冷却取 rules.cooldownMs（3 秒）');
+    assert(/±50%/.test(body()) && /±5%/.test(body()), '委托价偏离 ±50% / 价格笼子 ±5%');
+    assert(/买入开多/.test(body()) && /卖出开空/.test(body()), '四种下单方向都讲到了');
+    assert(/同股多空互斥/.test(body()), '讲清同股多空互斥');
+
+    // ---- 融资融券：保证金 40% / 维持率 25% / 自备 40%（2.5 倍）----
+    clickTab('margin');
+    assert(/40%/.test(body()), '保证金比例取 rules.marginRatio');
+    assert(/25%/.test(body()), '维持率取 rules.maintenance');
+    assert(/2\.5 倍/.test(body()), '杠杆倍数由 finance.ratio 反算（自备 40% → 2.5 倍）');
+    assert(/券源/.test(body()) && /强平/.test(body()), '讲清券源与强平');
+
+    // ---- 交易日：六段全在，且当前段有标记 ----
+    clickTab('day');
+    const dayHtml = body();
+    ['开盘集合竞价', '上午连续竞价', '午间休市', '下午连续竞价', '收盘集合竞价', '休市结算'].forEach((label) => {
+      assert(dayHtml.indexOf(label) >= 0, `阶段表里有「${label}」`);
+    });
+    assert(/3 分 50 秒/.test(dayHtml), '上午 230 秒按时长渲染（3 分 50 秒）');
+    assert((dayHtml.match(/class="rule-now"/g) || []).length === 1, '只标一个「当前」阶段');
+    assert(/集合竞价/.test(dayHtml) && /最大成交量/.test(dayHtml), '讲清竞价成交价的算法');
+
+    // ---- 券商：表里带「我的」标记，数值取 preview ----
+    clickTab('broker');
+    assert(/华泰证券/.test(body()) && /中信证券/.test(body()), '六家券商都进表（测试里给了两家）');
+    assert(/class="rule-now">我的/.test(body()), '当前券商打「我的」标');
+    assert(/万2/.test(body()), '券商佣金取 preview.feeRate');
+    assert(/转户/.test(body()) && /每周之星/.test(body()), '转户与每周之星都讲到了');
+    assert(/按「华泰证券」的有效参数生成/.test(api.rulesSubText()), `副标题点明是按哪家券商算的（${api.rulesSubText()}）`);
+
+    // ---- 自动化 ----
+    clickTab('auto');
+    assert(/最多 12 条/.test(body()), '策略配额取 rules.auto.maxPerAccount');
+    assert(/止盈止损/.test(body()) && /网格/.test(body()) && /双均线/.test(body()) && /定投/.test(body()), '四类策略都讲到了');
+
+    // ---- 称号：milestones 开着才有这一栏 ----
+    clickTab('egg');
+    assert(/发家线/.test(body()) && /回撤/.test(body()), '称号分类讲清四族判定');
+    rich.rules.milestones = { enabled: false };
+    api.setState(rich);
+    api.renderRules();
+    assert(api.rulesTabs().length === 7 && (api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 6, '关掉彩蛋后「称号」分类自动消失');
+    assert(api.rulesTabOf() === 'start', '当前分类失效时回落到第一栏，不留空白页');
+
+    // ---- 关闭 ----
+    assert(fire('rulesCloseBtn', 'click') === 1, '「知道了」按钮挂着监听器');
+    assert(api.rulesOverlayShown() === false, '点「知道了」关掉规则层');
+    api.openRules();
+    assert(api.rulesOverlayShown() === true, '可以再次打开');
+    assert(fire('rulesCloseX', 'click') === 1 && api.rulesOverlayShown() === false, '右上角 × 也能关');
+    api.openRules('trade');
+    assert(api.rulesTabOf() === 'trade', 'openRules(分类) 能直接落到指定分类');
+
+    // ---- 重开一次也不该把「新」点又亮起来（规则只在没看过时提示一次）----
+    api.closeRules();
+    assert(api.rulesEntryNew() === false, '看过之后入口不再挂「新」点');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

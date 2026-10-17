@@ -1665,3 +1665,172 @@ input { font: inherit; color: inherit; }
   .company-portrait { width: 100%; min-height: 0; height: 300px; }
   .company-stats { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ================= 游戏规则（主页入口 + 分类弹窗） ================= */
+/* 入口：没点开过时右上角一个小"新"点，点过即消失（syncRulesEntry 只切 class） */
+.rules-entry { position: relative; }
+.rules-entry.has-new::after {
+  content: "";
+  position: absolute; top: 6px; right: 8px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--gold) 22%, transparent);
+}
+
+/* 弹窗：头尾常驻，只有正文滚动（.rules-body）。滚动一定要给在正文上，
+   给整张卡的话头部标题与底部按钮会跟着滚走，长内容里玩家找不到关闭 */
+.rules-card {
+  width: min(880px, 94vw);
+  max-height: 92vh;
+  overflow: hidden;
+  padding: 18px 20px 16px;
+}
+.rules-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rules-title-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.rules-head .deposit-title { text-align: left; }
+.rules-head .login-sub { text-align: left; margin-top: 0; }
+/* 选择器必须带 .deposit-card：`.login-card button`（0,1,1）会盖掉单类选择器，
+   按钮会被压成 42px 高的蓝色渐变块（主题卡与登录按钮踩过同一个坑） */
+.deposit-card .rules-x {
+  flex: none; width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: transparent; color: var(--muted);
+  font-size: 17px; font-weight: 400; line-height: 1; letter-spacing: 0;
+}
+.deposit-card .rules-x:hover { color: var(--ink); border-color: var(--muted); filter: none; }
+
+.rules-wrap { display: flex; gap: 14px; flex: 1; min-height: 0; margin: 8px 0 12px; }
+.rules-nav {
+  flex: none; width: 124px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding-right: 12px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+.deposit-card .rules-tab {
+  height: 34px; padding: 0 12px; flex: none;
+  text-align: left;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  color: var(--muted); font-size: 13px; font-weight: 500; letter-spacing: 1px;
+}
+.deposit-card .rules-tab:hover { color: var(--ink); background: var(--panel-2); filter: none; }
+.deposit-card .rules-tab.on {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+}
+
+.rules-body {
+  flex: 1; min-width: 0; min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+  font-size: 13px; line-height: 1.75;
+  color: var(--ink);
+}
+
+/* 正文排版：一屏只讲一件事，靠 .rule-h 分小节 */
+.rule-lead {
+  padding: 10px 12px; margin-bottom: 4px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); font-size: 12.5px; line-height: 1.8;
+}
+.rule-lead b { color: var(--ink); }
+.rule-h {
+  margin: 16px 0 8px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; letter-spacing: 2px;
+  color: color-mix(in srgb, var(--gold) 82%, var(--ink));
+}
+.rule-h::after {
+  content: ""; flex: 1; height: 1px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--gold) 38%, transparent), transparent);
+}
+
+.rule-steps { display: flex; flex-direction: column; gap: 8px; }
+.rule-step { display: flex; gap: 10px; align-items: flex-start; }
+.rule-step i {
+  flex: none; width: 22px; height: 22px; margin-top: 2px;
+  display: grid; place-items: center;
+  font-style: normal; font-size: 11px; font-weight: 700;
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 40%, transparent);
+  border-radius: 50%;
+}
+.rule-step b { display: block; font-size: 13px; }
+.rule-step span { display: block; color: var(--muted); font-size: 12.5px; }
+
+.rule-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.rule-cell {
+  padding: 9px 11px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.rule-cell b { display: block; font-size: 13px; margin-bottom: 2px; }
+.rule-cell span { color: var(--muted); font-size: 12px; line-height: 1.7; }
+
+.rule-kv {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 2px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--line) 85%, transparent);
+}
+.rule-kv .rk { flex: none; width: 94px; color: var(--muted); font-size: 12.5px; }
+.rule-kv .rv { flex: 1; min-width: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.rule-kv .rv em {
+  display: block; font-style: normal;
+  font-size: 11.5px; line-height: 1.6; color: var(--muted);
+}
+
+.rule-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.rule-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.rule-table th {
+  padding: 8px 10px; text-align: left; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600;
+  color: var(--muted); background: var(--panel-2);
+}
+.rule-table td { padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.rule-table td:first-child { white-space: nowrap; }
+.rule-sub { display: block; font-size: 10.5px; line-height: 1.5; color: var(--muted); letter-spacing: .5px; }
+
+.rule-badge, .rule-now {
+  display: inline-block; margin-left: 6px; padding: 0 5px;
+  font-size: 10px; line-height: 15px; font-weight: 500; letter-spacing: 0;
+  border-radius: 4px; vertical-align: 1px;
+}
+.rule-badge { color: var(--gold); border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent); }
+.rule-now { color: var(--blue); border: 1px solid color-mix(in srgb, var(--blue) 45%, transparent); }
+.rule-yes { color: var(--blue); }
+.rule-no { color: var(--muted); }
+
+/* 提示条：蓝 = 口径提醒，金 = 会亏钱的坑。两者都混 var(--ink)，
+   浅色主题（樱色交易所）下才不会变成浅底浅字 */
+.rule-tip, .rule-warn {
+  margin-top: 12px; padding: 9px 12px; border-radius: 10px;
+  font-size: 12.5px; line-height: 1.75;
+  color: color-mix(in srgb, var(--ink) 88%, var(--muted));
+}
+.rule-tip {
+  background: color-mix(in srgb, var(--blue) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 26%, transparent);
+}
+.rule-warn {
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold) 30%, transparent);
+}
+.rule-tip b, .rule-warn b { color: var(--ink); }
+.rule-table + .rule-tip, .rule-table + .rule-warn { margin-top: 10px; }
+
+@media (max-width: 860px) {
+  .rules-card { width: min(96vw, 880px); max-height: 94vh; padding: 14px 14px 12px; }
+  /* 窄屏：分类从左侧竖排改成横向滑动条，正文独占整屏宽度 */
+  .rules-wrap { flex-direction: column; gap: 10px; }
+  .rules-nav {
+    width: auto; flex-direction: row; gap: 6px;
+    padding: 0 0 8px;
+    border-right: 0; border-bottom: 1px solid var(--line);
+    overflow-x: auto; overflow-y: hidden;
+  }
+  .deposit-card .rules-tab { height: 30px; padding: 0 12px; white-space: nowrap; }
+  .rule-grid { grid-template-columns: minmax(0, 1fr); }
+  .rule-kv { flex-direction: column; gap: 2px; }
+  .rule-kv .rk { width: auto; }
+}
