@@ -217,6 +217,7 @@ src = src.replace(
     comicKickerText: () => $('comicKicker').textContent,
     comicGoText: () => $('comicGoBtn').textContent,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
+    renderPositions, posRowsHtml,
     identity: () => ({ account: me, nick: myNick, token }),
     accountRe: () => String(ACCOUNT_RE),
     nickRe: () => String(NICK_RE),
@@ -1515,6 +1516,39 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     // ---- 重开一次也不该把「新」点又亮起来（规则只在没看过时提示一次）----
     api.closeRules();
     assert(api.rulesEntryNew() === false, '看过之后入口不再挂「新」点');
+  }
+
+  console.log('\n[20] 持仓表：表头与数据行逐列对齐');
+  {
+    // 表头少一列，整行数值就右移一格（「多头持仓」压到「数量」下面、数值全串到隔壁表头）
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    const thead = (html.match(/<thead><tr>((?:(?!<\/thead>)[\s\S])*)<\/tr><\/thead>\s*<tbody id="posBody"/) || [])[1] || '';
+    const ths = (thead.match(/<th>/g) || []).length;
+    assert(ths === 9, `持仓表头 9 列（实际 ${ths}）`);
+    assert(/<th>持仓<\/th><th>方向<\/th>/.test(thead), '第 2 列是「方向」，对应行里的多头持仓 / 空头持仓');
+
+    const st = mkState(AUCTION_DAY, { kind: 'open', price: 20.01, volume: 542900, locked: false });
+    st.serverTime = Date.now();
+    st.account.positions = [
+      {
+        stockId: STOCK, name: '大米集团', last: 20.17, financeDebt: 0, financePrincipal: 0,
+        long: { qty: 12800, sellable: 12800, cost: 12800 * 19.44, value: 12800 * 20.17, pnl: 9344, lots: [{ lockedUntil: 0 }] },
+        short: { qty: 1900, coverable: 1900, cost: 1900 * 112.03, value: 1900 * 103.93, pnl: -15390, margin: 0 },
+      },
+    ];
+    api.setState(st);
+    api.renderPositions();
+    const rows = api.el('posBody').innerHTML.split('</tr>').filter((r) => /<tr/.test(r));
+    assert(rows.length === 2, `一只股票的多头与空头各一行（实际 ${rows.length} 行）`);
+    const cells = rows.map((r) => (r.match(/<td/g) || []).length);
+    assert(cells.every((n) => n === ths), `每行 ${cells.join('/')} 格，与表头 ${ths} 列一致`);
+
+    const emptyColspan = (html.match(/id="posBody"><tr><td colspan="(\d+)"/) || [])[1];
+    assert(emptyColspan === String(ths), `HTML 里空状态 colspan 也是 ${ths}（实际 ${emptyColspan}）`);
+    st.account.positions = [];
+    api.setState(st);
+    api.renderPositions();
+    assert(/colspan="9"/.test(api.el('posBody').innerHTML), '没有持仓时空状态同样占满 9 列');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

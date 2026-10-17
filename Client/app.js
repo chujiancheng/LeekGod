@@ -2070,7 +2070,7 @@
   }
 
   function renderPositions() {
-    $('posBody').innerHTML = posRowsHtml() || '<tr><td colspan="8" class="empty">暂无持仓</td></tr>';
+    $('posBody').innerHTML = posRowsHtml() || '<tr><td colspan="9" class="empty">暂无持仓</td></tr>';
   }
 
   // ---------- 委托 ----------
