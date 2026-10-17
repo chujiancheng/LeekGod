@@ -29,6 +29,7 @@ const STATIC_FILES = {
  *    32~40px，原图 850KB 是纯浪费）。
  * ③ 主题吉祥物立绘 `/img/mascot-<key>.png`（1024 原图，留给以后的大图位）、
  *    `-256`（主页 hero 高 120px，2 倍屏 240px 够用）与 `-96`（选择卡 + 彩蛋横幅头像）。
+ * ④ 开户四宫格漫画 `/img/comic-<set><n>.png`（4 套 × 4 格，512px；开户弹层逐格展示）。
  *
  * **按 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
  * 也不能走出指定目录（避免 `../` 穿越）。图标文件缺失时不注册，请求落到 404，
@@ -53,6 +54,11 @@ for (const key of ['sakura', 'magic', 'maodiao', 'orange', 'doro', 'duck', 'knig
   registerImg(`mascot-${key}.png`, 'lg');
   registerImg(`mascot-${key}-256.png`, 'md');
   registerImg(`mascot-${key}-96.png`, 'sm');
+}
+// 开户四宫格漫画：4 套（a/b/c/d）× 4 格。只有开户弹层一个场景用，512px 一档就够
+// （每格最大约 250 CSS px，2 倍屏 500px）。文案/分镜见 Doc/开户四宫格漫画.md
+for (const setKey of ['a', 'b', 'c', 'd']) {
+  for (let i = 1; i <= 4; i += 1) registerImg(`comic-${setKey}${i}.png`, 'md');
 }
 
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。

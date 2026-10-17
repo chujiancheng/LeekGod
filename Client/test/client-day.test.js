@@ -197,6 +197,16 @@ src = src.replace(
     minuteRangeOf: () => minuteRange,
     // 账号 / 昵称 / 登录开户
     doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
+    // 开户过场漫画
+    openComic, closeComic, pickComic, switchComic, nextComic, finishComic,
+    comicSets: () => COMICS.map((c) => ({ id: c.id, title: c.title, short: c.short, n: c.panels.length })),
+    comicSeenList: () => comicSeen(),
+    resetComicSeen: () => localStorage.removeItem(COMIC_SEEN_KEY),
+    comicPlayedOf: () => comicPlayed,
+    comicReplayOf: () => comicReplay,
+    comicSetNow: () => (comicCurrent ? comicCurrent.id : ''),
+    comicKickerText: () => $('comicKicker').textContent,
+    comicGoText: () => $('comicGoBtn').textContent,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
     identity: () => ({ account: me, nick: myNick, token }),
     accountRe: () => String(ACCOUNT_RE),
@@ -1229,6 +1239,119 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     // ---- 骨架：两块控件都在 HTML 里（桩环境的 querySelectorAll 是空的，只能查源码）----
     const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
     assert(html.indexOf('id="chartRanges"') >= 0 && html.indexOf('data-range="5d"') >= 0, 'HTML 里有「当日 / 5 日」这组控件');
+  }
+
+  // ==================================================================
+  console.log('\n[18] 开户过场：四宫格漫画（4 选 1 随机播）');
+  {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+
+    // ---- 骨架：过场层与四个插槽都在 HTML 里 ----
+    ['comicOverlay', 'comicTitle', 'comicGrid', 'comicSkipBtn', 'comicGoBtn'].forEach((id) => {
+      assert(html.indexOf(`id="${id}"`) >= 0, `HTML 里有 #${id}`);
+    });
+    assert(/class="[^"]*comic-overlay[^"]*hidden/.test(html), '过场层默认隐藏（开户第二步才由 JS 打开）');
+    assert(/\.comic-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/s.test(css), '宫格是 2×2');
+    assert(/prefers-reduced-motion/.test(css) && /\.comic-panel\s*\{[^}]*transition:\s*none/s.test(css), '减少动效时不做位移/逐字');
+
+    // ---- 数据：4 套 × 4 格，台词不为空，图全部真实存在 ----
+    const sets = api.comicSets();
+    assert(sets.length === 4, `四套故事（实际 ${sets.length}）`);
+    assert(sets.every((s) => s.n === 4), '每套正好 4 格');
+    const imgDir = path.join(__dirname, '..', 'img');
+    const missing = [];
+    sets.forEach((s) => {
+      for (let i = 1; i <= s.n; i += 1) {
+        const f = path.join(imgDir, `comic-${s.id.toLowerCase()}${i}.png`);
+        if (!fs.existsSync(f)) missing.push(path.basename(f));
+      }
+    });
+    assert(missing.length === 0, `16 张单格图都在 Client/img（缺：${missing.join(',') || '无'}）`);
+
+    // ---- 打开：格子按套名拼出 4 张图，字幕走 DOM（画面不烤字）----
+    api.resetComicSeen();
+    let done = 0;
+    api.openComic(() => { done += 1; });
+    const grid = api.el('comicGrid').innerHTML;
+    const first = api.comicSeenList()[0];
+    assert(api.el('comicOverlay').classList.contains('hidden') === false, 'openComic 把过场层显示出来');
+    assert(/^[A-D]$/.test(first), `看过的那套写进 gushen_comic_seen（${first}）`);
+    assert((grid.match(/class="comic-panel"/g) || []).length === 4, '宫格里拼出 4 格');
+    for (let i = 1; i <= 4; i += 1) {
+      assert(grid.indexOf(`/img/comic-${first.toLowerCase()}${i}.png`) >= 0, `第 ${i} 格指向 comic-${first.toLowerCase()}${i}.png`);
+    }
+    assert(/class="comic-who"/.test(grid) && /class="comic-text"/.test(grid), '每格有说话人 + 字幕两个槽（台词不进图）');
+
+    // ---- 跳过：关掉过场 + 回调一次（回到开户表单并聚焦昵称）----
+    assert(fire('comicSkipBtn', 'click') === 1, '「跳过」按钮挂着监听器');
+    assert(api.el('comicOverlay').classList.contains('hidden') === true, '点跳过立刻收场');
+    assert(done === 1, `收场回调只调一次（实际 ${done} 次）`);
+    assert(api.el('comicGrid').innerHTML === '', '收场后清空宫格，下次重播不残留');
+
+    // ---- 随机规则：四套轮完才回到起点（纯随机会出现连着两次同一套）----
+    api.resetComicSeen();
+    const picked = [];
+    for (let i = 0; i < 4; i += 1) {
+      api.openComic(null);
+      picked.push(api.comicSeenList()[api.comicSeenList().length - 1]);
+      api.closeComic();
+    }
+    const uniq = new Set(picked);
+    assert(uniq.size === 4, `连开四次拿到四套不同的（${picked.join('')}）`);
+    api.openComic(null);
+    assert(api.comicSeenList().length === 1, '四套都看过之后从空表重新开始');
+    api.closeComic();
+
+    // ---- 关掉之后再点跳过不该重复回调（防止二次收场把焦点抢走）----
+    api.closeComic();
+    assert(done === 1, '重复 closeComic 不再触发回调');
+
+    // ---- 首页回看入口：四套随便翻，措辞与开户过场分开 ----
+    assert(html.indexOf('id="comicReplayBtn"') >= 0, '主页有「看漫画」入口');
+    assert(html.indexOf('id="comicSets"') >= 0, '漫画层里留了四套切换片的槽');
+    assert(/\.comic-set\b/.test(css), '切换片有样式（不然是一排原生按钮）');
+
+    api.resetComicSeen();
+    api.openComic(null, true);
+    assert(api.comicReplayOf() === true, 'openComic(null, true) 进回看模式');
+    assert(api.comicKickerText() === '开户漫画 · 四套随便翻', `回看的抬头不是催开户（${api.comicKickerText()}）`);
+    assert(api.el('comicSkipBtn').textContent === '关闭', '回看时右上角是「关闭」而不是「跳过 ›」');
+    assert(api.el('comicSets').hidden === false, '回看时亮出四套切换片');
+    const chips = api.el('comicSets').innerHTML;
+    assert((chips.match(/class="comic-set/g) || []).length === 4, '四个切换片');
+    assert(/data-comic="C"/.test(chips) && /C · 第一课/.test(chips), '切换片带套号与短名（C · 第一课）');
+    assert(new RegExp(`data-comic="${api.comicSetNow()}"[^>]*class="comic-set on"|class="comic-set on"[^>]*data-comic="${api.comicSetNow()}"`).test(chips), '当前那一套高亮');
+
+    // 换套：直接重绘宫格，不等动画
+    api.switchComic('C');
+    assert(api.comicSetNow() === 'C', 'switchComic 换成 C 套');
+    assert(api.el('comicGrid').innerHTML.indexOf('/img/comic-c1.png') >= 0, '换套后宫格指向 C 套的图');
+    assert(api.el('comicGrid').innerHTML.indexOf('/img/comic-b1.png') < 0, '换套后不残留上一套的图');
+
+    // 播完（桩里定时器不跑，直接叫 finishComic）：按钮变「下一套」，点了不关层
+    api.finishComic();
+    assert(api.el('comicGoBtn').hidden === false && api.comicGoText() === '下一套 ›', `回看播完是「下一套 ›」（${api.comicGoText()}）`);
+    assert(fire('comicGoBtn', 'click') === 1, '「下一套」挂着监听器');
+    assert(api.el('comicOverlay').classList.contains('hidden') === false, '「下一套」不关层，继续看');
+    assert(api.comicSetNow() === 'D', `「下一套」按 C→D 往后走（实际 ${api.comicSetNow()}）`);
+    api.switchComic('D');
+    api.nextComic();
+    assert(api.comicSetNow() === 'A', 'D 之后回到 A（四套循环）');
+
+    // 收场要把回看模式清干净，否则下次开户过场会带着切换片和「关闭」
+    api.closeComic();
+    assert(api.comicReplayOf() === false, '关掉后退出回看模式');
+    assert(api.el('comicSets').hidden === true && api.el('comicSets').innerHTML === '', '切换片一并收起清空');
+    api.resetComicSeen();
+    api.openComic(null);
+    assert(api.comicReplayOf() === false, '开户过场仍是过场模式');
+    assert(api.el('comicSets').hidden === true, '开户过场不给切换片（随机哪套看哪套，别让人先挑）');
+    assert(api.comicKickerText() === '开户前，先看个故事', '措辞切回开户');
+    assert(api.el('comicSkipBtn').textContent === '跳过 ›', '右上角切回「跳过 ›」');
+    api.finishComic();
+    assert(api.comicGoText() === '开始开户', `过场播完仍是「开始开户」（${api.comicGoText()}）`);
+    assert(fire('comicGoBtn', 'click') === 1 && api.el('comicOverlay').classList.contains('hidden') === true, '「开始开户」照旧收场');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

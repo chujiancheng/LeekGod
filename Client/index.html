@@ -47,11 +47,32 @@
           <div class="broker-wall" id="brokerWall"></div>
         </div>
         <button id="onboardBtn">开户并进入市场</button>
-        <div class="login-hint">初始资金 10 万，开户礼按券商不同 · 佣金 / 额度 / 券源 / 通道全看券商</div>
+        <div class="login-hint">初始资金 100 万，开户礼按券商不同 · 佣金 / 额度 / 券源 / 通道全看券商</div>
         <div class="login-hint">融券做空：有券可借才能开空 · 挂借持仓可收利息 · 昵称之后随时能改</div>
       </div>
 
       <div class="login-hint err" id="loginErr" hidden></div>
+    </div>
+  </div>
+
+  <!-- 开户过场：四宫格漫画（4 套随机播 1 套）。
+       第 4 格播完点「开始开户」落到第二步表单；「跳过」直接进。
+       图不带文字，台词全部是这里的 DOM 字幕——改文案不用重画（Doc/开户四宫格漫画.md） -->
+  <div id="comicOverlay" class="overlay comic-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="comicTitle">
+    <div class="comic-card">
+      <div class="comic-head">
+        <span class="comic-kicker" id="comicKicker">开户前，先看个故事</span>
+        <button class="comic-skip" id="comicSkipBtn" type="button">跳过 ›</button>
+      </div>
+      <div class="comic-title" id="comicTitle">--</div>
+      <!-- 四套直接挑：只有「首页回看」时才出现（开户过场里藏起来，别让玩家先挑再开户）。
+           开户流程是随机 1 套 + 跳过，复看是随便翻——两种模式共用这一层，靠 comicReplay 分开 -->
+      <div class="comic-sets" id="comicSets" hidden></div>
+      <div class="comic-grid" id="comicGrid"></div>
+      <div class="comic-foot">
+        <span class="comic-progress" id="comicProgress"></span>
+        <button class="comic-go" id="comicGoBtn" type="button" hidden>开始开户</button>
+      </div>
     </div>
   </div>
 
@@ -142,6 +163,8 @@
             <button class="primary-btn" id="goTradeBtn">进入交易</button>
             <button class="ghost-btn big" id="goPositionBtn">查看持仓</button>
             <button class="ghost-btn big deposit-btn" id="addCashBtn" hidden>加钱</button>
+            <!-- 开户过场漫画的回看入口：4 套随时能翻，不占新手流程（见 openComic 的 replay 模式） -->
+            <button class="ghost-btn big" id="comicReplayBtn" title="回看开户时的四格漫画（4 套可翻）">看漫画</button>
           </div>
         </div>
         <div class="hero-market">

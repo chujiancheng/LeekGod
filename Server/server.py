@@ -25,25 +25,33 @@ NODE_NAMES = {"node.exe", "node"}
 
 
 def process_name(pid):
-    """取 PID 对应的进程名（小写）；进程不存在或无法判定时返回 None"""
+    """取 PID 对应的进程名（小写）；进程不存在或无法判定时返回 None。
+
+    Windows 上**不走 tasklist**：那是个控制台程序，在某些终端（无窗口 / 被沙箱接管 stdio 时）
+    capture_output 拿到的 stdout 会是 None，`None.strip()` 直接抛 AttributeError，
+    start / stop / status 三条命令全被一个探活函数带崩。改成 ctypes 直接问内核，
+    不开子进程、也没有编码与输出格式的坑。
+    """
     if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return None
+            try:
+                size = wintypes.DWORD(1024)
+                buf = ctypes.create_unicode_buffer(1024)
+                if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return None
+                return os.path.basename(buf.value).lower()
+            finally:
+                kernel32.CloseHandle(handle)
         except Exception:
             return None
-        lines = [l for l in out.stdout.strip().splitlines() if l.strip()]
-        if not lines:
-            return None
-        fields = lines[0].split('","')
-        # 无匹配时 tasklist 输出的是提示文本，拆不出多个 CSV 字段
-        if len(fields) < 2:
-            return None
-        return fields[0].strip('"').lower()
     try:
         with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
             return f.read().strip().lower()

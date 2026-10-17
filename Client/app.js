@@ -802,11 +802,361 @@
       $('onboardAccount').textContent = account || '';
       $('loginNick').value = nick || '';
       loadBrokers(); // 卡片墙的数据源（公开接口，登录前就能读）
-      $('loginNick').focus();
+      // 开户流程开场先播一套四宫格漫画（4 选 1），播完 / 跳过后再聚焦昵称框。
+      // comicPlayed 只锁本次页面：「换账号」退回第一步再进来不重复打扰
+      if (comicPlayed) {
+        $('loginNick').focus();
+      } else {
+        comicPlayed = true;
+        openComic(() => $('loginNick').focus());
+      }
     } else {
       $('loginAccount').value = account || '';
       $('loginAccount').focus();
     }
+  }
+
+  // ---------- 开户四宫格漫画 ----------
+  /**
+   * 开户第二步之前播一套四宫格（A/B/C/D 随机 4 选 1）。
+   * 图在 `Client/img/comic-<set><n>.png`（512px，服务端 http.js 白名单登记），
+   * **画面里不带任何文字**——台词全在下面这张表里由 DOM 字幕层渲染，
+   * 所以改文案不用重画图。完整分镜与接入说明：Doc/开户四宫格漫画.md
+   */
+  const COMIC_SEEN_KEY = 'gushen_comic_seen'; // 看过哪几套（跨会话，四套轮完再从头）
+  const COMICS = [
+    {
+      id: 'A',
+      short: '起点',
+      title: '股神都是这么开始的',
+      panels: [
+        { who: '股神猫', text: '听说每个股神，都有一个凡人的起点。' },
+        { who: '股神猫', text: '本喵入市时只有 100 万，现在……也就一个亿吧。' },
+        { who: '股神猫', text: '先别飘。股神，是从开户这一步开始的。' },
+        { who: '股神猫', text: '起名要响，门派要准——剩下的，交给行情。' },
+      ],
+    },
+    {
+      id: 'B',
+      short: '门派',
+      title: '门派拜师记',
+      panels: [
+        { who: '旁白', text: '江湖传言：入对门派，少亏十年。' },
+        { who: '仓鼠', text: '钟信要钱多，滑泰跑得快，天疯……一天归零？！' },
+        { who: '股神猫', text: '没有最强的门派，只有最适合你的打法。' },
+        { who: '股神猫', text: '股神的江湖，从择门开始。' },
+      ],
+    },
+    {
+      id: 'C',
+      short: '第一课',
+      title: '猫的市场第一课',
+      panels: [
+        { who: '旁白', text: '这里的股市会呼吸：消息一出，满城风雨。' },
+        { who: '股神猫', text: '机构在算，散户在冲——你要赚谁的钱？' },
+        { who: '股神猫', text: '很好，赔钱的人都是这么想的。' },
+        { who: '股神猫', text: '先开户，再交学费——哦不，是赚学费。' },
+      ],
+    },
+    {
+      id: 'D',
+      short: '挑战',
+      title: '三秒开户挑战',
+      panels: [
+        { who: '股神猫', text: '下一个。要变股神的排队，要变韭菜的也排队。' },
+        { who: '仓鼠', text: '我要满仓！我要杠杆！我要明天一个亿！' },
+        { who: '股神猫', text: '先立个小小的目标。上一个这么说的，锦旗就是他留的。' },
+        { who: '股神猫', text: '名字起好，券商选好——故事从这一页开始。' },
+      ],
+    },
+  ];
+  let comicPlayed = false; // 本次页面会话只播一次
+  let comicTimers = []; // 打字机 / 换格的 pending 计时器，跳过时要全部清掉
+  let comicFinish = null; // 收场回调（聚焦昵称框）
+  let comicDone = false; // 四格都播完了没有（决定「跳过」是收场还是直接进门）
+  let comicCurrent = null;
+  /** false = 开户过场（随机 1 套、播完「开始开户」）；true = 首页回看（可翻四套、播完「下一套」） */
+  let comicReplay = false;
+
+  const prefersReduced = () =>
+    !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  function comicSeen() {
+    try {
+      const v = JSON.parse(localStorage.getItem(COMIC_SEEN_KEY) || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /** 优先播没看过的；四套都看过就清空重来（避免紧接着又播同一套） */
+  function pickComic() {
+    const seen = comicSeen();
+    let pool = COMICS.filter((c) => seen.indexOf(c.id) < 0);
+    if (!pool.length) {
+      pool = COMICS;
+      try {
+        localStorage.removeItem(COMIC_SEEN_KEY);
+      } catch (e) {
+        /* 隐私模式下写不进就算了 */
+      }
+    }
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  function rememberComic(id) {
+    try {
+      const seen = comicSeen();
+      if (seen.indexOf(id) < 0) seen.push(id);
+      localStorage.setItem(COMIC_SEEN_KEY, JSON.stringify(seen));
+    } catch (e) {
+      /* localStorage 不可用：只是重复播放概率高一点，不影响功能 */
+    }
+  }
+
+  function stopComicTimers() {
+    comicTimers.forEach((t) => clearTimeout(t));
+    comicTimers = [];
+  }
+
+  /** 字幕逐字出现。光标是**兄弟节点**（不塞进文字里）——这样只靠 textContent 截断推进，
+   *  不需要 text node，字幕层在离屏 DOM 桩里也能跑 */
+  function typeComicText(el, text, done) {
+    el.textContent = '';
+    let i = 0;
+    const tick = () => {
+      if (i >= text.length) {
+        if (done) done();
+        return;
+      }
+      i += 1;
+      el.textContent = text.slice(0, i);
+      comicTimers.push(setTimeout(tick, 45));
+    };
+    tick();
+  }
+
+  const comicImg = (comic, i) => `/img/comic-${comic.id.toLowerCase()}${i + 1}.png`;
+
+  const comicNo = () => COMICS.findIndex((c) => comicCurrent && c.id === comicCurrent.id) + 1;
+
+  /** 进度行：开户过场只报格数；回看多报一个「第几套」，让玩家知道还有几套没翻 */
+  function comicProgressText(cells) {
+    const total = comicCurrent ? comicCurrent.panels.length : 4;
+    const tail = `${cells} / ${total} 格`;
+    return comicReplay ? `第 ${comicNo()} / ${COMICS.length} 套 · ${tail}` : tail;
+  }
+
+  /** 宫格 HTML：每格图 + 说话人 + 字幕槽（台词不进图，改文案不用重画） */
+  function comicPanelsHtml(comic) {
+    return comic.panels
+      .map(
+        (p, i) => `
+      <figure class="comic-panel" data-i="${i}">
+        <img src="${comicImg(comic, i)}" alt="第 ${i + 1} 格">
+        <figcaption class="comic-cap">
+          <span class="comic-who">${esc(p.who)}</span>
+          <span class="comic-text"></span><span class="comic-caret">▍</span>
+        </figcaption>
+      </figure>`
+      )
+      .join('');
+  }
+
+  /** 回看模式的四套切换片（开户过场里整块藏起来） */
+  function renderComicSets() {
+    const box = $('comicSets');
+    if (!box) return;
+    if (!comicReplay) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = COMICS.map(
+      (c) =>
+        `<button class="comic-set${comicCurrent && c.id === comicCurrent.id ? ' on' : ''}" type="button" data-comic="${c.id}">${c.id} · ${esc(c.short)}</button>`
+    ).join('');
+  }
+
+  /** 一次把所有格子和整段台词摊开（跳过 / 减少动效时用） */
+  function revealComicAll() {
+    const comic = comicCurrent;
+    if (!comic) return;
+    const grid = $('comicGrid');
+    grid.querySelectorAll('.comic-caret').forEach((n) => n.classList.add('hidden'));
+    grid.querySelectorAll('.comic-panel').forEach((p, i) => {
+      p.classList.add('on');
+      const t = p.querySelector('.comic-text');
+      if (t && comic.panels[i]) t.textContent = comic.panels[i].text;
+    });
+  }
+
+  /** 四格播完：按钮亮出来。开户 → 「开始开户」；回看 → 「下一套 ›」（四套轮着翻） */
+  function finishComic() {
+    comicDone = true;
+    const go = $('comicGoBtn');
+    $('comicProgress').textContent = comicReplay
+      ? `第 ${comicNo()} / ${COMICS.length} 套 · 故事讲完了`
+      : `${comicCurrent ? comicCurrent.panels.length : 4} / ${comicCurrent ? comicCurrent.panels.length : 4} 格 · 故事讲完了`;
+    if (go) {
+      go.textContent = comicReplay ? '下一套 ›' : '开始开户';
+      go.hidden = false;
+      go.focus();
+    }
+  }
+
+  function playComic() {
+    const comic = comicCurrent;
+    const grid = $('comicGrid');
+    const fast = prefersReduced();
+    let idx = 0;
+    const step = () => {
+      if (!comic) return;
+      if (idx >= comic.panels.length) {
+        finishComic();
+        return;
+      }
+      const panel = grid.querySelector(`.comic-panel[data-i="${idx}"]`);
+      const txt = panel && panel.querySelector('.comic-text');
+      $('comicProgress').textContent = comicProgressText(idx + 1);
+      if (panel) panel.classList.add('on');
+      if (!txt) {
+        idx += 1;
+        step();
+        return;
+      }
+      if (fast) {
+        txt.textContent = comic.panels[idx].text;
+        idx += 1;
+        step();
+        return;
+      }
+      typeComicText(txt, comic.panels[idx].text, () => {
+        const caret = panel.querySelector('.comic-caret');
+        if (caret) caret.classList.add('hidden'); // 本格打完，光标收掉
+        idx += 1;
+        // 每格台词打完停 900ms 再出下一格，给玩家读完的时间
+        comicTimers.push(setTimeout(step, 900));
+      });
+    };
+    if (fast) {
+      revealComicAll();
+      finishComic();
+      return;
+    }
+    step();
+  }
+
+  /** 换一套重播（只给回看模式用；开户过场固定随机那一套，不让人先挑） */
+  function switchComic(id) {
+    const next = COMICS.filter((c) => c.id === id)[0];
+    if (!next || (comicCurrent && next.id === comicCurrent.id)) return;
+    stopComicTimers();
+    comicCurrent = next;
+    rememberComic(next.id);
+    comicDone = false;
+    $('comicTitle').textContent = next.title;
+    $('comicProgress').textContent = '';
+    $('comicGoBtn').hidden = true;
+    $('comicGrid').innerHTML = comicPanelsHtml(next);
+    renderComicSets();
+    playComic();
+  }
+
+  /** 回看模式「下一套」：按 A→B→C→D→A 循环，比再随机一次好预期 */
+  function nextComic() {
+    if (!comicCurrent) return;
+    const i = COMICS.findIndex((c) => c.id === comicCurrent.id);
+    switchComic(COMICS[(i + 1) % COMICS.length].id);
+  }
+
+  /**
+   * 打开漫画层。
+   * @param {Function} [onDone] 收场回调（开户流程用来聚焦昵称框）
+   * @param {boolean}  [replay] true = 首页回看：四套可翻、按钮文案换成「下一套」
+   */
+  function openComic(onDone, replay) {
+    const overlay = $('comicOverlay');
+    if (!overlay) {
+      if (onDone) onDone();
+      return;
+    }
+    comicReplay = !!replay;
+    const comic = pickComic();
+    rememberComic(comic.id);
+    comicCurrent = comic;
+    comicFinish = onDone || null;
+    comicDone = false;
+    stopComicTimers();
+    // 两种模式的措辞分开：过场是催着开户，回看是「随便翻」
+    if ($('comicKicker')) $('comicKicker').textContent = comicReplay ? '开户漫画 · 四套随便翻' : '开户前，先看个故事';
+    if ($('comicSkipBtn')) $('comicSkipBtn').textContent = comicReplay ? '关闭' : '跳过 ›';
+    $('comicTitle').textContent = comic.title;
+    $('comicProgress').textContent = '';
+    $('comicGoBtn').hidden = true;
+    $('comicGrid').innerHTML = comicPanelsHtml(comic);
+    renderComicSets();
+    overlay.classList.remove('hidden');
+    // 预载本套四张：逐格出现时不再等网络（离屏 DOM 桩里没有 Image，跳过即可）
+    if (typeof Image === 'function') {
+      comic.panels.forEach((p, i) => {
+        const im = new Image();
+        im.src = comicImg(comic, i);
+      });
+    }
+    playComic();
+  }
+
+  /** 收场：藏起过场、回到开户表单 / 首页。跳过与「开始开户」都走这里 */
+  function closeComic() {
+    const overlay = $('comicOverlay');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+    stopComicTimers();
+    overlay.classList.add('hidden');
+    $('comicGrid').innerHTML = '';
+    if ($('comicSets')) {
+      $('comicSets').hidden = true;
+      $('comicSets').innerHTML = '';
+    }
+    comicCurrent = null;
+    comicDone = false;
+    comicReplay = false;
+    const cb = comicFinish;
+    comicFinish = null;
+    if (cb) cb();
+  }
+
+  function bindComic() {
+    const skip = $('comicSkipBtn');
+    if (skip) skip.addEventListener('click', closeComic);
+    // 「开始开户」收场；回看模式下同一颗按钮变成「下一套」
+    const go = $('comicGoBtn');
+    if (go) {
+      go.addEventListener('click', () => {
+        if (comicReplay) nextComic();
+        else closeComic();
+      });
+    }
+    // 四套切换片（事件委托；桩环境里没有 closest，用 dataset 兜一层保护）
+    const sets = $('comicSets');
+    if (sets) {
+      sets.addEventListener('click', (e) => {
+        const t = e && e.target;
+        const chip = t && t.closest ? t.closest('.comic-set') : null;
+        if (!chip || !chip.dataset) return;
+        switchComic(chip.dataset.comic);
+      });
+    }
+    // 首页「看漫画」：回看入口，和开户流程完全脱钩（不传 onDone）
+    const replayBtn = $('comicReplayBtn');
+    if (replayBtn) replayBtn.addEventListener('click', () => openComic(null, true));
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const overlay = $('comicOverlay');
+      if (overlay && !overlay.classList.contains('hidden')) closeComic();
+    });
   }
 
   /** 弹回登录页（首次进入 / 换号 / 登录态失效都走这里），停在第一步 */
@@ -4411,6 +4761,7 @@
 
   function init() {
     bindLogin();
+    bindComic();
     bindViewNav();
     bindHome();
     bindStockTabs();

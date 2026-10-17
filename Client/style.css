@@ -285,6 +285,78 @@ input { font: inherit; color: inherit; }
 .login-card button:hover { filter: brightness(1.1); }
 .login-hint { font-size: 11px; color: var(--muted); text-align: center; }
 
+/* ---------- 开户过场：四宫格漫画 ----------
+   2×2 宫格一屏放下（手机竖屏 ~165px/格），每格图 + 字幕条。
+   逐格弹出靠 JS 加 .on，CSP 禁内联 style，动画全在类上 */
+.comic-overlay { background: rgba(5, 8, 14, .74); z-index: 60; }
+.comic-card {
+  width: min(560px, 94vw);
+  max-height: 94vh;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.comic-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.comic-kicker { font-size: 11px; letter-spacing: 2px; color: var(--muted); }
+.comic-skip {
+  height: 26px; padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); font-size: 11px; letter-spacing: 1px;
+}
+.comic-skip:hover { color: var(--ink); border-color: color-mix(in srgb, var(--ink) 30%, var(--line)); }
+.comic-title { font-size: 15px; font-weight: 700; letter-spacing: 2px; color: var(--gold); text-align: center; margin-top: -2px; }
+/* 回看模式的四套切换片：开户过场里整块隐藏（随机播哪套就看哪套） */
+.comic-sets { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: -2px; }
+.comic-set {
+  height: 24px; padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); font-size: 11px; letter-spacing: 1px;
+}
+.comic-set:hover { color: var(--ink); border-color: color-mix(in srgb, var(--ink) 30%, var(--line)); }
+.comic-set.on {
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 55%, var(--line));
+  background: color-mix(in srgb, var(--gold) 12%, transparent);
+}
+.comic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.comic-panel {
+  margin: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 10px;
+  overflow: hidden;
+  opacity: 0; transform: translateY(10px) scale(.97);
+  transition: opacity .28s ease, transform .28s cubic-bezier(.22, 1, .36, 1);
+}
+.comic-panel.on { opacity: 1; transform: none; }
+.comic-panel img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; }
+.comic-cap { padding: 7px 9px 8px; min-height: 52px; }
+.comic-who { display: block; font-size: 10px; letter-spacing: 1px; color: color-mix(in srgb, var(--gold) 80%, var(--muted)); margin-bottom: 3px; }
+.comic-text { font-size: 12px; line-height: 1.5; color: var(--ink); }
+.comic-caret { animation: comicCaret 1s steps(1) infinite; color: var(--gold); }
+@keyframes comicCaret { 50% { opacity: 0; } }
+.comic-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; }
+.comic-progress { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.comic-go {
+  height: 34px; padding: 0 18px;
+  border: 0; border-radius: 8px;
+  background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+  color: #fff; font-size: 13px; font-weight: 600; letter-spacing: 2px;
+}
+.comic-go:hover { filter: brightness(1.1); }
+
+/* 系统开了「减少动态效果」：不做位移/逐字，直接整页呈现 */
+@media (prefers-reduced-motion: reduce) {
+  .comic-panel { transition: none; opacity: 1; transform: none; }
+  .comic-caret { animation: none; }
+}
+
+
 /* ---------- 加钱弹窗 ---------- */
 .deposit-overlay { background: rgba(5, 8, 14, .66); }
 .deposit-title { font-size: 20px; font-weight: 700; letter-spacing: 3px; text-align: center; }

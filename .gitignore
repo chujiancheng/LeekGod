@@ -24,5 +24,8 @@ output/
 *.miora
 *_assets/
 
+# 出图高分辨率母版（正式图已压到 Client/img，母版本地留档不入库；art 下的生成脚本要入库）
+art/**/*.png
+
 # 智能体工作目录（记忆 + 临时产物，不入库）
 .workbuddy/
