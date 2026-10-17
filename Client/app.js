@@ -1389,6 +1389,7 @@
   // ---------- 上市公司档案（股娘图鉴） ----------
   /** 顶栏点股票名：打开档案弹层（指数没有公司档案，只提示） */
   function openCompanyProfile() {
+    dismissArchiveHint();
     const m = curMarket();
     if (!m) return;
     const lore = window.COMPANY_LORE && window.COMPANY_LORE[m.stockId];
@@ -1422,12 +1423,39 @@
   }
 
   function bindCompanyProfile() {
-    $('stockName').addEventListener('click', openCompanyProfile);
+    $('stockBtn').addEventListener('click', openCompanyProfile);
     $('companyCloseBtn').addEventListener('click', () => $('companyOverlay').classList.add('hidden'));
     // 点遮罩空白处关闭（点卡片本身不关）
     $('companyOverlay').addEventListener('click', (e) => {
       if (e.target === $('companyOverlay')) $('companyOverlay').classList.add('hidden');
     });
+  }
+
+  // 上市公司档案入口的一次性指引：只弹一次（localStorage 记账），
+  // 已经手动点开过档案、或看过这条提示的玩家都不再弹
+  const ARCHIVE_HINT_KEY = 'gushen_archive_hint';
+  let archiveShowTimer = 0;
+  let archiveHideTimer = 0;
+
+  function maybeShowArchiveHint() {
+    if (localStorage.getItem(ARCHIVE_HINT_KEY)) return;
+    const hint = $('stockHint');
+    if (!hint) return;
+    clearTimeout(archiveShowTimer);
+    clearTimeout(archiveHideTimer);
+    archiveShowTimer = setTimeout(() => {
+      if (localStorage.getItem(ARCHIVE_HINT_KEY)) return;
+      hint.hidden = false;
+      archiveHideTimer = setTimeout(dismissArchiveHint, 12000);
+    }, 1500);
+  }
+
+  function dismissArchiveHint() {
+    clearTimeout(archiveShowTimer);
+    clearTimeout(archiveHideTimer);
+    const hint = $('stockHint');
+    if (hint) hint.hidden = true;
+    localStorage.setItem(ARCHIVE_HINT_KEY, '1');
   }
 
   function enterApp() {
@@ -1437,6 +1465,7 @@
     loadInitial();
     connectSSE();
     setView('home'); // 登录后先落到交易大厅
+    maybeShowArchiveHint();
   }
 
   // ---------- 视图切换 ----------

@@ -514,10 +514,59 @@ input { font: inherit; color: inherit; }
   background: var(--panel); color: var(--ink); font-weight: 600;
   box-shadow: 0 0 0 1px var(--line);
 }
-.stock-id { display: flex; flex-direction: row; align-items: center; gap: 9px; }
+/* 顶栏当前公司块：整块可点（打开上市公司档案）——button 复位成纯布局盒，
+   只靠 hover 底色与右侧「档案 ›」角标表达可点，不做成实体按钮抢顶栏视觉 */
+.stock-id {
+  position: relative;
+  display: flex; flex-direction: row; align-items: center; gap: 9px;
+  background: none; border: 0; border-radius: 8px;
+  padding: 5px 7px; margin: -5px 0 -5px -7px;
+  color: inherit; font: inherit; text-align: left;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.stock-id:hover { background: var(--panel-2); }
+.stock-id:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.stock-id-text { display: flex; flex-direction: column; }
 .stock-logo { width: 24px; height: 24px; border-radius: 7px; flex: none; }
 .stock-name { font-size: 17px; font-weight: 700; }
 .stock-code { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+/* 「档案 ›」角标：常驻可见的可点信号，hover 时描边与文字一起亮 */
+.stock-archive-tag {
+  display: inline-flex; align-items: center; gap: 1px;
+  flex: none;
+  margin-left: 1px;
+  padding: 3px 6px;
+  font-size: 10px; line-height: 1; letter-spacing: .5px;
+  color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px;
+  transition: color .15s ease, border-color .15s ease;
+}
+.stock-archive-tag i { font-style: normal; font-size: 11px; line-height: 1; }
+.stock-id:hover .stock-archive-tag { color: var(--ink); border-color: var(--blue); }
+/* 首次进入的一次性指引气泡：只弹一次（localStorage 记账），点它等于点开档案 */
+.stock-hint {
+  position: absolute; top: calc(100% + 9px); left: 0; z-index: 40;
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: min(260px, calc(100vw - 24px));
+  padding: 7px 11px;
+  font-size: 12px; font-weight: 500; line-height: 1.4; white-space: nowrap;
+  color: #10161d; background: var(--blue);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+  pointer-events: none;
+  animation: hintIn .28s ease-out;
+}
+.stock-hint i { font-style: normal; font-size: 13px; }
+.stock-hint::before {
+  content: ''; position: absolute; left: 14px; top: -4px;
+  width: 9px; height: 9px; background: var(--blue);
+  transform: rotate(45deg); border-radius: 2px;
+}
+@keyframes hintIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .price-block { display: flex; align-items: baseline; gap: 10px; min-width: 180px; }
 .big-price { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .price-change { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
