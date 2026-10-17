@@ -121,22 +121,7 @@
       `LLM ${data.llmEnabled ? '开' : '关'} · ${new Date(data.t).toLocaleTimeString('zh-CN')}`;
     listEl.innerHTML = '';
 
-    listEl.appendChild(renderDecisionCard(data.lastDecision, '最近一轮 AI 决策'));
-
-    const hist = data.decisionHistory || [];
-    const histCard = document.createElement('section');
-    histCard.className = 'whale-card';
-    histCard.innerHTML =
-      '<div class="whale-top"><div class="whale-name">最近决策记录（最多 10 次）</div></div>';
-    if (!hist.length) {
-      histCard.appendChild(el('div', 'empty', '内存里还没有历史（重启后要等新的触发）'));
-    } else {
-      for (let i = 0; i < hist.length; i++) {
-        histCard.appendChild(renderDecisionCard(hist[i], `#${i + 1} ${hist[i].phaseLabel || hist[i].phase} · ${new Date(hist[i].t).toLocaleTimeString('zh-CN')}`));
-      }
-    }
-    listEl.appendChild(histCard);
-
+    // 持仓详情放最前，决策记录在下
     for (const w of data.whales || []) {
       const card = document.createElement('section');
       card.className = 'whale-card';
@@ -181,6 +166,22 @@
       }
       listEl.appendChild(card);
     }
+
+    listEl.appendChild(renderDecisionCard(data.lastDecision, '最近一轮 AI 决策'));
+
+    const hist = data.decisionHistory || [];
+    const histCard = document.createElement('section');
+    histCard.className = 'whale-card decision-history';
+    histCard.innerHTML =
+      '<div class="whale-top history-title"><div class="whale-name">最近决策记录（最多 10 次）</div></div>';
+    if (!hist.length) {
+      histCard.appendChild(el('div', 'empty', '内存里还没有历史（重启后要等新的触发）'));
+    } else {
+      for (let i = 0; i < hist.length; i++) {
+        histCard.appendChild(renderDecisionCard(hist[i], `#${i + 1} ${hist[i].phaseLabel || hist[i].phase} · ${new Date(hist[i].t).toLocaleTimeString('zh-CN')}`));
+      }
+    }
+    listEl.appendChild(histCard);
   }
 
   function el(tag, cls, text) {

@@ -1,4 +1,13 @@
-/* AI 主力观测页：仅白名单账号用，样式独立，少依赖终端布局 */
+/* AI 主力观测页：覆盖主站可能锁死的 html/body 滚动，避免整页滚不动 */
+html,
+body.whales-page {
+  height: auto !important;
+  min-height: 100% !important;
+  max-height: none !important;
+  overflow: visible !important;
+  overflow-x: hidden !important;
+}
+
 .whales-page {
   margin: 0;
   min-height: 100vh;
@@ -58,6 +67,7 @@
   margin: 0 auto;
   display: grid;
   gap: 12px;
+  align-items: start;
 }
 
 .whale-card {
@@ -69,6 +79,27 @@
 
 .decision-card {
   border-color: color-mix(in srgb, #5eead4 35%, var(--line, #2a3540));
+}
+
+/* 决策历史：卡片内滚动，列表本身仍随页面滚动 */
+.decision-history {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.decision-history > .history-title {
+  position: sticky;
+  top: -14px;
+  z-index: 1;
+  background: color-mix(in srgb, var(--panel, #121a22) 95%, black);
+  margin: -14px -16px 10px;
+  padding: 12px 16px 8px;
+}
+
+.decision-history .decision-card {
+  margin-bottom: 12px;
 }
 
 .decision-line {
