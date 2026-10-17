@@ -7,6 +7,7 @@ const config = require('../src/config');
 const { Game } = require('../src/game');
 const { extractJsonObject, parseWhaleDecision } = require('../src/llm/schema');
 const { mergePlans } = require('../src/llm/whales');
+const { Account } = require('../src/store');
 
 const STOCK_IDS = config.stocks.map((s) => s.id);
 const CLAMP = () => Object.assign({}, config.npc.llm.clamp, { maxStocksPerDecision: 5 });
@@ -120,7 +121,7 @@ const CLAMP = () => Object.assign({}, config.npc.llm.clamp, { maxStocksPerDecisi
   assert.strictEqual(npc.liveLlmPlan(), null, '过期后清空');
 }
 
-// [7] applyLlmPlan(null) 安全 + ensureAccounts 建 4 个 AI 主力
+// [7] applyLlmPlan(null) 安全 + ensureAccounts 建 AI 主力（现金 = cashEach，且注资留痕）
 {
   const g = new Game();
   const npc = g.npcs.get(STOCK_IDS[0]);
@@ -136,6 +137,7 @@ const CLAMP = () => Object.assign({}, config.npc.llm.clamp, { maxStocksPerDecisi
     assert.strictEqual(acc.role, 'whale');
     assert.ok(acc.ai, 'ai flag');
     assert.strictEqual(acc.cash, config.npc.llm.cashEach, 'initial cash');
+    assert.strictEqual(acc.deposited, config.npc.llm.cashEach, '初始注资要记进 deposited');
     assert.ok(acc.aiLabel, 'aiLabel set');
   }
   // 不重复发钱
@@ -239,22 +241,112 @@ const CLAMP = () => Object.assign({}, config.npc.llm.clamp, { maxStocksPerDecisi
   const w = g.whales;
   const old = config.npc.llm.enabled;
   config.npc.llm.enabled = true;
+  // 下午段本身在 triggerPhases 里，会直接起一轮——桩掉 _runRound，测试里绝不发网络请求
+  w._runRound = async () => {};
   try {
     w.onPhase(
-      { day: 3, phase: { key: 'afternoon', label: '下午连续竞价' }, leftMs: 260000 },
+      { day: 3, phase: { key: 'afternoon', label: '下午连续竞价', ms: 260000 }, leftMs: 260000 },
       Date.now()
     );
     assert.ok(w._preTimer, '下午段应排出收盘决策');
-    assert.strictEqual(w.busy, false, 'afternoon 不在 triggerPhases，不该直接跑一轮');
+    assert.strictEqual(w.busy, true, '下午段是触发阶段，应立刻起一轮');
     w.onPhase(
-      { day: 3, phase: { key: 'night', label: '休市结算' }, leftMs: 40000 },
+      { day: 3, phase: { key: 'night', label: '休市结算', ms: 40000 }, leftMs: 40000 },
       Date.now()
     );
     assert.strictEqual(w._preTimer, null, '换阶段必须清掉旧定时器');
   } finally {
     w._clearPre();
+    w._pendingKick = null;
     config.npc.llm.enabled = old;
   }
 }
 
-console.log('llm.test.js: all passed');
+// [13] 单脑：意图启动概率用模型自己给的，不被 0.15+0.4w 抬高一截
+{
+  const s0 = STOCK_IDS[0];
+  const one = mergePlans(
+    [
+      {
+        whale: { id: 'a', label: 'A' },
+        plan: {
+          bias: 0.3, aggro: 1, intent: 'accumulate', intentChance: 0.2,
+          stocks: { [s0]: { stance: 'bullish', intent: 'accumulate', weight: 0.9 } },
+          note: '',
+        },
+      },
+    ],
+    STOCK_IDS,
+    CLAMP()
+  );
+  assert.strictEqual(one.stocks[s0].intentChance, 0.2, '单脑保留模型本意（0.2 不该被抬到 0.51）');
+
+  // 多脑仍保留合议加成（两脑同向才算"合力"，给个下限）
+  const multi = mergePlans(
+    [
+      { whale: { id: 'a', label: 'A' }, plan: { bias: 0.3, aggro: 1, intent: 'accumulate', intentChance: 0.2, stocks: { [s0]: { stance: 'bullish', intent: 'accumulate', weight: 0.9 } }, note: '' } },
+      { whale: { id: 'b', label: 'B' }, plan: { bias: 0.2, aggro: 1, intent: 'accumulate', intentChance: 0.2, stocks: { [s0]: { stance: 'bullish', intent: 'accumulate', weight: 0.8 } }, note: '' } },
+    ],
+    STOCK_IDS,
+    CLAMP()
+  );
+  assert.ok(multi.stocks[s0].intentChance >= 0.15 + 0.4 * 0.9 - 1e-9, '多脑同向有合议下限');
+}
+
+// [14] 同股已有在途挂单就不再追单（旧实现只看持仓，6 轮/日会叠出好几张）
+{
+  const g = new Game();
+  const whale = config.npc.llm.whales[0];
+  g.whales.ensureAccounts({ fresh: true });
+  const acc = g.store.get(g.whales.accountName(whale));
+  const sid = STOCK_IDS[0];
+  acc.orders.set('o1', { id: 'o1', stockId: sid, status: 'live', qty: 1000, filled: 0, action: 'buy_open' });
+  assert.ok(g.whales._liveOrderOn(acc, sid), '在途单要能被查到');
+  const before = acc.orders.size;
+  g.whales._executeWhaleOrders({ stocks: { [sid]: { stance: 'bullish', weight: 0.9 } } }, whale);
+  assert.strictEqual(acc.orders.size, before, '有在途单时不得再挂一张');
+
+  acc.orders.get('o1').filled = 1000;
+  assert.strictEqual(g.whales._liveOrderOn(acc, sid), null, '全部成交后不再阻塞');
+}
+
+// [15] 旧档补钱只补一次：deposited 记账，重启不等于给 AI 续命
+{
+  const g = new Game();
+  const whale = config.npc.llm.whales[0];
+  const name = g.whales.accountName(whale);
+  const acc = new Account(name, true, 'whale');
+  acc.cash = 30000000; // 四脑时代的 3000 万
+  acc.deposited = 0;
+  g.store.put(acc);
+
+  g.whales.ensureAccounts({ fresh: false });
+  assert.strictEqual(acc.cash, config.npc.llm.cashEach, '旧档补足到 cashEach');
+  assert.strictEqual(acc.deposited, config.npc.llm.cashEach, '注资额要落账');
+
+  acc.cash = 1000;
+  g.whales.ensureAccounts({ fresh: false });
+  assert.strictEqual(acc.cash, 1000, '补过之后不再注资（重启≠回血）');
+}
+
+// [16] 慢轮不丢决策：busy 期间的触发顺延，当前轮结束后补跑
+(async () => {
+  const g = new Game();
+  const w = g.whales;
+  let runs = 0;
+  w._runRound = async () => {
+    runs += 1;
+    await new Promise((r) => setTimeout(r, 40));
+  };
+  const dayState = { day: 1, phase: { key: 'auction', label: '开盘集合竞价' }, leftMs: 30000 };
+  w._kick(dayState, Date.now(), 'auction');
+  w._kick(dayState, Date.now(), 'morning');
+  assert.strictEqual(w.busy, true);
+  assert.ok(w._pendingKick, 'busy 时应记下顺延的那次，而不是直接丢掉');
+  await new Promise((r) => setTimeout(r, 200));
+  assert.strictEqual(runs, 2, '顺延的那次必须真的跑掉');
+  assert.strictEqual(w.busy, false);
+  assert.strictEqual(w._pendingKick, null);
+
+  console.log('llm.test.js: all passed');
+})();

@@ -1152,6 +1152,9 @@
     // 首页「看漫画」：回看入口，和开户流程完全脱钩（不传 onDone）
     const replayBtn = $('comicReplayBtn');
     if (replayBtn) replayBtn.addEventListener('click', () => openComic(null, true));
+    // 首页「AI 主力」：跳观测台（会话 token 由 whales.html 自己从 localStorage 读）
+    const whalesBtn = $('whalesBtn');
+    if (whalesBtn) whalesBtn.addEventListener('click', () => { location.href = '/whales.html'; });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       const overlay = $('comicOverlay');

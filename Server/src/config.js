@@ -471,10 +471,9 @@ const config = {
         capLevel: 1.2, // 重心翻倍以上也不抬了
       },
     },
-    // 大模型主力脑（软脑）：4 个跨股「集团大脑」，每游戏日只决策 2 次
-    // （开盘集合竞价起 / 收盘集合竞价起），其余报价与吃单仍走上面的量化规则。
-    // 4 个脑**并发**请求后合议成一份计划写回 NpcManager.llmPlan（情绪偏置 / 意图提示 /
-    // 吃单力度乘子）；同名 AI 账户另按各自的 stance 挂限价单。
+    // 大模型主力脑：**只 1 个**跨股机构（多空皆可，目标是赚钱）。
+    // 每游戏日决策 2 次（开盘竞价 / 收盘竞价前）；其余报价与吃单仍走上方量化规则。
+    // 并发多脑时 flash 经常 no_json 超时（实测 3/4 失败），故收敛为单脑串行。
     // enabled=false 时全链路关闭，与旧行为逐位等价。
     llm: {
       enabled: process.env.NPC_LLM === '1',
@@ -485,19 +484,21 @@ const config = {
       apiKeyEnv: process.env.NPC_LLM_KEY_ENV || 'NPC_LLM_KEY',
       model: process.env.NPC_LLM_MODEL || 'mimo-v2.6-flash',
       // 决策要的是稳定而不是文采，0.7 会让同一张盘面来回翻立场
-      temperature: 0.6,
-      // 实测 mimo-v2.6-flash 含 reasoning 单次 8~25s；四脑串行时单次给足 35s，避免踩超时
-      timeoutMs: 35000,
+      temperature: 0.5,
+      // 实测 mimo-v2.6-flash 含 reasoning 单次 8~25s；单脑也给足 40s，尽量不出 no_json
+      timeoutMs: 40000,
       // 瞬时故障（429/5xx/超时）重试次数，0 = 不重试
       retry: 1,
       // 单次输入字符上限：超了**丢弃本轮**（不发请求），防 snapshot 变大后静默烧 token
       maxInputChars: 12000,
-      maxOutputTokens: 800,
+      // 推理模型（mimo 等）先花 reasoning 再输出正文：实测成功那几次 completion 已到
+      // 651~721/800，一旦 reasoning 再长一点正文就被截断 → content 空/半截 → no_json。
+      // 2000 是给"思考 + 一个完整 JSON"留的余量（输出 token 便宜，空跑一轮才贵）。
+      maxOutputTokens: 2000,
       // 每日真实调用熔断（按**本地自然日**滚动）。
-      // 一游戏日 620s、2 轮 × 4 脑 = 8 次 → 24h 挂机约 1116 次，这里留出重试余量取 1200；
-      // 旧值 200 会在跑满约 4.3 小时后熔断、之后一整天不再决策
+      // 单脑 × 约 6 次/游戏日 ≈ 840 次/24h，留重试余量取 1000
       budget: {
-        maxCallsPerDay: 1200,
+        maxCallsPerDay: 1000,
       },
       // 写回夹紧：模型说什么都先夹进安全区间，避免一次误判掀翻盘口
       clamp: {
@@ -506,47 +507,39 @@ const config = {
         intentChance: [0, 0.55],
         planTicks: [80, 900],
       },
+      // 唯一大模型主力：账号 `AI·一号主力`（续跑沿用该名，避免旧档多出一只无脑 AI）
       whales: [
         {
           id: 'whale_a',
           label: '一号主力',
-          style: '中长线多头，偏重仓低估值与趋势确认后的吸筹',
-          side: 'bull',
-        },
-        {
-          id: 'whale_b',
-          label: '空头猎手',
-          style: '偏空、找高估值与弱势股做派发或参与挤兑',
-          side: 'bear',
-        },
-        {
-          id: 'whale_c',
-          label: '做市老庄',
-          style: '中性双边，稳盘口，重活跃度而非单边方向',
-          side: 'neutral',
-        },
-        {
-          id: 'whale_d',
-          label: '游资快枪',
-          style: '跟强动量、短平快，只在明显强势股上加大力度',
-          side: 'momentum',
+          style:
+            '职业操盘手，唯一目标是把账户权益做大。多空都做：顺势做多、弱势做空或减仓；' +
+            '不押死一个多头故事。优先集中火力在最有把握的 1~3 只股票，控制回撤，避免同时满仓多只。',
+          side: 'flex',
         },
       ],
-      // 账号名前缀 + 每个 AI 主力的初始现金（新开局时建 4 个多股票账户，只给现金不抽流通盘）
+      // 账号名前缀 + 初始现金（新开局建 1 个多股票账户；只给现金不抽流通盘）
       accountPrefix: 'AI·',
-      cashEach: 30000000, // 3000 万 / 脑；4 脑合计 1.2 亿做市外增量资金
+      cashEach: 100000000, // 1 亿
       // 每次决策最多动用现金比例（单股），避免一次把盘口打穿
-      orderCashRatio: 0.12,
+      orderCashRatio: 0.18,
       // 每次决策最多对多少只股票下非 neutral 策略（其余保持规则盘）；按 weight 取前 N
-      maxStocksPerDecision: 5,
-      // 每个脑每次决策最多挂几张单（防一轮砸穿多只股票）
-      maxOrdersPerDecision: 2,
-      // 触发阶段 key：开盘竞价 / 收盘竞价 各一次 → 每游戏日 2 次
-      triggerPhases: ['auction', 'closeAuction'],
+      maxStocksPerDecision: 3,
+      // 每个脑每次决策最多挂几张单（单脑可稍松，仍防一轮砸穿多只股票）
+      maxOrdersPerDecision: 3,
+      // 触发阶段 key：段开始即决策。加段中 midTriggers 后约 6 次/游戏日
+      triggerPhases: ['auction', 'morning', 'afternoon'],
+      // 段中再决策一次（进入该阶段后走完 atPct 再跑）：上午/下午各插一刀
+      midTriggers: [
+        { phase: 'morning', atPct: 0.45, key: 'morning_mid' },
+        { phase: 'afternoon', atPct: 0.45, key: 'afternoon_mid' },
+      ],
       // 收盘竞价只有 20s、最后 10s 锁单，而单次推理约 8s：等竞价开始再决策，订单赶不上
       // 收盘撮合。这里在 afternoon 段结束前 leadMs 提前跑「收盘那轮」，去重键记 closeAuction，
       // 真正进入 closeAuction 时不会重复调用（若提前排程没跑成，阶段触发仍是兜底）。
-      preTrigger: { phase: 'afternoon', leadMs: 20000, dedupeKey: 'closeAuction' },
+      // leadMs 要覆盖"推理耗时 + 重试"：实测单次 4~26s、最慢 25.7s，25s 提前量会让订单
+      // 刚好卡在竞价开始那一刻甚至更晚，所以留 45s（下午段 260s，余量足够）。
+      preTrigger: { phase: 'afternoon', leadMs: 45000, dedupeKey: 'closeAuction' },
       // 计划存活 tick 数：交易日约 886 tick，480 ≈ 336s（覆盖到午后），
       // 写回时再夹进 clamp.planTicks；旧值 200 只覆盖 26% 的交易日
       defaultPlanTicks: 480,

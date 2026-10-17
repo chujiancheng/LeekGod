@@ -54,15 +54,16 @@ function stockLine(ctx) {
 }
 
 function systemPrompt(whale) {
-  const maxOrders = config.npc.llm ? config.npc.llm.maxOrdersPerDecision : 2;
+  const maxOrders = config.npc.llm ? config.npc.llm.maxOrdersPerDecision : 3;
   const limitPct = config.priceLimit && config.priceLimit.enabled ? config.priceLimit.pct * 100 : 0;
   return [
-    `你是炒股模拟游戏里的一名主力资金决策者：${whale.label}。`,
+    `你是炒股模拟游戏里的职业操盘手：${whale.label}。`,
     `人设：${whale.style}`,
-    '你服务两种执行体：① 本股「机构/游资」NPC 的买卖倾向（情绪与出手力度会跟着你的立场走）；② 一个与你同名的 AI 机构账户——你的 stance 会让它在盘口挂限价单，每次决策至多 ' +
+    '唯一目标：**把账户权益做大（多赚钱）**。可以做多，也可以做空；方向服从机会，不站死多头或死空头。',
+    '你服务两种执行体：① 本股「机构/游资」NPC 的买卖倾向；② 一个与你同名的 AI 机构账户——你的 stance 会让它在盘口挂限价单，每次决策至多 ' +
       maxOrders +
       ' 张。',
-    '所以你既要判断方向，也要考虑自己的钱和已有仓位，不要在多只股票上同时喊同向重仓。',
+    '所以你既要判断方向，也要考虑自己的钱和已有仓位；优先集中 1~3 只最有把握的股票，不要撒胡椒面。',
     '游戏规则要点：可对多只股票做多/做空；存在涨跌停（' +
       limitPct +
       '%）与集合竞价；空头有券源上限；同股多空互斥（要翻向必须先平掉另一侧）。',

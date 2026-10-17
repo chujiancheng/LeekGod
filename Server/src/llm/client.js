@@ -9,6 +9,8 @@
  * - `maxInputChars` 真正生效：超限**丢弃本次**并打 warn（此前只是配置里的空话，
  *   snapshot 一旦变大就会静默烧 token）。
  * - 429 / 5xx / 超时做一次短重试（`retry`，默认 1 次），减少"一轮决策白白空过"。
+ * - 把 `finish_reason` 一并带回：推理模型的 reasoning 会先吃 max_tokens，
+ *   content 被截断/掏空时上层需要据此判断是"超预算"还是"模型乱写"。
  */
 const { logger } = require('../logger');
 
@@ -43,11 +45,20 @@ async function once(cfg, url, apiKey, body, timeoutMs) {
     } catch {
       return { ok: false, error: 'bad_json_body' };
     }
-    const text =
-      data && data.choices && data.choices[0] && data.choices[0].message
-        ? String(data.choices[0].message.content || '')
-        : '';
-    return { ok: true, text, usage: data.usage || null };
+    const choice = data && data.choices && data.choices[0];
+    const text = choice && choice.message ? String(choice.message.content || '') : '';
+    const finish = (choice && choice.finish_reason) || '';
+    // 推理模型把 max_tokens 先花在 reasoning 上：扣光了 content 就是空的。
+    // 这种"成功但没内容"必须当成失败上报（带 usage），否则上层只能看到 no_json。
+    if (!text.trim()) {
+      return {
+        ok: false,
+        error: `empty_content:${finish || '-'}`,
+        usage: data.usage || null,
+        finish,
+      };
+    }
+    return { ok: true, text, usage: data.usage || null, finish };
   } catch (e) {
     return { ok: false, error: e && e.name === 'AbortError' ? 'timeout' : String((e && e.message) || e) };
   } finally {

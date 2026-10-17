@@ -1800,24 +1800,16 @@ class Game {
 
   /**
    * AI 主力完整持仓组合。
-   * 玩家侧仅白名单账号可见（当前写死 `chu`）；运维另走 `/api/admin/whales`。
-   * 绝不进 stateFor——普通玩家只能在股东榜看到公开持股数量。
+   * **所有已登录玩家**可看 `/whales` 页与 `/api/whales`；运维另走 `/api/admin/whales`。
+   * 不进 stateFor——详情按需拉取，普通帧推送仍只有公开行情。
    */
-  static whaleViewerAccounts() {
-    // 写死白名单：只有这些账号能开 /whales 页与 /api/whales
-    return ['chu'];
-  }
-
-  /** 该玩家令牌是否允许看 AI 主力详情 */
+  /** 该玩家令牌是否允许看 AI 主力详情（已登录即可） */
   canViewWhales(token) {
-    const acc = this.accountFor(token);
-    if (!acc) return false;
-    return Game.whaleViewerAccounts().includes(acc.name);
+    return !!this.accountFor(token);
   }
 
   /**
    * AI 主力完整持仓组合（详情：现金 / 权益 / 多空明细 / 挂单）。
-   * 绝不进 stateFor 或任何玩家 API——玩家只能在股东榜看到「谁持了多少股」这类公开盘面信息。
    */
   whalePortfolio() {
     const priceOf = (s) => this.priceOf(s);
@@ -1901,8 +1893,11 @@ class Game {
       phaseLabel: day ? day.phase.label : null,
       llmEnabled: !!(config.npc.llm && config.npc.llm.enabled),
       lastDecision: this.whales && this.whales.lastDecisionSnapshot
-        ? this.whales.lastDecisionSnapshot()
+        ? this.whales.lastDecisionSnapshot().last
         : null,
+      decisionHistory: this.whales && this.whales.lastDecisionSnapshot
+        ? this.whales.lastDecisionSnapshot().history
+        : [],
       whales,
     };
   }

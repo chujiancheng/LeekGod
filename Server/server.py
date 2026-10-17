@@ -294,10 +294,17 @@ def whales():
         for d in dec.get("decisions") or []:
             mark = "✓" if d.get("ok") else "✗"
             stocks = ",".join(s.get("stockName", "") for s in d.get("stocks") or []) or "-"
-            note = (d.get("note") or d.get("error") or "")[:40]
-            print(f"  {mark} {d.get('label')}: bias={d.get('bias')} {stocks} 挂单{d.get('ordersPlaced') or 0} {note}")
+            ords = d.get("orders") or []
+            otxt = "；".join(
+                f"{'✓' if o.get('ok') else '✗'}{o.get('stockName')}{o.get('qty')}@{o.get('price')}"
+                for o in ords
+            ) or f"挂单{d.get('ordersPlaced') or 0}"
+            note = (d.get("note") or d.get("error") or "")[:36]
+            print(f"  {mark} {d.get('label')}: {stocks} | {otxt} | {note}")
     else:
-        print("上一轮决策: （内存无记录，等下一阶段触发）")
+        print("上一轮决策: （内存无记录，等下一次触发）")
+    hist = data.get("decisionHistory") or []
+    print(f"决策历史 {len(hist)} 条（观测页可看详情）")
     print("-" * 72)
     for w in data.get("whales", []):
         print(
