@@ -146,6 +146,25 @@ class Market {
   }
 
   /**
+   * 把某只股票的批次预留按「当前在途平仓委托」重摊一次（实现见 `Account.syncReserved`）。
+   *
+   * 成交、撤单、委托完结之后都要调：这批路径各自按 FIFO 动批次，而预留不带委托归属，
+   * 一旦某种交错的顺序让 consume 吃到「别的单占着的批次」，预留量就会与在途委托量脱钩，
+   * 表现为「持仓还在、可平/可卖却是 0，且没有任何在途委托可撤」。
+   * 本股没有持仓时直接跳过（NPC 每 tick 大量成交，别为没持仓的股票做无用功）。
+   */
+  syncReserved(account, stockId, now) {
+    if (!account || account === SYSTEM_ACCOUNT) return;
+    const sid = stockId || this.stockId;
+    const lp = account.longs.get(sid);
+    const sp = account.shorts.get(sid);
+    if (!lp && !sp) return;
+    // 锁仓时长只有多头用得上：本股没有多头批次就不必去解析券商（NPC 成交极频繁）
+    const lockMs = lp ? this.brokerFor(account, now).lockMs : 0;
+    account.syncReserved(sid, lockMs, now);
+  }
+
+  /**
    * 涨跌停区间（关闭时返回 null）。
    *
    * 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收只在每个交易日收盘结算时滚动
@@ -365,12 +384,12 @@ class Market {
         continue;
       }
       if (!this.isSettleable(b, 1)) {
-        this.dropStaleOrder(b);
+        this.dropStaleOrder(b, now);
         bi++;
         continue;
       }
       if (!this.isSettleable(a, 1)) {
-        this.dropStaleOrder(a);
+        this.dropStaleOrder(a, now);
         ai++;
         continue;
       }
@@ -393,12 +412,12 @@ class Market {
       const br = b.qty - (b.filled || 0);
       const ar = a.qty - (a.filled || 0);
       if (br <= 0) {
-        if (b.status === 'live') this.dropStaleOrder(b);
+        if (b.status === 'live') this.dropStaleOrder(b, now);
         else this.book.remove(b);
         continue;
       }
       if (ar <= 0) {
-        if (a.status === 'live') this.dropStaleOrder(a);
+        if (a.status === 'live') this.dropStaleOrder(a, now);
         else this.book.remove(a);
         continue;
       }
@@ -408,7 +427,7 @@ class Market {
         // 冻结资金与仓位预留一并锁死，盘口里却已经看不见。走正式撤单
         // （保留买侧、撤卖侧，与 _runAuctionAt 的 ai++ 口径一致）
         if (!this.cancel(a.account, a.id, now, { internal: true }).ok) {
-          this.dropStaleOrder(a);
+          this.dropStaleOrder(a, now);
         }
         continue;
       }
@@ -1114,7 +1133,7 @@ class Market {
       const take = Math.min(order.qty - order.filled, bestRemain);
       // 被动单的持仓可能已被强平消耗（残留挂单），撤掉后继续找下一个对手盘
       if (!this.isSettleable(best, take)) {
-        this.dropStaleOrder(best);
+        this.dropStaleOrder(best, now);
         continue;
       }
       const tradePrice = best.price; // 成交价 = 被动方挂单价
@@ -1123,7 +1142,7 @@ class Market {
     if (order.filled < order.qty) {
       if (order.status === 'live') this.book.add(order);
     } else {
-      this.finishOrder(order);
+      this.finishOrder(order, now);
     }
   }
 
@@ -1141,7 +1160,7 @@ class Market {
   }
 
   /** 清理持仓已不存在的残留挂单，退回残余冻结与仓位预留 */
-  dropStaleOrder(order) {
+  dropStaleOrder(order, now = Date.now()) {
     this.book.remove(order);
     order.status = 'canceled';
     const acc = order.account;
@@ -1161,6 +1180,7 @@ class Market {
     }
     acc.orders.delete(order.id);
     this.notifyChange(acc, order);
+    this.syncReserved(acc, order.stockId, now);
   }
 
   /** 单笔撮合：结算双方、记流水、更新行情 */
@@ -1178,9 +1198,9 @@ class Market {
     maker.filled += qty;
     if (maker.filled >= maker.qty) {
       this.book.remove(maker);
-      this.finishOrder(maker);
+      this.finishOrder(maker, now);
     }
-    if (taker.filled >= taker.qty) this.finishOrder(taker);
+    if (taker.filled >= taker.qty) this.finishOrder(taker, now);
 
     // 席位（§11.3）：成交价 = 被动方挂单价，买卖双方各自的券商就是这笔的买卖席位
     const buyOrder = taker.side === 'buy' ? taker : maker;
@@ -1241,6 +1261,11 @@ class Market {
     // 成交后立即做风控检查
     this.maybeLiquidate(taker.account, now);
     if (maker.account !== taker.account) this.maybeLiquidate(maker.account, now);
+
+    // 结算里的 consume 按 FIFO 吃批次，可能吃到「别的委托占着的那一批」，预留量就此与
+    // 在途委托量脱钩（见 Account.syncReserved）。成交是唯一会移动持仓的路径，收尾重摊一次
+    this.syncReserved(taker.account, this.stockId, now);
+    if (maker.account !== taker.account) this.syncReserved(maker.account, this.stockId, now);
   }
 
   /**
@@ -1434,7 +1459,7 @@ class Market {
   }
 
   /** 订单完结（全部成交）：清退残余冻结、移出挂单表 */
-  finishOrder(order) {
+  finishOrder(order, now = Date.now()) {
     if (order.status !== 'live') return;
     order.status = 'filled';
     const acc = order.account;
@@ -1447,6 +1472,9 @@ class Market {
     // 部分成交后由 cancel 处理剩余；但完全成交时预留应刚好等于成交数量，已被 consume 掉）
     acc.orders.delete(order.id);
     this.notifyChange(acc, order);
+    // 完全成交也可能留下残留预留：consume 按 FIFO 扣批次，一旦吃到的批次归别的委托所有，
+    // 本单自己那份预留就没被扣掉（它已经没有委托号可以释放了），只能按在途委托重摊
+    this.syncReserved(acc, order.stockId, now);
   }
 
   /**
@@ -1486,6 +1514,9 @@ class Market {
     order.status = 'canceled';
     account.orders.delete(order.id);
     this.notifyChange(account, order);
+    // release 按「最早已占的批次」退，而这张单当初是按「最早未占的批次」占的——
+    // 交错时退不干净，按在途委托重摊一次把差额补齐
+    this.syncReserved(account, order.stockId, now);
     return { ok: true, order };
   }
 
@@ -1670,7 +1701,7 @@ class Market {
           continue;
         }
         if (!this.isSettleable(bid, Math.min(need, remain))) {
-          this.dropStaleOrder(bid);
+          this.dropStaleOrder(bid, now);
           continue;
         }
         price = bid.price;
@@ -1712,7 +1743,7 @@ class Market {
         if (afford <= 0) break;
         take = Math.min(afford, remain);
         if (!this.isSettleable(ask, take)) {
-          this.dropStaleOrder(ask);
+          this.dropStaleOrder(ask, now);
           continue;
         }
       } else {

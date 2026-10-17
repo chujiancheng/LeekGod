@@ -364,6 +364,19 @@ class Game {
       if (byName.has(row.account)) this.sessions.set(row.token, row.account);
     }
 
+    // 批次预留与「在途平仓委托量」必须恒等（见 Account.syncReserved）。老档里可能已经错位：
+    // 一张平仓单成交时 FIFO 吃掉了别的委托占着的批次，那份预留就永久留在账上——
+    // 界面上是「持仓还在、可平/可卖却是 0」，而委托表里没有任何在途单可以撤，玩家被锁死。
+    // 在途委托恢复完之后按委托重摊一遍，这类残留在启动时就地修掉
+    const restoreNow = Date.now();
+    for (const acc of this.store.all()) {
+      if (!acc.longs.size && !acc.shorts.size) continue;
+      const lockMs = this.brokerOf(acc, restoreNow).lockMs;
+      for (const sid of new Set([...acc.longs.keys(), ...acc.shorts.keys()])) {
+        acc.syncReserved(sid, lockMs, restoreNow);
+      }
+    }
+
     // 重建 NPC 报价对象：持仓/现金已在上面恢复，这里只补 manager 的运行期字段。
     // 每个 NPC 账户属于唯一一只股票（账户名带股票简称前缀），按前缀分派回各自的 manager
     const typeKeys = Object.keys(config.npc.types);

@@ -1018,5 +1018,108 @@ console.log('\n[35] 券商通道（锁仓时长 / 偶发卡顿）落在撮合层
   assert(z1.ok, `钟信 0.1% 随机数也不受影响${z1.ok ? '' : '（' + z1.error + '）'}`);
 }
 
+// ---- 36. 平仓预留与在途委托恒等（撤单错位后自愈）----
+// 预留只是批次上的一个数字、不带「是哪张委托占的」，而 reserve 从「最早未占的」占、
+// release 从「最早已占的」退、consume 从「最早的」扣——三种遍历顺序。交错时会出现
+// 「持仓还在、可平/可卖却是 0，而且没有任何在途委托可撤」（用户实测：空头 900 股可平 0，
+// 买入平空被拒「空头持仓不足」）。这一节把 syncReserved 的重摊口径与 reserve 的原子性钉住。
+console.log('\n[36] 平仓预留与在途委托恒等');
+{
+  const qty = 1000; // 10 手（lotSize 100）
+  const reservedShort = (acc) =>
+    (acc.shorts.get(stock.id)?.lots || []).reduce((s, l) => s + l.reserved, 0);
+  const liveCloseRemain = (acc, action) =>
+    [...acc.orders.values()]
+      .filter((o) => o.status === 'live' && o.action === action)
+      .reduce((s, o) => s + (o.qty - o.filled), 0);
+
+  // (1) 空头：撤掉甲之后乙成交，旧实现会把乙的预留永久留在批次上
+  const m = new Market(stock);
+  m.lastPrice = 20;
+  const A = new Account('预留空头');
+  A.cash = 5000000;
+  const bid36 = pad('垫买36');
+  const ask36 = pad('垫卖36');
+  let t = 1000000;
+  const step = () => (t += 20000);
+
+  m.place(bid36, { action: ACTIONS.BUY_OPEN, qty, price: 20, now: step(), noCooldown: true });
+  const o1 = m.place(A, { action: ACTIONS.SELL_OPEN, qty, price: 20, now: step(), noCooldown: true });
+  assert(o1.ok && A.shortQty(stock.id) === qty, '开空 1000 股成交，可平 1000');
+
+  const a1 = m.place(A, { action: ACTIONS.BUY_CLOSE, qty, price: 19.2, now: step(), noCooldown: true });
+  assert(a1.ok && A.coverableShort(stock.id) === 0, '平空单甲挂出后占住预留，可平归 0');
+
+  // 同向加空：新批次没有预留，于是平空单乙只能压在新批次上
+  m.place(bid36, { action: ACTIONS.BUY_OPEN, qty, price: 20.1, now: step(), noCooldown: true });
+  m.place(A, { action: ACTIONS.SELL_OPEN, qty, price: 20.1, now: step(), noCooldown: true });
+  const a2 = m.place(A, { action: ACTIONS.BUY_CLOSE, qty, price: 19.2, now: step(), noCooldown: true });
+  assert(a2.ok && A.shortQty(stock.id) === qty * 2, '加空后共 2000 股，甲乙两张平空单同时在途');
+
+  assert(m.cancel(A, a1.order.id, step(), { internal: true }).ok, '撤掉甲（乙仍在途）');
+  assert(
+    reservedShort(A) === liveCloseRemain(A, ACTIONS.BUY_CLOSE),
+    `撤单后预留量 === 在途平空委托量（${reservedShort(A)} / ${liveCloseRemain(A, ACTIONS.BUY_CLOSE)}）`
+  );
+
+  // 乙成交：consume 按 FIFO 先吃最早批次（旧实现吃到的正是「没有预留」的那一批）
+  const fill = m.place(ask36, { action: ACTIONS.SELL_OPEN, qty, price: 19.2, now: step(), noCooldown: true });
+  assert(fill.ok && fill.order.filled === qty, '垫卖盘把乙打成成交');
+  assert(A.shortQty(stock.id) === qty, '平掉 1000 股后仍持有 1000 股空头');
+  assert(
+    A.coverableShort(stock.id) === qty,
+    `残留的 1000 股可平回到 1000（旧实现是 0，且没有在途委托可撤：${A.coverableShort(stock.id)}）`
+  );
+  assert(A.orders.size === 0, '没有残留的在途委托');
+
+  // (2) 多头同构：sell_close 的预留走同一套逻辑，锁仓已过的批次才可被占用
+  const m2 = new Market(stock);
+  m2.lastPrice = 20;
+  const B = new Account('预留多头');
+  B.cash = 5000000;
+  const ask2 = pad('垫卖36b');
+  const bid2 = pad('垫买36c');
+  let u = 2000000;
+  const step2 = () => (u += 20000);
+  const lockMs = config.trade.lockMs;
+
+  m2.place(ask2, { action: ACTIONS.SELL_OPEN, qty, price: 20, now: step2(), noCooldown: true });
+  m2.place(B, { action: ACTIONS.BUY_OPEN, qty, price: 20, now: step2(), noCooldown: true });
+  assert(B.longQty(stock.id) === qty, '买入 1000 股多头');
+  const b1 = m2.place(B, { action: ACTIONS.SELL_CLOSE, qty, price: 20.2, now: step2(), noCooldown: true });
+  assert(b1.ok && B.freeSellableLong(stock.id, u, lockMs) === 0, '卖出平多甲挂出后占住预留，可卖归 0');
+
+  m2.place(ask2, { action: ACTIONS.SELL_OPEN, qty, price: 20.1, now: step2(), noCooldown: true });
+  m2.place(B, { action: ACTIONS.BUY_OPEN, qty, price: 20.1, now: step2(), noCooldown: true });
+  const b2 = m2.place(B, { action: ACTIONS.SELL_CLOSE, qty, price: 20.2, now: step2(), noCooldown: true });
+  assert(b2.ok && B.longQty(stock.id) === qty * 2, '加多后共 2000 股，甲乙两张平多单同时在途');
+
+  assert(m2.cancel(B, b1.order.id, step2(), { internal: true }).ok, '撤掉平多甲');
+  m2.place(bid2, { action: ACTIONS.BUY_OPEN, qty, price: 20.2, now: step2(), noCooldown: true });
+  assert(B.longQty(stock.id) === qty, '平多乙成交后仍持有 1000 股多头');
+  assert(
+    B.freeSellableLong(stock.id, u, lockMs) === qty,
+    `残留的 1000 股可卖回到 1000（旧实现是 0：${B.freeSellableLong(stock.id, u, lockMs)}）`
+  );
+
+  // (3) 预留不够必须整体回滚：半截预留没有委托号，之后再也退不掉
+  const C = new Account('预留原子');
+  C.shortPos(stock.id).lots.push({ qty: 500, price: 20, margin: 5000, reserved: 0 });
+  assert(C.reserveShort(stock.id, 800) === false, '超出可平量的预留被拒');
+  assert(C.coverableShort(stock.id) === 500, '被拒时不留半截预留（旧实现留 500）');
+
+  // (4) 老档里的幽灵预留：没有任何在途委托，重启恢复时按委托重摊就该清掉
+  const D = new Account('幽灵预留');
+  D.shortPos(stock.id).lots.push({ qty: 900, price: 20, margin: 9000, reserved: 900 });
+  assert(D.coverableShort(stock.id) === 0, '复现用户现场：空头 900 股、可平 0');
+  D.syncReserved(stock.id, lockMs, 2000000);
+  assert(D.coverableShort(stock.id) === 900, 'syncReserved 清掉幽灵预留，可平恢复 900');
+
+  const E = new Account('幽灵预留多头');
+  E.longPos(stock.id).lots.push({ qty: 900, price: 20, ts: 0, reserved: 900 });
+  E.syncReserved(stock.id, lockMs, 2000000);
+  assert(E.freeSellableLong(stock.id, 2000000, lockMs) === 900, '多头方向的幽灵预留同样被清掉');
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed > 0 ? 1 : 0);

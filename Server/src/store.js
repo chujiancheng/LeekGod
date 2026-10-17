@@ -205,6 +205,48 @@ class Account {
   }
 
   /**
+   * 按「当前在途平仓委托」重摊批次预留（FIFO，与 reserve / consume 同序）。
+   *
+   * 预留只是批次上的一个数字，**不带「是哪张委托占的」**，而三个操作各按不同顺序遍历批次：
+   * reserve 从「最早未占的」占、release 从「最早已占的」退、consume 从「最早的」扣。
+   * 只要中途撤掉一张平仓单，三者就会错位：成交时 consume 吃到的是没有预留的早批次，
+   * 本单自己的预留却留在后面批次上再也退不掉——持仓还在、可平/可卖却是 0，
+   * 而账上没有任何在途委托可撤，玩家既平不掉也开不了反向仓。
+   * 下单/成交/撤单之后按在途委托重摊一次就把这条不变量重新钉住；
+   * 重启恢复时也调一次，顺带修掉存档里已经错位的预留。
+   *
+   * @param {number} [lockMs] 多头只有已过锁仓的批次可被占用（与 reserveLong 同口）
+   * @param {number} [now] 判定锁仓的当前时刻
+   */
+  syncReserved(stockId, lockMs = config.trade.lockMs, now = Date.now()) {
+    let longNeed = 0;
+    let shortNeed = 0;
+    for (const o of this.orders.values()) {
+      if (o.status !== 'live' || o.stockId !== stockId) continue;
+      if (o.action === 'sell_close') longNeed += o.qty - o.filled;
+      else if (o.action === 'buy_close') shortNeed += o.qty - o.filled;
+    }
+    const lp = this.longs.get(stockId);
+    if (lp) {
+      let need = longNeed;
+      for (const lot of lp.lots) {
+        const take = now - lot.ts >= lockMs ? Math.min(lot.qty, need) : 0;
+        lot.reserved = take;
+        need -= take;
+      }
+    }
+    const sp = this.shorts.get(stockId);
+    if (sp) {
+      let need = shortNeed;
+      for (const lot of sp.lots) {
+        const take = Math.min(lot.qty, need);
+        lot.reserved = take;
+        need -= take;
+      }
+    }
+  }
+
+  /**
    * 从多头 FIFO 中预留 qty（需可卖），成功返回 true。
    * `lockMs` 与 `sellableLong` 同口：由调用方传账户券商的锁仓时长，缺省回落全局基准
    */
@@ -212,6 +254,7 @@ class Account {
     let need = qty;
     const p = this.longs.get(stockId);
     if (!p) return false;
+    const before = p.lots.map((l) => l.reserved);
     for (const lot of p.lots) {
       if (need <= 0) break;
       if (now - lot.ts < lockMs) continue;
@@ -221,7 +264,13 @@ class Account {
       lot.reserved += take;
       need -= take;
     }
-    return need === 0;
+    // 预留不够就**整体回滚**：旧写法会留下半截预留，而调用方只把这张单判为失败、
+    // 不会去释放它（它没有委托号，之后也无从释放），那截就这么永久留在批次上
+    if (need > 0) {
+      p.lots.forEach((lot, i) => { lot.reserved = before[i]; });
+      return false;
+    }
+    return true;
   }
 
   releaseLong(stockId, qty) {
@@ -268,11 +317,12 @@ class Account {
     return { qty: qty - need, cost, debt: r2(debt) };
   }
 
-  /** 从空头 FIFO 中预留 qty，成功返回 true */
+  /** 从空头 FIFO 中预留 qty，成功返回 true（不够则整体回滚，理由同 reserveLong） */
   reserveShort(stockId, qty) {
     let need = qty;
     const p = this.shorts.get(stockId);
     if (!p) return false;
+    const before = p.lots.map((l) => l.reserved);
     for (const lot of p.lots) {
       if (need <= 0) break;
       const avail = lot.qty - lot.reserved;
@@ -281,7 +331,11 @@ class Account {
       lot.reserved += take;
       need -= take;
     }
-    return need === 0;
+    if (need > 0) {
+      p.lots.forEach((lot, i) => { lot.reserved = before[i]; });
+      return false;
+    }
+    return true;
   }
 
   releaseShort(stockId, qty) {
