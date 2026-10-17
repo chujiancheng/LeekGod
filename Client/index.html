@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>我是股神 · 股票模拟交易</title>
+  <title>股神请就位 · 韭菜进化论</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -12,8 +12,14 @@
        账号没开过户才进第二步：起昵称（中文可用）+ 选券商开户，一次提交 POST /api/onboard -->
   <div id="loginOverlay" class="overlay">
     <div class="login-card login-card-wide">
-      <div class="login-logo">我是股神</div>
-      <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
+      <!-- 品牌：主标是综艺腔（「股神」点金），副标是自嘲梗（韭菜进化论），
+           说明行弱化在最下面。三者包一层 .login-brand —— login-card 的 flex gap 是 14px，
+           直接当子项放会把一组标题撑成三块互不相干的东西 -->
+      <div class="login-brand">
+        <div class="login-logo"><span class="lg-god">股神</span><span class="lg-go">请就位</span></div>
+        <div class="login-tagline">韭菜进化论</div>
+        <div class="login-sub">股票模拟交易 · 多人同服 · 做多做空</div>
+      </div>
 
       <!-- 第一步：账号 -->
       <div id="loginStep1">

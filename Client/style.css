@@ -1,4 +1,4 @@
-/* 我是股神 · 深色交易终端风格 */
+/* 股神请就位 · 韭菜进化论（原「我是股神」）· 深色交易终端风格 */
 :root {
   --bg: #0b0e14;
   --panel: #121722;
@@ -256,9 +256,21 @@ input { font: inherit; color: inherit; }
    （文字还会从盒子里溢出来）。gap 与 .login-card 保持一致，节奏才不变 */
 #loginStep1, #loginStep2 { display: flex; flex-direction: column; gap: 14px; }
 
-.login-logo { font-size: 30px; font-weight: 700; letter-spacing: 4px; text-align: center; }
-.login-logo::after { content: ""; display: block; width: 44px; height: 3px; margin: 10px auto 0; background: linear-gradient(90deg, var(--red), var(--blue)); border-radius: 2px; }
+/* ---------- 登录页品牌：主标「股神请就位」+ 副标「韭菜进化论」 ----------
+   主标是综艺腔：字重与字距拉满，"股神"两字点金色（深色底上唯一的高光）；
+   副标是自嘲梗：小一号 + 更宽字距 + 半透明金，压住不让它跟主标抢焦点。
+   三者必须包在 .login-brand 里——.login-card 的 flex gap 是 14px，直接当子项会散架 */
+.login-brand { display: flex; flex-direction: column; gap: 6px; }
+.login-logo { font-size: 36px; font-weight: 800; letter-spacing: 6px; line-height: 1.25; text-align: center; white-space: nowrap; }
+/* letter-spacing 会在尾字后面也多留一格，行尾减掉这 6px 才是视觉居中 */
+.login-logo span:last-child { margin-right: -6px; }
+.login-logo .lg-god { color: var(--gold); text-shadow: 0 0 24px color-mix(in srgb, var(--gold) 34%, transparent); }
+.login-logo .lg-go { color: var(--ink); }
+.login-logo::after { content: ""; display: block; width: 44px; height: 3px; margin: 12px auto 4px; background: linear-gradient(90deg, var(--red), var(--blue)); border-radius: 2px; }
+.login-tagline { text-align: center; font-size: 12px; font-weight: 600; letter-spacing: 6px; text-indent: 6px; color: color-mix(in srgb, var(--gold) 72%, var(--muted)); }
 .login-sub { text-align: center; color: var(--muted); font-size: 12px; margin-top: -4px; }
+/* 品牌块内的说明行：不受父级 gap 影响，靠这里把 -4px 的全局微调拉回来 */
+.login-brand .login-sub { margin-top: 2px; }
 .login-card input {
   height: 42px; padding: 0 12px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
