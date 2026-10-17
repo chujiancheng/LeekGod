@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="阿狸巴巴">
+  <defs>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8.6" fill="#FF5000"/>
+  <rect width="32" height="32" rx="8.6" fill="url(#gloss)"/>
+  <g fill="#FFFFFF">
+    <path d="M6.4 7.2 14.4 11 6.6 15Z"/>
+    <path d="M25.6 7.2 17.6 11 25.4 15Z"/>
+    <circle cx="16" cy="18" r="8.4"/>
+  </g>
+  <g fill="#FF5000">
+    <circle cx="12.9" cy="16.4" r="1.55"/>
+    <circle cx="19.1" cy="16.4" r="1.55"/>
+    <path d="M14.85 20.2h2.3L16 21.7Z"/>
+  </g>
+</svg>

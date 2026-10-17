@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="腾迅控股">
+  <defs>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8.6" fill="#35C2D8"/>
+  <rect width="32" height="32" rx="8.6" fill="url(#gloss)"/>
+  <path d="M9.5 8.4h10.6a4 4 0 0 1 4 4v3.4a4 4 0 0 1-4 4h-2.7l-3.5 3.3v-3.3H9.5a4 4 0 0 1-4-4v-3.4a4 4 0 0 1 4-4Z" fill="#06323C"/>
+  <rect x="12.6" y="14.4" width="13.8" height="10.2" rx="3.6" fill="#06323C" stroke="#35C2D8" stroke-width="2.3"/>
+</svg>

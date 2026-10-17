@@ -1386,6 +1386,50 @@
     });
   }
 
+  // ---------- 上市公司档案（股娘图鉴） ----------
+  /** 顶栏点股票名：打开档案弹层（指数没有公司档案，只提示） */
+  function openCompanyProfile() {
+    const m = curMarket();
+    if (!m) return;
+    const lore = window.COMPANY_LORE && window.COMPANY_LORE[m.stockId];
+    if (!lore) {
+      toast('「' + m.name + '」是指数，没有公司档案 · 点一只股票看看', 'err');
+      return;
+    }
+    $('companyRibbon').style.background =
+      'linear-gradient(120deg, ' + lore.color + ' 0%, rgba(0,0,0,0) 70%)';
+    $('companyImg').src = lore.img;
+    $('companyImg').alt = lore.waifu + '（' + m.name + '拟人）';
+    $('companyLogo').src = lore.logo;
+    $('companyLogo').alt = m.name + '徽记';
+    $('companyName').textContent = m.name;
+    $('companyCode').textContent = m.stockId;
+    $('companyWaifu').textContent = '拟人 · ' + lore.waifu;
+    const wf = $('companyWaifu');
+    // 胶囊跟着公司主题色走（CSSOM 改，CSP 不允许内联 style= 属性）
+    wf.style.background = lore.color + '2e';
+    wf.style.borderColor = lore.color;
+    $('companyTitle').textContent = lore.title;
+    $('companyIntro').textContent = lore.intro;
+    const ch = cls(m.change);
+    $('companyStats').innerHTML =
+      '<div class="cs-item"><label>最新价</label><b class="' + ch + '">' + esc(fmtP(m.last)) + '</b></div>' +
+      '<div class="cs-item"><label>涨跌幅</label><b class="' + ch + '">' +
+        (m.changePct >= 0 ? '+' : '') + esc(m.changePct.toFixed(2)) + '%</b></div>' +
+      '<div class="cs-item"><label>成交量</label><b>' + esc(fmtVol(m.volume)) + '</b></div>' +
+      '<div class="cs-item"><label>成交额</label><b>' + esc(fmtAmount(m.turnover)) + '</b></div>';
+    $('companyOverlay').classList.remove('hidden');
+  }
+
+  function bindCompanyProfile() {
+    $('stockName').addEventListener('click', openCompanyProfile);
+    $('companyCloseBtn').addEventListener('click', () => $('companyOverlay').classList.add('hidden'));
+    // 点遮罩空白处关闭（点卡片本身不关）
+    $('companyOverlay').addEventListener('click', (e) => {
+      if (e.target === $('companyOverlay')) $('companyOverlay').classList.add('hidden');
+    });
+  }
+
   function enterApp() {
     $('loginOverlay').classList.add('hidden');
     $('app').classList.remove('hidden');
@@ -1661,6 +1705,13 @@
     if (!m) return;
     $('stockName').textContent = m.name;
     $('stockCode').textContent = m.stockId;
+    // 公司徽记：指数没有档案数据，隐藏 logo 位
+    const lore = window.COMPANY_LORE && window.COMPANY_LORE[m.stockId];
+    const sl = $('stockLogo');
+    if (sl) {
+      sl.hidden = !lore;
+      if (lore && sl.getAttribute('src') !== lore.logo) sl.src = lore.logo;
+    }
     const lp = $('lastPrice');
     lp.textContent = fmtP(m.last);
     lp.className = 'big-price ' + cls(m.change);
@@ -1694,8 +1745,10 @@
     const chips = marketList()
       .map((m) => {
         const on = m.stockId === activeStockId ? ' on' : '';
+        const lore = window.COMPANY_LORE && window.COMPANY_LORE[m.stockId];
+        const logo = lore ? `<img class="sc-logo" src="${lore.logo}" alt="" loading="lazy">` : '';
         return `<button class="stock-chip${on}" data-stock="${esc(m.stockId)}">
-          <span class="sc-name">${esc(m.name)}</span>
+          <span class="sc-name">${logo}${esc(m.name)}</span>
           <span class="sc-last ${cls(m.change)}">${fmtP(m.last)}</span>
           <span class="sc-pct ${cls(m.change)}">${m.changePct >= 0 ? '+' : ''}${m.changePct.toFixed(2)}%</span>
         </button>`;
@@ -4776,6 +4829,7 @@
     bindChartMode();
     bindTransfer();
     bindEggs();
+    bindCompanyProfile();
     renderChartMode();
     // 恢复上次的主题与吉祥物（都没选过=默认：深夜终端 + 跟随主题）
     try { currentMascot = localStorage.getItem(MASCOT_KEY); } catch (e) { /* 忽略 */ }

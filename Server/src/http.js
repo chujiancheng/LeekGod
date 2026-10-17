@@ -18,6 +18,7 @@ const STATIC_FILES = {
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/app.js': { file: 'app.js', type: 'application/javascript; charset=utf-8' },
   '/style.css': { file: 'style.css', type: 'text/css; charset=utf-8' },
+  '/lore.js': { file: 'lore.js', type: 'application/javascript; charset=utf-8' },
 };
 
 /**
@@ -39,9 +40,9 @@ const STATIC_FILES = {
  * 吉祥物阵容（id / 名称 / 文案）在前端 `Client/app.js` 的 `MASCOTS`，两处的 key 必须同名。
  */
 const IMG_ASSETS = new Map();
-function registerImg(name, size) {
+function registerImg(name, size, type = 'image/png') {
   if (!fs.existsSync(path.join(CLIENT_DIR, 'img', name))) return;
-  IMG_ASSETS.set(`/img/${name}`, { file: path.join('img', name), type: 'image/png', size });
+  IMG_ASSETS.set(`/img/${name}`, { file: path.join('img', name), type, size });
 }
 for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
   registerImg(`broker-${key}.png`, 'lg');
@@ -60,6 +61,11 @@ for (const key of ['sakura', 'magic', 'maodiao', 'orange', 'doro', 'duck', 'knig
 for (const setKey of ['a', 'b', 'c', 'd']) {
   for (let i = 1; i <= 4; i += 1) registerImg(`comic-${setKey}${i}.png`, 'md');
 }
+// 上市公司档案立绘（股娘图鉴）：key 与 config.stocks 的股票 id 对齐，
+// 前端档案数据在 Client/lore.js（COMPANY_LORE），弹层立绘 640px 一档
+for (const s of config.stocks) registerImg(`company-${s.id}.png`, 'lg');
+// 公司徽记 logo：手绘 SVG（矢量、单文件 <2KB），档案卡 40px / 顶栏 24px / 切换栏 14px 三档复用
+for (const s of config.stocks) registerImg(`company-logo-${s.id}.svg`, 'md', 'image/svg+xml');
 
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。
 const SECURITY_HEADERS = {

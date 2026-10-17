@@ -84,8 +84,11 @@
         <button class="nav-btn" data-view="trade">交易</button>
       </div>
       <div class="stock-id">
-        <span class="stock-name" id="stockName">--</span>
-        <span class="stock-code" id="stockCode">--</span>
+        <img class="stock-logo" id="stockLogo" alt="" hidden />
+        <div class="stock-id-text">
+          <span class="stock-name clickable" id="stockName" title="点开看上市公司档案">--</span>
+          <span class="stock-code" id="stockCode">--</span>
+        </div>
       </div>
       <div class="price-block">
         <span class="big-price" id="lastPrice">--</span>
@@ -605,7 +608,34 @@
     </div>
   </div>
 
+  <!-- 上市公司档案（股娘图鉴）：交易终端顶栏点股票名打开 -->
+  <div id="companyOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card company-card" id="companyCard">
+      <div class="company-ribbon" id="companyRibbon"></div>
+      <div class="company-body">
+        <div class="company-portrait">
+          <img id="companyImg" alt="" />
+        </div>
+        <div class="company-info">
+          <div class="company-name-row">
+            <img class="company-logo" id="companyLogo" alt="" />
+            <span class="company-name" id="companyName">--</span>
+            <span class="company-code" id="companyCode">--</span>
+          </div>
+          <div class="company-waifu-row">
+            <span class="company-waifu" id="companyWaifu">--</span>
+            <span class="company-title" id="companyTitle">--</span>
+          </div>
+          <p class="company-intro" id="companyIntro">--</p>
+          <div class="company-stats" id="companyStats"></div>
+        </div>
+      </div>
+      <button class="deposit-cancel" id="companyCloseBtn">关闭</button>
+    </div>
+  </div>
+
   <div id="toastWrap" class="toast-wrap"></div>
+  <script src="/lore.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

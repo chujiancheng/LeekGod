@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="大米集团">
+  <defs>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8.6" fill="#FF6900"/>
+  <rect width="32" height="32" rx="8.6" fill="url(#gloss)"/>
+  <g transform="rotate(-35 12.5 17.5)">
+    <path d="M12.5 8.5c4.7 3.5 4.7 14.5 0 18-4.7-3.5-4.7-14.5 0-18Z" fill="#331500"/>
+    <path d="M12.5 11.6c1 3 1 8.8 0 11.8" fill="none" stroke="#FF6900" stroke-width="1.6" stroke-linecap="round"/>
+  </g>
+  <g transform="translate(22.6 9.6) rotate(-35) scale(0.58) translate(-13 -12.8)">
+    <path d="M13 3.8c4.7 3.5 4.7 14.5 0 18-4.7-3.5-4.7-14.5 0-18Z" fill="#331500"/>
+  </g>
+</svg>

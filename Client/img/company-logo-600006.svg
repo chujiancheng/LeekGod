@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="筷手集团">
+  <defs>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".22"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8.6" fill="#FF8F1F"/>
+  <rect width="32" height="32" rx="8.6" fill="url(#gloss)"/>
+  <path d="M8 11.6 5 16l3 4.4" fill="none" stroke="#3A1B00" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" opacity=".5"/>
+  <path d="M12.8 8.8 24.6 16l-11.8 7.2Z" fill="#3A1B00" stroke="#3A1B00" stroke-width="3.2" stroke-linejoin="round"/>
+</svg>

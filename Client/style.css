@@ -514,7 +514,8 @@ input { font: inherit; color: inherit; }
   background: var(--panel); color: var(--ink); font-weight: 600;
   box-shadow: 0 0 0 1px var(--line);
 }
-.stock-id { display: flex; flex-direction: column; }
+.stock-id { display: flex; flex-direction: row; align-items: center; gap: 9px; }
+.stock-logo { width: 24px; height: 24px; border-radius: 7px; flex: none; }
 .stock-name { font-size: 17px; font-weight: 700; }
 .stock-code { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
 .price-block { display: flex; align-items: baseline; gap: 10px; min-width: 180px; }
@@ -1022,6 +1023,7 @@ input { font: inherit; color: inherit; }
 .stock-chip:hover { border-color: var(--blue); }
 .stock-chip.on { border-color: var(--blue); background: var(--panel-2); }
 .stock-chip .sc-name { color: var(--ink); font-weight: 600; font-size: 12px; }
+.sc-logo { width: 14px; height: 14px; border-radius: 4.5px; vertical-align: -2.5px; margin-right: 4px; }
 .stock-chip .sc-last { font-variant-numeric: tabular-nums; font-size: 12.5px; font-weight: 600; }
 .stock-chip .sc-pct { font-variant-numeric: tabular-nums; font-size: 10.5px; }
 .stock-chip.idx-chip { border-style: dashed; }
@@ -1562,4 +1564,55 @@ input { font: inherit; color: inherit; }
   .egg-banner .egg-avatar { width: 36px; height: 36px; }
   .egg-banner .egg-text { font-size: 12px; }
   .egg-goal { flex-wrap: wrap; gap: 6px; }
+}
+
+/* ================= 上市公司档案（股娘图鉴） ================= */
+/* 顶栏股票名可点击：悬停亮起 + 小书签感 */
+.stock-name.clickable { cursor: pointer; transition: color .15s ease; }
+.stock-name.clickable:hover { color: var(--blue); }
+
+.company-card { width: min(680px, 94vw); padding: 0; overflow: hidden; }
+/* 顶部色带：颜色由 JS 按各公司主题色注入（--c），呼应立绘底色 */
+.company-ribbon { height: 6px; flex: none; }
+.company-body { display: flex; gap: 18px; padding: 20px 22px 8px; align-items: stretch; }
+.company-portrait {
+  flex: none; width: 210px; min-height: 300px;
+  border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.company-portrait img {
+  width: 100%; height: 100%; object-fit: cover; object-position: top; display: block;
+}
+.company-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.company-name-row { display: flex; align-items: baseline; gap: 10px; }
+.company-name { font-size: 22px; font-weight: 800; letter-spacing: .5px; }
+.company-logo { width: 40px; height: 40px; border-radius: 11px; flex: none; align-self: center; }
+.company-code { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.company-waifu-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.company-waifu {
+  font-size: 13px; font-weight: 700;
+  padding: 2px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--grad-a) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--grad-a) 45%, transparent);
+}
+.company-title { font-size: 12px; color: var(--muted); }
+.company-intro {
+  margin: 2px 0 0; font-size: 13.5px; line-height: 1.8; color: var(--ink);
+  opacity: .92;
+}
+.company-stats { margin-top: auto; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.cs-item {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.cs-item label { font-size: 11px; color: var(--muted); }
+.cs-item b { font-size: 14px; font-variant-numeric: tabular-nums; }
+.company-card .deposit-cancel { margin: 12px 22px 18px; }
+
+@media (max-width: 640px) {
+  .company-body { flex-direction: column; padding: 16px 16px 6px; }
+  .company-portrait { width: 100%; min-height: 0; height: 300px; }
+  .company-stats { grid-template-columns: repeat(2, 1fr); }
 }

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="京冬集团">
+  <defs>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".16"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8.6" fill="#E1251B"/>
+  <rect width="32" height="32" rx="8.6" fill="url(#gloss)"/>
+  <path d="M16 5.2 26.2 10.4 16 15.6 5.8 10.4Z" fill="#FFFFFF"/>
+  <path d="M5.8 10.4 16 15.6v11.2L5.8 21.6Z" fill="#FFFFFF" opacity=".82"/>
+  <path d="M26.2 10.4 16 15.6v11.2l10.2-5.2Z" fill="#FFFFFF" opacity=".6"/>
+  <path d="M16 5.6v9.6" stroke="#E1251B" stroke-width="1.6"/>
+</svg>
