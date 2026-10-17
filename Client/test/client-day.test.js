@@ -191,6 +191,10 @@ src = src.replace(
     setChartMode: (m) => { chartMode = m; },
     dayLoadedSize: () => dayLoaded.size,
     chartModeOf: () => chartMode,
+    // 分时取数窗口（当日 / 5 日）
+    setHistory: (id, arr) => { histories.set(id, arr); },
+    histOf, minutePts, minuteFrom, macdOf, setMinuteRange,
+    minuteRangeOf: () => minuteRange,
     // 账号 / 昵称 / 登录开户
     doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
@@ -1029,6 +1033,14 @@ console.log('\n[16] 主题系统：切换 / 落盘 / 吉祥物换装 / 两个视
 
 console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + 券商）→ 改昵称');
 (async () => {
+  // ---- 两步的骨架：加载时先看到第一步；两个步骤容器各自是列 flex ----
+  // 这条是「静默失效」型回归：`#loginStep1/#loginStep2` 少了 flex 列布局，输入框与登录按钮
+  // 会缩成"按内容宽度"的小方块（文字从盒子里溢出），逻辑与自检全绿、只有肉眼看截图才发现
+  const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  assert(fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8').indexOf('<div id="loginStep2" hidden>') >= 0, '第二步在 HTML 里默认隐藏（打开页面先看到输账号）');
+  assert(/#loginStep1\s*,\s*#loginStep2\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s.test(css), '两个步骤容器各自是列 flex');
+  assert(/#loginStep1\s*,\s*#loginStep2\s*\{[^}]*gap:\s*14px/s.test(css), '步骤容器的间距与 .login-card 一致（14px）');
+
   // ---- 两条规则与服务端一致（账号 ASCII 唯一凭据；昵称中文可用、2~12 字符）----
   assert(/A-Za-z/.test(api.accountRe()), `账号规则是 ASCII 那套（${api.accountRe()}）`);
   assert(/\\p\{L\}|p\{L\}/.test(api.nickRe()), `昵称规则允许任意语言字母（${api.nickRe()}）`);
@@ -1152,6 +1164,72 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
   assert(/我的排名<\/label><span>第 2 名/.test(api.el('holdersMeta').innerHTML), '「我的排名」按账号算（第 2 名）');
 
   resetFetch();
+
+  console.log('\n[18] 分时取数窗口：默认只看当天，可切连续 5 日');
+  {
+    const DAY = 620000; // 一个交易日的墙钟长度（与 config.day.phases 合计一致）
+    const dayStart = 1700000000000;
+    const dayNo = 6;
+    // 第 1~6 天各 10 个点，另加 5 个「第 0 天」的旧点，用来验证被裁掉
+    const pts = [];
+    for (let d = 0; d <= dayNo; d++) {
+      for (let i = 0; i < 10; i++) {
+        pts.push({ t: dayStart - (dayNo - d) * DAY + i * 1000, price: 20 + d * 0.1 + i * 0.01, vol: 100 * (d * 10 + i) });
+      }
+    }
+    api.setHistory(STOCK, pts);
+
+    const rangeDay = {
+      enabled: true, day: dayNo, phase: 'morning', label: '上午连续竞价', trading: true, auction: null, locked: false,
+      phaseMs: 230000, phaseElapsedMs: 10000, phaseLeftMs: 220000,
+      phaseEndsAt: dayStart + DAY - 40000, dayStartAt: dayStart, dayEndsAt: dayStart + DAY,
+      gameClockMs: 0, phaseGameMs: 7200000,
+    };
+
+    // ---- 没有 dayStartAt（老服务端 / 没接交易日时钟）→ 不过滤，退回引入窗口之前的行为 ----
+    api.setState(mkState({ enabled: false, trading: true }, null));
+    assert(api.minuteFrom() === 0 && api.minutePts(STOCK).length === pts.length, `无交易日时钟时不过滤（${api.minutePts(STOCK).length} 点）`);
+
+    // ---- 有锚点：默认「当日」只留今天这一天的点 ----
+    api.setState(mkState(rangeDay, null));
+    api.setMinuteRange('day');
+    const todayPts = api.minutePts(STOCK);
+    assert(todayPts.length === 10, `当日窗口只留今天的点（${todayPts.length}/70）`);
+    assert(todayPts[0].t === dayStart && todayPts[9].t === dayStart + 9000, '留下的正是本交易日的首尾段');
+    assert(api.minuteFrom() === dayStart, '当日窗口起点 = 本交易日开盘竞价时刻');
+
+    // ---- 切「5 日」：往前多留 4 个交易日 ----
+    api.setMinuteRange('5d');
+    assert(api.minuteRangeOf() === '5d', '窗口切成 5 日');
+    assert(api.minuteFrom() === dayStart - 4 * DAY, '5 日窗口起点 = 当天再往前 4 个交易日');
+    const fivePts = api.minutePts(STOCK);
+    assert(fivePts.length === 50, `5 日窗口留最近 5 个交易日（${fivePts.length}/70）`);
+    assert(fivePts[0].t === dayStart - 4 * DAY, '第 1 天的点没被留（跨度刚好 5 天）');
+
+    // ---- 落盘 + 副标题 + MACD 与画法共用同一份窗口 ----
+    api.setChartMode('minute'); // 上一节把模式留在了日线，副标题要按分时的口径看
+    api.renderChartMode();
+    assert(store[ 'gushen_minute_range' ] === '5d', '窗口选择落 localStorage');
+    assert(/连续 5 日分时/.test(api.el('chartSub').textContent), `副标题跟着窗口走（${api.el('chartSub').textContent}）`);
+    assert(api.macdOf().dif.length === fivePts.length, `MACD 用的也是裁过的序列（${api.macdOf().dif.length}）`);
+    api.setMinuteRange('day');
+    assert(/^当日分时/.test(api.el('chartSub').textContent), `切回当日（${api.el('chartSub').textContent}）`);
+    assert(api.macdOf().dif.length === 10, '切回当日后 MACD 重算（缓存键带窗口）');
+
+    // ---- 日线模式整块隐藏（K 线本来就是一天一根）----
+    api.setChartMode('minute');
+    api.renderChartMode();
+    assert(api.el('chartRanges').hidden === false, '分时模式显示「当日 / 5 日」');
+    api.setChartMode('day');
+    api.renderChartMode();
+    assert(api.el('chartRanges').hidden === true, '日线模式隐藏「当日 / 5 日」');
+    api.setChartMode('minute');
+    api.renderChartMode();
+
+    // ---- 骨架：两块控件都在 HTML 里（桩环境的 querySelectorAll 是空的，只能查源码）----
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    assert(html.indexOf('id="chartRanges"') >= 0 && html.indexOf('data-range="5d"') >= 0, 'HTML 里有「当日 / 5 日」这组控件');
+  }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
   process.exit(failed ? 1 : 0);

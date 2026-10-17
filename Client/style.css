@@ -250,6 +250,12 @@ input { font: inherit; color: inherit; }
   box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 14px;
 }
+/* 两步登录：每步各自是一列 flex。
+   **这层不能省**——`.login-card` 的拉伸只作用于**直接子项**，输入框与按钮被套进
+   `#loginStep1` 之后，外层 div 被拉满了、里面的按钮却缩成"按内容宽度"的小方块
+   （文字还会从盒子里溢出来）。gap 与 .login-card 保持一致，节奏才不变 */
+#loginStep1, #loginStep2 { display: flex; flex-direction: column; gap: 14px; }
+
 .login-logo { font-size: 30px; font-weight: 700; letter-spacing: 4px; text-align: center; }
 .login-logo::after { content: ""; display: block; width: 44px; height: 3px; margin: 10px auto 0; background: linear-gradient(90deg, var(--red), var(--blue)); border-radius: 2px; }
 .login-sub { text-align: center; color: var(--muted); font-size: 12px; margin-top: -4px; }
@@ -528,12 +534,20 @@ input { font: inherit; color: inherit; }
   display: inline-flex; gap: 2px; padding: 2px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
 }
+/* 「当日 / 5 日」只在分时模式出现（日线本来就是一天一根）。
+   这块是 .chart-modes 的 display:inline-flex，[hidden] 的 UA 规则盖不过它，
+   必须显式写一条，否则 renderChartMode 切到日线时它还在 */
+.chart-modes[hidden] { display: none; }
+.range-modes .chart-mode.on { color: var(--gold); }
 .chart-mode {
   border: 0; background: transparent; color: var(--muted);
   padding: 3px 12px; border-radius: 5px; font-size: 12px; letter-spacing: 0;
 }
 .chart-mode:hover { color: var(--ink); }
 .chart-mode.on { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+/* 图表标题：控件组靠左紧挨着，副标题推到最右（三个控件之间用 space-between 会散开） */
+.chart-panel .panel-title { justify-content: flex-start; gap: 8px; }
+.chart-panel .panel-title .panel-sub { margin-left: auto; }
 
 /* ---------- 资金指标条（内外盘 / 净流入） ---------- */
 .flow-strip {
@@ -560,10 +574,13 @@ input { font: inherit; color: inherit; }
 /* ---------- 五档 ---------- */
 .depth-panel { flex: none; }
 .depth-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-.depth-table td { padding: 3px 12px; }
-.depth-table .lv { color: var(--muted); width: 40px; }
-.depth-table .px { text-align: right; width: 74px; }
-.depth-table .qty { text-align: right; color: var(--muted); }
+/* 价格格要同时放「价格 + 该档前 2 家券商图标」（≈65px）：内边距收到 8px、价格列给到 96px。
+   挤不下的话价格与图标会折成两行，10 档 + 现价行会从 ~290px 涨到 ~526px，
+   右栏装不下就把下面的逐笔挤没了（实测桌面端逐笔只剩 2px） */
+.depth-table td { padding: 3px 8px; }
+.depth-table .lv { color: var(--muted); width: 34px; }
+.depth-table .px { text-align: right; width: 96px; white-space: nowrap; }
+.depth-table .qty { text-align: right; color: var(--muted); white-space: nowrap; }
 .depth-table tr.ask .px { color: var(--green); }
 .depth-table tr.bid .px { color: var(--red); }
 .depth-mid td { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -1093,7 +1110,13 @@ input { font: inherit; color: inherit; }
   .nav-btn { flex: 1; height: 32px; padding: 0; }
   .stock-id { order: 1; }
   .price-block { order: 2; min-width: 0; flex: 1; }
-  .top-right { order: 3; width: 100%; justify-content: flex-end; }
+  /* 顶栏右区（连接点 / 在线人数 / 交易日徽标 / 时钟 / 昵称 / 三个按钮）一行放不下，
+     允许整块换行；里面的元素一律 nowrap + 不缩——之前没这两条，flex 把它们压到
+     min-content，中文就竖成一字一行（实测「主题 · 深夜终端」被压成 32px 宽 / 130px 高，
+     连接点和在线人数还被挤出视口左侧） */
+  .top-right { order: 3; width: 100%; justify-content: flex-end; flex-wrap: wrap; gap: 6px 10px; }
+  .top-right > * { flex: none; white-space: nowrap; }
+  .top-right .ghost-btn { padding: 5px 9px; }
   .stat-group { order: 4; width: 100%; gap: 10px 16px; }
   .big-price { font-size: 26px; }
   .stock-name { font-size: 15px; }
@@ -1104,7 +1127,12 @@ input { font: inherit; color: inherit; }
     flex-direction: column;
     overflow: visible;
   }
-  .chart-panel { height: 376px; flex: none; }
+  /* 标题行多出「当日 / 5 日」一组控件，窄屏塞不下：让副标题独占一行。
+     面板高度改成随内容（固定 376 是按单行标题调出来的；资金指标条里的
+     「总成交额 1645.31万元」这类文案在不同宽度下折行数不同，写死高度总会裁掉一点） */
+  .chart-panel { height: auto; flex: none; }
+  .chart-panel .panel-title { flex-wrap: wrap; row-gap: 4px; }
+  .chart-panel .panel-title .panel-sub { margin-left: 0; width: 100%; }
   /* 画布 + 资金指标条都要在面板内放得下：258 → 238，把省出的高度留给指标条 */
   .chart-wrap { height: 238px; flex: none; }
   .flow-strip { padding: 6px 8px 8px; }
@@ -1112,20 +1140,25 @@ input { font: inherit; color: inherit; }
   .flow-cell { flex: 1 1 0; }
   .flow-cell b { font-size: 12px; }
   .flow-cell i { font-size: 10px; }
+  /* 五档与逐笔改成上下各占满一行。
+     两列并排时每块只有 ~186px：连续竞价里五档价格格要放「价格 + 2 个券商图标」，
+     放不下就折成两行（实测每行 38px），10 档 + 现价行 431px 被 330px 高的面板裁掉；
+     逐笔 6 列最小 224px 也放不下，价格列被压成 0 宽、价格与量叠在一起。 */
   .right-col {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 6px;
-    height: 330px;
+    height: auto;
   }
   .depth-panel { overflow: hidden; }
   .depth-table { font-size: 11px; table-layout: fixed; }
-  .depth-table td { padding: 3px 5px; }
-  .depth-table .lv { width: 20%; }
-  .depth-table .px { width: 34%; }
-  .depth-table .qty { width: 46%; font-size: 10.5px; padding-right: 10px; }
-  .mid-cell { padding: 5px 5px !important; }
+  .depth-table td { padding: 3px 8px; }
+  .depth-table .lv { width: 16%; }
+  .depth-table .px { width: 40%; white-space: nowrap; }
+  .depth-table .qty { width: 44%; font-size: 10.5px; padding-right: 10px; white-space: nowrap; }
+  .mid-cell { padding: 5px 8px !important; }
   #depthLast { font-size: 16px; }
+  .tape-panel { flex: none; height: 300px; }
   .tape-head, .tape-row { padding: 3px 8px; grid-template-columns: 56px minmax(0, 1fr) 46px 24px 44px 44px; font-size: 11px; }
 
   /* 下单面板 */

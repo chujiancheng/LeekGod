@@ -137,6 +137,9 @@ class DayCycle {
       phaseElapsedMs: st.elapsedMs,
       phaseLeftMs: Math.max(0, st.leftMs),
       phaseEndsAt: st.phaseEndsAt,
+      // 本交易日的开工时刻（开盘竞价开始）与收工时刻。分时图要按「天」切窗口
+      // （默认只看当天、另给连续 5 日），客户端没有阶段偏移表，切分锚点只能由服务端给
+      dayStartAt: st.dayStartAt,
       dayEndsAt: st.dayEndsAt,
       gameClockMs: st.gameClockMs,
       phaseGameMs: st.phase.gameMs || st.phase.ms,

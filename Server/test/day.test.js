@@ -145,12 +145,23 @@ console.log('\n[4] DayCycle：下发给客户端的 day 段');
   assert(s.phaseLeftMs === 25000 && s.phaseMs === 30000, `阶段倒计时 ${s.phaseLeftMs}/${s.phaseMs}`);
   assert(s.unlockLeftMs === 15000, `距撤单锁定还有 ${s.unlockLeftMs}ms`);
   assert(s.phaseEndsAt === 30000 && s.dayEndsAt === P.dayMs, '阶段/当日截止时刻正确');
+  // 分时图按「天」切窗口要用它：客户端没有阶段偏移表，算不出本日开工时刻
+  assert(s.dayStartAt === 0, `本交易日开工时刻随快照下发（${s.dayStartAt}）`);
 
   const s2 = dc.snapshot(25000);
   assert(s2.locked === true && s2.unlockLeftMs === 0, '进入锁定窗口后 unlockLeftMs 归零');
+  assert(s2.dayStartAt === 0 && s2.dayEndsAt === P.dayMs, '同一天内开工时刻不随阶段漂移');
 
   const s3 = dc.snapshot(P.lunch + 1000);
   assert(s3.trading === false && s3.auction === null && s3.unlockLeftMs === null, '午休段不可交易且无竞价字段');
+
+  // 跨天：开工时刻跟着往前挪一整个交易日
+  const d2 = dc.snapshot(P.dayMs + 5000);
+  assert(d2.day === 2 && d2.dayStartAt === P.dayMs && d2.dayEndsAt === P.dayMs * 2, `第 2 天的窗口跟着滚（${d2.dayStartAt}~${d2.dayEndsAt}）`);
+  assert(
+    (s3.dayEndsAt - s3.dayStartAt) === (d2.dayEndsAt - d2.dayStartAt),
+    '每天的长度一致（客户端按它往前推「5 日」窗口）'
+  );
 
   // 没配阶段时退化为「没有天」的旧行为，而不是拒绝一切下单
   const off = new DayCycle({ enabled: false, phases: [] }, 0);

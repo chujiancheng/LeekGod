@@ -42,6 +42,14 @@
   let newsFilter = 'all';
   // 图表模式：minute = 分时（tick 级走势），day = 日线（K 线）。选择记在本地，刷新后保持
   let chartMode = localStorage.getItem('gushen_chart') === 'day' ? 'day' : 'minute';
+  // 分时的取数窗口（只有分时模式用得上）：
+  //   day = 只看当天（默认；真实行情软件的分时口径，跨天不再连成一条）
+  //   5d  = 连续 5 个交易日
+  // 服务端的分时序列是**跨天连续**的一整条（保留 10300 点 ≈ 11.6 个交易日），
+  // 不加窗口的话昨天、前天的走势会一直连在左边，开盘价跳一次就看不明白了
+  const MINUTE_RANGE_KEY = 'gushen_minute_range';
+  const MINUTE_DAYS = 5; // 「5 日」窗口覆盖的交易日数（含当天）
+  let minuteRange = localStorage.getItem(MINUTE_RANGE_KEY) === '5d' ? '5d' : 'day';
   // 日线：每只标的**已收盘**的 K 线（/api/daily 按需拉）。当日那根要到收盘结算才定格，
   // 由客户端拿实时行情现拼，所以它每帧都在动、不需要额外推送
   const dayBars = new Map(); // stockId -> [{day, open, high, low, close, volume, turnover, net}]
@@ -373,9 +381,36 @@
     return lock;
   }
 
-  /** 某只股票的分时序列 */
+  /** 某只股票的**全量**分时序列（跨天连续，服务端保留最近约 2 小时） */
   function histOf(stockId) {
     return histories.get(stockId) || [];
+  }
+
+  /**
+   * 分时窗口的起始时刻：当日 = 今天开盘竞价开始；5 日 = 再往前 4 个交易日。
+   * 锚点 `dayStartAt` 由服务端下发（客户端没有阶段偏移表，自己算不出来）。
+   * 没有交易日时钟时返回 0 = 不过滤，行为与引入窗口之前逐位一致。
+   */
+  function minuteFrom() {
+    const d = dayInfo();
+    if (!d || !d.dayStartAt) return 0;
+    const dayMs = Math.max(1, Number(d.dayEndsAt || 0) - Number(d.dayStartAt));
+    return minuteRange === '5d' ? d.dayStartAt - (MINUTE_DAYS - 1) * dayMs : d.dayStartAt;
+  }
+
+  /** 分时图真正要画的点：按窗口裁掉更早的交易日（序列按时间升序，二分找起点） */
+  function minutePts(stockId) {
+    const all = histOf(stockId);
+    const from = minuteFrom();
+    if (!from || all.length < 2) return all;
+    let lo = 0;
+    let hi = all.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (all[mid].t < from) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo <= 0 ? all : all.slice(lo);
   }
 
   /** 切换交易终端看的股票 */
@@ -1428,29 +1463,56 @@
         b.classList.toggle('on', b.dataset.mode === chartMode);
       });
     }
+    // 「当日 / 5 日」只对分时有效，日线模式整块隐藏（K 线本来就是按天一根一根的）
+    const ranges = $('chartRanges');
+    if (ranges) {
+      ranges.hidden = chartMode !== 'minute';
+      ranges.querySelectorAll('.chart-mode').forEach((b) => {
+        b.classList.toggle('on', b.dataset.range === minuteRange);
+      });
+    }
     const m = curMarket() || {};
     const sub = $('chartSub');
     if (!sub) return;
     if (chartMode === 'day') {
       sub.textContent = m.isIndex ? '大盘指数日线 · 蜡烛 + 成交量 + MA5/MA10' : '日线 · 蜡烛 + 成交量 + MA5/MA10';
-    } else {
-      sub.textContent = m.isIndex ? '大盘指数分时 · 成分股按流通市值加权' : '均价与价格 · 成交量 · MACD(12,26,9)';
+      return;
     }
+    const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
+    sub.textContent = m.isIndex
+      ? `大盘指数分时 · ${scope} · 成分股按流通市值加权`
+      : `${scope}分时 · 均价与价格 · 成交量 · MACD(12,26,9)`;
+  }
+
+  /** 分时取数窗口：当日（默认）/ 连续 5 日。选择记在本地，刷新后保持 */
+  function setMinuteRange(range) {
+    const next = range === '5d' ? '5d' : 'day';
+    if (next === minuteRange) return;
+    minuteRange = next;
+    localStorage.setItem(MINUTE_RANGE_KEY, minuteRange);
+    renderChartMode();
+    drawChart();
   }
 
   function bindChartMode() {
     const wrap = $('chartModes');
-    if (!wrap) return;
-    wrap.querySelectorAll('.chart-mode').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const mode = btn.dataset.mode === 'day' ? 'day' : 'minute';
-        if (mode === chartMode) return;
-        chartMode = mode;
-        localStorage.setItem('gushen_chart', chartMode);
-        renderChartMode();
-        if (chartMode === 'day') loadDaily(activeStockId);
-        drawChart();
+    if (wrap) {
+      wrap.querySelectorAll('.chart-mode').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const mode = btn.dataset.mode === 'day' ? 'day' : 'minute';
+          if (mode === chartMode) return;
+          chartMode = mode;
+          localStorage.setItem('gushen_chart', chartMode);
+          renderChartMode();
+          if (chartMode === 'day') loadDaily(activeStockId);
+          drawChart();
+        });
       });
+    }
+    const ranges = $('chartRanges');
+    if (!ranges) return;
+    ranges.querySelectorAll('.chart-mode').forEach((btn) => {
+      btn.addEventListener('click', () => setMinuteRange(btn.dataset.range));
     });
   }
 
@@ -3994,15 +4056,20 @@
   }
 
   // 分时重绘时刷新缓存；十字光标只读缓存，避免每次 mousemove 全量算一遍。
-  // 缓存键带上 stockId：切股票后序列变了，必须重算
-  let macdCache = { stockId: '', n: -1, lastT: 0, arr: null };
+  // 缓存键带上 stockId 与取数窗口：切股票、切「当日/5日」后序列都变了，必须重算
+  let macdCache = { stockId: '', range: '', n: -1, lastT: 0, arr: null };
   function macdOf() {
     const m = curMarket();
     const stockId = m ? m.stockId : '';
-    const pts = histOf(stockId);
+    const pts = minutePts(stockId);
     const lastT = pts.length ? pts[pts.length - 1].t : 0;
-    if (macdCache.stockId !== stockId || macdCache.n !== pts.length || macdCache.lastT !== lastT) {
-      macdCache = { stockId, n: pts.length, lastT, arr: computeMacd(pts) };
+    if (
+      macdCache.stockId !== stockId ||
+      macdCache.range !== minuteRange ||
+      macdCache.n !== pts.length ||
+      macdCache.lastT !== lastT
+    ) {
+      macdCache = { stockId, range: minuteRange, n: pts.length, lastT, arr: computeMacd(pts) };
     }
     return macdCache.arr;
   }
@@ -4036,7 +4103,7 @@
     ctx.clearRect(0, 0, W, H);
     // 指数没有均价/MACD 之外的量，但走势结构与个股一致，同一套画法即可
     const prev = m.prevClose;
-    const pts = histOf(m.stockId);
+    const pts = minutePts(m.stockId);
     if (!pts.length) return;
 
     const PAD_R = 58;
@@ -4265,7 +4332,7 @@
         dayCrosshair(m, rect, mx, my);
         return;
       }
-      const pts = histOf(m.stockId);
+      const pts = minutePts(m.stockId);
       if (!pts.length) return;
       // 反解时间（与 drawMinuteChart 的 x 轴同一套域）
       const t0 = pts[0].t;
