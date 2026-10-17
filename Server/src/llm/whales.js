@@ -1,0 +1,530 @@
+/**
+ * 主力脑调度器（软脑 + 可见 AI 账户）。
+ * - config.npc.llm.whales 定义 4 个跨股主力：新建「AI·xxx」账户（多股票、只给现金）
+ * - 每游戏日在 triggerPhases 各异步决策一次
+ * - **4 个脑并发请求 → 合议成一份计划 → 只写回一次** 各股 NpcManager.llmPlan
+ * - 每个脑再按自己的 stance 给同名 AI 账户下限价单（量化护栏仍在 market.place）
+ * - 失败或超预算：静默跳过，其余 NPC 照旧规则
+ *
+ * 调用是 fire-and-forget：绝不在 Game.tick 同步 await 网络。
+ *
+ * 2026-10-17 修订（上一版有两个会让功能空转的问题）：
+ * ① `NpcManager.llmPlan` 是**单槽**，而旧实现让 4 个脑顺序 await 后各自写全部 10 只股票，
+ *    整轮结束只剩最后一个脑（游资快枪）的计划——"4 脑"实际等于"1 脑"，前面脑点名的
+ *    accumulate/distribute 还会被后面的中性全局偏置擦成 none。现在先 `mergePlans`
+ *    合成一份再写，立场按权重叠加、方向打架的股票直接不表态。
+ * ② 4 次调用并发（原来串行，最坏 4×8s=32s，收盘竞价只有 20s/最后 10s 锁单，订单基本
+ *    赶不上撮合）；报单用 `Date.now()`（原来把阶段起点的 now 一路传进 market.place，
+ *    canTrade/isHalted 判定的是过期时刻，可能往已休市的盘口塞单）。
+ */
+const config = require('../config');
+const { logger } = require('../logger');
+const { chat } = require('./client');
+const { parseWhaleDecision, intentAgrees, clampNum } = require('./schema');
+const { systemPrompt, userPrompt, stockLine } = require('./prompt');
+const { ACTIONS } = require('../market');
+const { Account } = require('../store');
+
+const mean = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+
+/**
+ * 多脑合议（纯函数，可单测）。
+ *
+ * 规则刻意写成"立场相加、全局只当潮水"：
+ * - 全局 bias = 各脑 bias 的均值，只以 `0.25×` 作用在**未被点名的股票**上；
+ * - 每只股票：`bias = 全局bias×0.25 + Σ(方向×权重)×0.30`，再夹进 clamp.bias。
+ *   两个脑同向 0.9 → 直接顶到上限；多空各 0.9 → 净 0，该股**不表态**（分歧不硬凑）；
+ * - aggro / intentChance 只从**同向**的脑里取（权重加权 / 取最大），中性脑不稀释力度。
+ *
+ * @param {Array<{whale:{id:string,label:string}, plan:object}>} entries
+ * @param {string[]} stockIds
+ * @param {object} clampCfg config.npc.llm.clamp
+ */
+function mergePlans(entries, stockIds, clampCfg) {
+  const c = clampCfg || {};
+  const biasMax = clampNum(c.bias, 0, 5, 0.45);
+  const chanceHi = Array.isArray(c.intentChance) ? c.intentChance[1] : 0.55;
+  const list = (entries || []).filter((e) => e && e.plan);
+
+  const globalBias = mean(list.map((e) => e.plan.bias));
+  const globalAggro = mean(list.map((e) => e.plan.aggro));
+
+  const byStock = new Map();
+  for (const { whale, plan } of list) {
+    for (const [id, sub] of Object.entries(plan.stocks || {})) {
+      if (!sub) continue;
+      const sign = sub.stance === 'bullish' ? 1 : sub.stance === 'bearish' ? -1 : 0;
+      if (!sign) continue;
+      // 个股没写意图时，才拿该脑的全局意图补偿，且必须和方向自洽
+      const intent =
+        sub.intent && sub.intent !== 'none' && intentAgrees(sub.stance, sub.intent)
+          ? sub.intent
+          : intentAgrees(sub.stance, plan.intent)
+            ? plan.intent
+            : 'none';
+      let arr = byStock.get(id);
+      if (!arr) byStock.set(id, (arr = []));
+      arr.push({
+        whaleId: whale.id,
+        sign,
+        weight: sub.weight,
+        intent,
+        aggro: plan.aggro,
+        chance: clampNum(plan.intentChance, 0, 1, 0.22),
+      });
+    }
+  }
+
+  const stocks = {};
+  for (const id of stockIds) {
+    const arr = byStock.get(id);
+    if (!arr || !arr.length) continue;
+    const net = arr.reduce((s, x) => s + x.sign * x.weight, 0);
+    // 多空互相抵消到没有净立场：宁可不表态，也不要随机挑一方
+    if (Math.abs(net) < 0.15) continue;
+    const stance = net > 0 ? 'bullish' : 'bearish';
+    const agree = arr.filter((x) => x.sign === (net > 0 ? 1 : -1));
+    const wsum = agree.reduce((s, x) => s + x.weight, 0) || 1;
+    const top = agree.reduce((a, b) => (b.weight > a.weight ? b : a));
+    const aggro = agree.reduce((s, x) => s + x.aggro * x.weight, 0) / wsum;
+    const chance = Math.min(
+      chanceHi,
+      Math.max(0.15 + 0.4 * top.weight, top.chance)
+    );
+    stocks[id] = {
+      stance,
+      weight: clampNum(top.weight, 0, 1, 0),
+      intent: top.intent,
+      intentChance: clampNum(chance, 0, 1, 0),
+      aggro: clampNum(aggro, 0.5, 1.6, 1),
+      bias: clampNum(globalBias * 0.25 + net * 0.3, -biasMax, biasMax, 0),
+      by: top.whaleId,
+    };
+  }
+
+  return {
+    bias: clampNum(globalBias, -biasMax, biasMax, 0),
+    aggro: clampNum(globalAggro, 0.5, 1.6, 1),
+    stocks,
+    notes: list.map((e) => ({ id: e.whale.id, label: e.whale.label, note: e.plan.note || '' })),
+  };
+}
+
+class WhaleManager {
+  /**
+   * @param {import('../game').Game} game
+   */
+  constructor(game) {
+    this.game = game;
+    this.cfg = config.npc.llm || null;
+    this.busy = false;
+    this.lastNote = new Map(); // whaleId -> string
+    this.lastPlanDay = new Map(); // whaleId -> day:phaseKey
+    this._callDay = null;
+    this._callCount = 0;
+    this._preTimer = null; // 收盘决策的提前排程（见 preTrigger）
+  }
+
+  get enabled() {
+    return !!(this.cfg && this.cfg.enabled && Array.isArray(this.cfg.whales) && this.cfg.whales.length);
+  }
+
+  /** 账号名：`AI·一号主力`（与 NPC 前缀不撞，可被玩家在股东榜看见） */
+  accountName(whale) {
+    const prefix = this.cfg.accountPrefix || 'AI·';
+    return `${prefix}${whale.label}`;
+  }
+
+  /**
+   * 确保 4 个 AI 主力账户存在（新开局发钱；续跑补标记不重复发钱）。
+   * 只给现金、不抽流通盘——它们像「带钱进场的新机构」，从盘口自己买。
+   * @param {{fresh?:boolean}} opts fresh=true 表示新开局；续跑时只补内存标记，
+   *   若存档里没有这些账户（例如老档在关着 LLM 时开的局）则按增量资金补建
+   */
+  ensureAccounts(opts = {}) {
+    const whales = this.cfg && Array.isArray(this.cfg.whales) ? this.cfg.whales : [];
+    const cash = Number.isFinite(this.cfg && this.cfg.cashEach) ? this.cfg.cashEach : 30000000;
+    const created = [];
+    for (const w of whales) {
+      const name = this.accountName(w);
+      let acc = this.game.store.get(name);
+      if (!acc) {
+        acc = new Account(name, true, 'whale');
+        acc.cash = cash;
+        acc.nick = w.label;
+        this.game.store.put(acc);
+        // store.put 不标脏：续跑时补建的账户若没赶上 300 tick 的全量扫描就被重启，
+        // 会带着这一轮赚到的持仓一起消失（下次又按满现金重建）。这里立刻标脏，
+        // 下一个 tick 的 commit 就落盘
+        this.game.persist?.touch(acc);
+        created.push(name);
+      }
+      acc.isNPC = true;
+      acc.role = 'whale';
+      acc.ai = true;
+      acc.aiId = w.id;
+      acc.aiLabel = w.label;
+      acc.nick = w.label;
+    }
+    if (created.length) {
+      logger.info(
+        `[LLM] ${opts.fresh ? '新开局已创建' : '续跑补建'} AI 主力账户：${created.join('、')}（各 ${cash} 元）`
+      );
+    }
+  }
+
+  /** 是否已对「某交易日 + 某阶段」决策过（防同阶段重复触发） */
+  _already(day, phaseKey, whaleId) {
+    const key = `${day}:${phaseKey}`;
+    return this.lastPlanDay.get(whaleId) === key;
+  }
+
+  _mark(day, phaseKey, whaleId) {
+    this.lastPlanDay.set(whaleId, `${day}:${phaseKey}`);
+  }
+
+  /** 本地自然日（不是 UTC：Math.floor(now/86400000) 会在北京时间 08:00 才翻篇） */
+  _dayKey(now) {
+    const d = new Date(now);
+    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+  }
+
+  _budgetOk(now) {
+    const b = this.cfg.budget || {};
+    const max = b.maxCallsPerDay != null ? b.maxCallsPerDay : 1200;
+    if (max <= 0) return true;
+    const dayKey = this._dayKey(now);
+    if (this._callDay !== dayKey) {
+      this._callDay = dayKey;
+      this._callCount = 0;
+    }
+    if (this._callCount >= max) return false;
+    this._callCount += 1;
+    return true;
+  }
+
+  /**
+   * 提前量：下午段剩余时间 - leadMs（毫秒）。缺 `leftMs` 或算不出正数时返回 null。
+   * 收盘竞价只有 20s（最后 10s 锁单），单次推理实测 ~8s，等竞价开始再决策根本赶不上撮合。
+   */
+  _preTriggerDelay(dayState, pre) {
+    if (!dayState || !Number.isFinite(dayState.leftMs)) return null;
+    const lead = Number.isFinite(pre && pre.leadMs) ? pre.leadMs : 20000;
+    return Math.max(500, dayState.leftMs - lead);
+  }
+
+  _clearPre() {
+    if (this._preTimer) {
+      clearTimeout(this._preTimer);
+      this._preTimer = null;
+    }
+  }
+
+  /**
+   * 阶段变化钩子：进入 triggerPhases 时异步开一轮决策；
+   * 另按 `preTrigger` 在指定阶段（默认 afternoon）结束前 leadMs 提前跑收盘那轮。
+   * @param {{day:number, phase:object, leftMs?:number}} dayState
+   * @param {number} now
+   */
+  onPhase(dayState, now) {
+    if (!this.enabled) return;
+    if (!dayState || !dayState.phase) return;
+    if (dayState.day < 1) return;
+    this._clearPre();
+    const phaseKey = dayState.phase.key;
+
+    if (Array.isArray(this.cfg.triggerPhases) && this.cfg.triggerPhases.includes(phaseKey)) {
+      this._kick(dayState, now, phaseKey);
+    }
+
+    const pre = this.cfg.preTrigger;
+    if (pre && pre.phase === phaseKey) {
+      const delay = this._preTriggerDelay(dayState, pre);
+      if (delay != null) {
+        const dedupeKey = pre.dedupeKey || 'closeAuction';
+        this._preTimer = setTimeout(() => {
+          this._preTimer = null;
+          this._kick(dayState, Date.now(), dedupeKey);
+        }, delay);
+        // 别让一个待触发的定时器把进程退出拖住
+        if (this._preTimer.unref) this._preTimer.unref();
+        logger.info(
+          `[LLM] 收盘决策提前 ${Math.round((dayState.leftMs - delay) / 1000)}s 排程（${dedupeKey}）`
+        );
+      }
+    }
+  }
+
+  /** 起一轮决策（busy 防重入）。dedupeKey 是「这轮算哪一阶段」——提前跑的那轮算收盘竞价 */
+  _kick(dayState, now, dedupeKey) {
+    if (this.busy) {
+      // 静默跳过会让"今天的收盘决策没了"完全无迹可循，至少留一行
+      logger.warn(`[LLM] 上一轮决策未结束，跳过 ${dayState.phase.label || dayState.phase.key}`);
+      return;
+    }
+    this.busy = true;
+    setImmediate(() => {
+      this._runRound(dayState, now, dedupeKey)
+        .catch((e) => logger.error('[LLM] 主力脑轮次异常:', e))
+        .finally(() => {
+          this.busy = false;
+        });
+    });
+  }
+
+  async _runRound(dayState, now, dedupeKey) {
+    const snapshot = this._snapshot(dayState);
+    const stockIds = snapshot.stocks.map((s) => s.id);
+    const clampCfg = Object.assign({}, this.cfg.clamp || {}, {
+      maxStocksPerDecision: this.cfg.maxStocksPerDecision,
+    });
+    const phaseKey = dedupeKey || dayState.phase.key;
+    const phaseLabel =
+      (dayState.phase.label || dayState.phase.key) +
+      (phaseKey !== dayState.phase.key ? `→${phaseKey}` : '');
+
+    // 先同步扣预算、再并发发请求：预算不足的脑直接不参与本轮
+    const pending = [];
+    for (const whale of this.cfg.whales) {
+      if (this._already(dayState.day, phaseKey, whale.id)) continue;
+      if (!this._budgetOk(now)) {
+        logger.warn('[LLM] 主力脑今日调用已达预算上限，跳过剩余决策');
+        break;
+      }
+      pending.push(this._decide(whale, snapshot, clampCfg));
+    }
+    if (!pending.length) return;
+
+    const t0 = Date.now();
+    const results = await Promise.all(pending);
+    const good = results.filter((r) => r && r.plan);
+
+    for (const r of results) {
+      if (!r) continue;
+      if (r.plan) {
+        logger.info(
+          `[LLM] ${r.whale.label} @${phaseLabel} bias=${r.plan.bias} ` +
+            `intent=${r.plan.intent} aggro=${r.plan.aggro} ` +
+            `stocks=${Object.keys(r.plan.stocks).join(',') || '-'} ` +
+            `tokens=${r.usage ? `${r.usage.prompt_tokens || 0}/${r.usage.completion_tokens || 0}` : '-'} ` +
+            `(${r.ms}ms)`
+        );
+      } else {
+        logger.warn(`[LLM] ${r.whale.label} 决策失败: ${r.error}`);
+      }
+    }
+    if (!good.length) {
+      logger.warn('[LLM] 本轮无可用决策，保持量化规则');
+      return;
+    }
+
+    const merged = mergePlans(good, stockIds, clampCfg);
+    this._apply(merged, good);
+    for (const r of good) {
+      this.lastNote.set(r.whale.id, r.plan.note || '');
+      this._mark(dayState.day, phaseKey, r.whale.id);
+    }
+    const picks = Object.entries(merged.stocks)
+      .map(([id, s]) => `${id}:${s.stance}(${s.weight.toFixed(2)},${s.bias.toFixed(2)})`)
+      .join(' ');
+    logger.info(
+      `[LLM] 四脑合议 @${phaseLabel} bias=${merged.bias} ` +
+        `aggro=${merged.aggro} ${picks || '无点名'} (${Date.now() - t0}ms)`
+    );
+
+    // 软计划写回之后再各自下单：账户层保留"每个脑按自己观点交易"的差异化
+    for (const { whale, plan } of good) this._executeWhaleOrders(plan, whale);
+  }
+
+  async _decide(whale, snapshot, clampCfg) {
+    const t0 = Date.now();
+    const res = await chat(this.cfg, {
+      system: systemPrompt(whale),
+      user: userPrompt(whale, snapshot, this.lastNote.get(whale.id), this._accountSnapshot(whale)),
+    });
+    if (!res.ok) return { whale, error: res.error, ms: Date.now() - t0 };
+    const parsed = parseWhaleDecision(res.text, snapshot.stocks, clampCfg);
+    if (!parsed.ok) return { whale, error: parsed.error, ms: Date.now() - t0, usage: res.usage };
+    return { whale, plan: parsed.plan, usage: res.usage, ms: Date.now() - t0 };
+  }
+
+  /** 该 AI 账户的现金/权益/持仓（模型要管钱，不能连自己有多少都不知道） */
+  _accountSnapshot(whale) {
+    const acc = this.game.store.get(this.accountName(whale));
+    if (!acc) return null;
+    const positions = [];
+    for (const stock of this.game.stocks) {
+      const long = acc.longQty(stock.id);
+      const short = acc.shortQty(stock.id);
+      if (long || short) positions.push({ id: stock.id, long, short });
+    }
+    return {
+      cash: Math.round(acc.cash),
+      frozen: Math.round(acc.orderFrozen || 0),
+      equity: Math.round(this.game.equityOf(acc)),
+      positions,
+    };
+  }
+
+  /** 把合议结果摊到各股 NpcManager（一份计划，不会互相覆盖） */
+  _apply(merged, entries) {
+    const g = this.game;
+    const biasScale = this.cfg.biasScale || {};
+    const clampTicks = Array.isArray(this.cfg.clamp && this.cfg.clamp.planTicks)
+      ? this.cfg.clamp.planTicks
+      : [80, 900];
+    const ticks = clampNum(
+      this.cfg.defaultPlanTicks,
+      clampTicks[0],
+      clampTicks[1],
+      480
+    );
+    const label = entries.map((e) => e.whale.label).join('/');
+    const note = merged.notes
+      .map((n) => (n.note ? `${n.label}:${n.note}` : ''))
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 160);
+    const ids = entries.map((e) => e.whale.id).join('+');
+
+    for (const stock of g.stocks) {
+      const npc = g.npcs.get(stock.id);
+      if (!npc) continue;
+      const sub = merged.stocks[stock.id];
+      // 未点名的股票只留很弱的全局潮水（0.25×），不参与意图与力度
+      const plan = {
+        bias: sub ? sub.bias : merged.bias * 0.25,
+        intent: sub ? sub.intent : 'none',
+        intentChance: sub ? sub.intentChance : 0,
+        aggro: sub ? sub.aggro : 1 + (merged.aggro - 1) * 0.2,
+        untilTick: npc.tickCount + ticks,
+        whale: ids,
+        label,
+        note: sub ? note : '',
+        scaleHot: biasScale.hot != null ? biasScale.hot : 0.55,
+      };
+      npc.applyLlmPlan(plan);
+    }
+  }
+
+  /**
+   * AI 主力账户执行：对点名股票按 stance 下一张限价单。
+   * 仍走 market.place（涨跌停/笼子/停牌/同股多空互斥全生效），不绕过风控。
+   * @param {object} plan 该脑自己的决策（不是合议后的）
+   */
+  _executeWhaleOrders(plan, whale) {
+    const g = this.game;
+    const acc = g.store.get(this.accountName(whale));
+    if (!acc) return;
+    // 必须用"此刻"：并发/重试后阶段可能已经翻篇，沿用阶段起点的 now 会让
+    // market.place 的 canTrade / isHalted 判定到过去，把单塞进已休市的盘口
+    const now = Date.now();
+    const ratio = this.cfg.orderCashRatio != null ? this.cfg.orderCashRatio : 0.12;
+    const maxOrders = clampNum(this.cfg.maxOrdersPerDecision, 0, 10, 2);
+    // 名额与资金都按 conviction 降序花，避免永远只动前两只票
+    const entries = Object.entries(plan.stocks || {}).sort((a, b) => b[1].weight - a[1].weight);
+    let placed = 0;
+    for (const [stockId, sub] of entries) {
+      if (placed >= maxOrders) break;
+      const market = g.markets.get(stockId);
+      const stock = g.stocksById.get(stockId);
+      if (!market || !stock) continue;
+      if (market.isHalted && market.isHalted(now)) continue;
+      const lot = stock.lotSize || 100;
+      const last = market.lastPrice;
+      if (!(last > 0)) continue;
+
+      if (sub.stance === 'bullish') {
+        // 有任何空头（含不足 1 手的零股尾仓）都先平掉：sideLock 会让零股尾仓
+        // 永远开不了多、而 <1 手的平空又常被"不足一手"的写法跳过，只能在这里收口
+        const shortQty = acc.shortQty(stockId);
+        if (shortQty > 0) {
+          const coverable = acc.coverableShort(stockId);
+          const qty = Math.min(coverable, lot * 50);
+          if (qty <= 0) continue;
+          const r = market.place(acc, {
+            action: ACTIONS.BUY_CLOSE,
+            qty,
+            price: market.clampPrice(last * 0.998),
+            now,
+            noCooldown: true,
+          });
+          if (r && r.ok) placed += 1;
+          continue;
+        }
+        if (acc.longQty(stockId) > 0) continue; // 已有同向持仓，决策周期内不加仓（防刷单）
+        const budget = Math.max(0, acc.cash - acc.orderFrozen) * ratio * (0.4 + 0.6 * sub.weight);
+        const qty = Math.floor(budget / last / lot) * lot;
+        if (qty < lot) continue;
+        const r = market.place(acc, {
+          action: ACTIONS.BUY_OPEN,
+          qty,
+          price: market.clampPrice(last * 0.998),
+          now,
+          noCooldown: true,
+        });
+        if (r && r.ok) placed += 1;
+        else if (r) logger.debug(`[LLM] ${whale.label} 买入 ${stockId} 被拒：${r.error}`);
+      } else if (sub.stance === 'bearish') {
+        const longQty = acc.longQty(stockId);
+        if (longQty > 0) {
+          const free = acc.freeSellableLong(stockId, now);
+          let qty = Math.floor(Math.min(free, longQty * 0.4) / lot) * lot;
+          // 零股尾仓出清：按整手算会变成 0，永远卡在 sideLock 里
+          if (qty < lot) qty = Math.min(free, longQty);
+          if (qty <= 0) continue;
+          const r = market.place(acc, {
+            action: ACTIONS.SELL_CLOSE,
+            qty,
+            price: market.clampPrice(last * 1.002),
+            now,
+            noCooldown: true,
+          });
+          if (r && r.ok) placed += 1;
+          else if (r) logger.debug(`[LLM] ${whale.label} 卖出平多 ${stockId} 被拒：${r.error}`);
+          continue;
+        }
+        if (acc.shortQty(stockId) > 0) continue;
+        // 开空：需要券源；量按权益一小份
+        const equity = Math.max(0, acc.equity((sid) => g.priceOf(sid)));
+        const mv = equity * 0.15 * (0.4 + 0.6 * sub.weight);
+        const qty = Math.floor(mv / last / lot) * lot;
+        if (qty < lot) continue;
+        const r = market.place(acc, {
+          action: ACTIONS.SELL_OPEN,
+          qty,
+          price: market.clampPrice(last * 1.002),
+          now,
+          noCooldown: true,
+        });
+        if (r && r.ok) placed += 1;
+        else if (r) logger.debug(`[LLM] ${whale.label} 卖出开空 ${stockId} 被拒：${r.error}`);
+      }
+    }
+    if (placed) logger.info(`[LLM] ${whale.label} 本轮挂单 ${placed} 张`);
+  }
+
+  _snapshot(dayState) {
+    const g = this.game;
+    const stocks = [];
+    for (const stock of g.stocks) {
+      const market = g.markets.get(stock.id);
+      const npc = g.npcs.get(stock.id);
+      if (!market || !npc) continue;
+      stocks.push(stockLine({ stock, market, npc }));
+    }
+    const index = g.index && Number.isFinite(g.index.lastPrice) ? { last: g.index.lastPrice } : null;
+    const { formatGameClock } = require('../daycycle');
+    const clock =
+      dayState && dayState.gameClockMs != null ? formatGameClock(dayState.gameClockMs) : '';
+    return {
+      day: dayState ? dayState.day : 0,
+      phaseKey: dayState && dayState.phase ? dayState.phase.key : '',
+      clock,
+      stocks,
+      index,
+    };
+  }
+}
+
+module.exports = { WhaleManager, mergePlans };

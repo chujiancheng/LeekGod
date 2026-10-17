@@ -11,7 +11,11 @@ class Account {
     this.name = name; // 账号：登录凭据（唯一、不可改），也是存档里各表的 account 键
     this.nick = null; // 昵称：展示名，开户时填、之后可改。null = 还没开完户
     this.isNPC = isNPC;
-    this.role = role || (isNPC ? 'npc' : 'player'); // inst / hot / big / mid / small / player
+    this.role = role || (isNPC ? 'npc' : 'player'); // inst / hot / big / mid / small / whale / player
+    // AI 主力（大模型驱动的跨股机构）：isNPC + role=whale；标记只在内存派生，不落库
+    this.ai = false;
+    this.aiId = null;
+    this.aiLabel = null;
     this.cash = config.account.initialCash;
     this.orderFrozen = 0; // 挂单冻结（买入资金 / 开空保证金预估 / 费用预估），跨股票汇总
     this.shortMargin = 0; // 已成交开空的真实保证金合计（跨股票）

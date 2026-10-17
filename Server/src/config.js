@@ -1,7 +1,36 @@
 /**
  * 全局配置（均可按需调整）
  */
-module.exports = {
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * 本机 LLM 密钥/覆盖（不入库）：`Server/data/llm.local.json`（data/ 已在 .gitignore）。
+ * 环境变量优先于该文件；该文件只允许覆盖 config.npc.llm 的白名单字段。
+ */
+function applyLocalLlmFile(llm) {
+  const p =
+    process.env.NPC_LLM_CONFIG || path.join(__dirname, '..', 'data', 'llm.local.json');
+  try {
+    if (!fs.existsSync(p)) return;
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!j || typeof j !== 'object') return;
+    if (typeof j.enabled === 'boolean') llm.enabled = j.enabled;
+    if (typeof j.baseUrl === 'string' && j.baseUrl) llm.baseUrl = j.baseUrl;
+    if (typeof j.model === 'string' && j.model) llm.model = j.model;
+    if (typeof j.apiKey === 'string' && j.apiKey) llm.apiKey = j.apiKey;
+    if (typeof j.apiKeyEnv === 'string' && j.apiKeyEnv) llm.apiKeyEnv = j.apiKeyEnv;
+    if (Number.isFinite(j.maxCallsPerDay)) {
+      llm.budget = llm.budget || {};
+      llm.budget.maxCallsPerDay = j.maxCallsPerDay;
+    }
+    if (Number.isFinite(j.cashEach)) llm.cashEach = j.cashEach;
+  } catch {
+    // 配置层不能依赖 logger（会成环）；坏文件静默忽略，走 env / 默认值
+  }
+}
+
+const config = {
   // 服务端口（server.py 会读取环境变量 PORT 展示，这里保持一致）
   port: parseInt(process.env.PORT || '3000', 10),
 
@@ -440,6 +469,90 @@ module.exports = {
         exitBelowLevel: 0.05, // 大级别掉回接近发行价即收工
         maxGain: 0.5, // 跟着上趋势走，但相对触发价再涨 50% 就撤（不做无限抬轿）
         capLevel: 1.2, // 重心翻倍以上也不抬了
+      },
+    },
+    // 大模型主力脑（软脑）：4 个跨股「集团大脑」，每游戏日只决策 2 次
+    // （开盘集合竞价起 / 收盘集合竞价起），其余报价与吃单仍走上面的量化规则。
+    // 4 个脑**并发**请求后合议成一份计划写回 NpcManager.llmPlan（情绪偏置 / 意图提示 /
+    // 吃单力度乘子）；同名 AI 账户另按各自的 stance 挂限价单。
+    // enabled=false 时全链路关闭，与旧行为逐位等价。
+    llm: {
+      enabled: process.env.NPC_LLM === '1',
+      // 只实现了 OpenAI Chat Completions 兼容协议（小米 MiMo 等）；其他 provider 会被
+      // client.js 直接判为不支持并跳过，不会瞎发请求
+      provider: process.env.NPC_LLM_PROVIDER || 'openai',
+      baseUrl: process.env.NPC_LLM_BASE_URL || 'https://api.openai.com/v1',
+      apiKeyEnv: process.env.NPC_LLM_KEY_ENV || 'NPC_LLM_KEY',
+      model: process.env.NPC_LLM_MODEL || 'mimo-v2.6-flash',
+      // 决策要的是稳定而不是文采，0.7 会让同一张盘面来回翻立场
+      temperature: 0.6,
+      // 实测 mimo-v2.6-flash 单次决策约 8s（含 reasoning tokens），8s 会频繁踩超时
+      timeoutMs: 12000,
+      // 瞬时故障（429/5xx/超时）重试次数，0 = 不重试
+      retry: 1,
+      // 单次输入字符上限：超了**丢弃本轮**（不发请求），防 snapshot 变大后静默烧 token
+      maxInputChars: 12000,
+      maxOutputTokens: 800,
+      // 每日真实调用熔断（按**本地自然日**滚动）。
+      // 一游戏日 620s、2 轮 × 4 脑 = 8 次 → 24h 挂机约 1116 次，这里留出重试余量取 1200；
+      // 旧值 200 会在跑满约 4.3 小时后熔断、之后一整天不再决策
+      budget: {
+        maxCallsPerDay: 1200,
+      },
+      // 写回夹紧：模型说什么都先夹进安全区间，避免一次误判掀翻盘口
+      clamp: {
+        bias: 0.45,
+        aggro: [0.55, 1.45],
+        intentChance: [0, 0.55],
+        planTicks: [80, 900],
+      },
+      whales: [
+        {
+          id: 'whale_a',
+          label: '一号主力',
+          style: '中长线多头，偏重仓低估值与趋势确认后的吸筹',
+          side: 'bull',
+        },
+        {
+          id: 'whale_b',
+          label: '空头猎手',
+          style: '偏空、找高估值与弱势股做派发或参与挤兑',
+          side: 'bear',
+        },
+        {
+          id: 'whale_c',
+          label: '做市老庄',
+          style: '中性双边，稳盘口，重活跃度而非单边方向',
+          side: 'neutral',
+        },
+        {
+          id: 'whale_d',
+          label: '游资快枪',
+          style: '跟强动量、短平快，只在明显强势股上加大力度',
+          side: 'momentum',
+        },
+      ],
+      // 账号名前缀 + 每个 AI 主力的初始现金（新开局时建 4 个多股票账户，只给现金不抽流通盘）
+      accountPrefix: 'AI·',
+      cashEach: 30000000, // 3000 万 / 脑；4 脑合计 1.2 亿做市外增量资金
+      // 每次决策最多动用现金比例（单股），避免一次把盘口打穿
+      orderCashRatio: 0.12,
+      // 每次决策最多对多少只股票下非 neutral 策略（其余保持规则盘）；按 weight 取前 N
+      maxStocksPerDecision: 5,
+      // 每个脑每次决策最多挂几张单（防一轮砸穿多只股票）
+      maxOrdersPerDecision: 2,
+      // 触发阶段 key：开盘竞价 / 收盘竞价 各一次 → 每游戏日 2 次
+      triggerPhases: ['auction', 'closeAuction'],
+      // 收盘竞价只有 20s、最后 10s 锁单，而单次推理约 8s：等竞价开始再决策，订单赶不上
+      // 收盘撮合。这里在 afternoon 段结束前 leadMs 提前跑「收盘那轮」，去重键记 closeAuction，
+      // 真正进入 closeAuction 时不会重复调用（若提前排程没跑成，阶段触发仍是兜底）。
+      preTrigger: { phase: 'afternoon', leadMs: 20000, dedupeKey: 'closeAuction' },
+      // 计划存活 tick 数：交易日约 886 tick，480 ≈ 336s（覆盖到午后），
+      // 写回时再夹进 clamp.planTicks；旧值 200 只覆盖 26% 的交易日
+      defaultPlanTicks: 480,
+      // 聪明钱情绪偏置增益（机构 1、游资打折）；被动类型不受 llmPlan 影响
+      biasScale: {
+        hot: 0.55,
       },
     },
     // 被动持有者（大户/中户/散户）的浮盈亏行为：割肉与获利了结。
@@ -1081,4 +1194,10 @@ module.exports = {
     },
   },
 };
+
+applyLocalLlmFile(config.npc.llm);
+// 环境变量最终覆盖：NPC_LLM=1 强制开、=0 强制关（测试与临时关服用）
+if (process.env.NPC_LLM === '1') config.npc.llm.enabled = true;
+else if (process.env.NPC_LLM === '0') config.npc.llm.enabled = false;
+module.exports = config;
 

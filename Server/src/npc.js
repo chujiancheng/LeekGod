@@ -97,6 +97,8 @@ class NpcManager {
     // 与 fairValue/fund/regime 一样不落盘——重启后重新观察盘面再决定
     this.intent = { mode: 'none', left: 0, age: 0, lure: 0, ref: 0, shortRef: 0, power: 1 };
     this.intentCool = { squeeze: 0, accumulate: 0, distribute: 0 };
+    // 大模型主力脑写回的慢变量（软脑）。null = 未启用或已过期，行为与旧版等价
+    this.llmPlan = null;
     // 交易日阶段快照（Game.tick 每 tick 下发；未接时钟时为 null = 旧行为）。
     // 只影响交易行为（吃单率/单笔量/重报价/点差/竞价报价缓冲），不碰公允价值
     this.session = null;
@@ -154,6 +156,26 @@ class NpcManager {
   /** 本 tick 的阶段活跃度（1 = 与"没有天"的旧行为等价） */
   activity() {
     return this.session ? phaseActivity(this.session) : 1;
+  }
+
+  /**
+   * 应用大模型主力脑的策略慢变量（见 config.npc.llm）。
+   * 只影响聪明钱的情绪偏置、意图启动概率与吃单力度，不直接下单、不碰公允价值。
+   * @param {{bias:number, intent:string, intentChance:number, aggro:number, untilTick:number, label?:string, note?:string, scaleHot?:number}|null} plan
+   */
+  applyLlmPlan(plan) {
+    this.llmPlan = plan || null;
+  }
+
+  /** 当前仍有效的 llm 计划（过期自动清掉） */
+  liveLlmPlan() {
+    const p = this.llmPlan;
+    if (!p) return null;
+    if (Number.isFinite(p.untilTick) && this.tickCount > p.untilTick) {
+      this.llmPlan = null;
+      return null;
+    }
+    return p;
   }
 
   /**
@@ -347,8 +369,13 @@ class NpcManager {
       // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate。
       // 再乘日内节奏：开盘/尾盘段吃单更密、午间更稀
       const p = this.profileOf(n);
+      const plan = this.liveLlmPlan();
+      const llmAggro = plan && p.canShort ? plan.aggro || 1 : 1;
       const rate =
-        p.aggressiveRate * (p.polarOrderScale ? 1 + this.polar * 0.8 : 1) * this._mul.aggro;
+        p.aggressiveRate *
+        (p.polarOrderScale ? 1 + this.polar * 0.8 : 1) *
+        this._mul.aggro *
+        llmAggro;
       if (Math.random() < rate) this.tryAggressive(n, now);
     }
     // 本阶段已经完整走过一轮报价：此后买盘侧还是空的，就是真的空档（见 recycleLiquidity）
@@ -573,6 +600,14 @@ class NpcManager {
       return;
     }
     if (!cfg || !cfg.enabled || this.tickCount < cfg.warmupTicks) return;
+    // 主力脑意图提示：仅提高「启动某种已存在意图」的概率，不发明新战术、
+    // 不绕过 duration/cooldown/entry 门槛——最终仍经 beginIntent 的合法检查
+    const plan = this.liveLlmPlan();
+    if (plan && plan.intent && plan.intent !== 'none' && plan.intentChance > 0) {
+      if (this.intentCool[plan.intent] <= 0 && Math.random() < plan.intentChance) {
+        this.beginIntent(plan.intent);
+      }
+    }
     const cand = this.pickIntent();
     if (cand && Math.random() < cand.p) this.beginIntent(cand.mode);
   }
@@ -867,6 +902,15 @@ class NpcManager {
 
     // 战术意图（跨 tick 的计划）——放在最末，意图的意志压过当 tick 的噪声
     s += this.intentBias(n);
+
+    // 大模型主力脑：只倾斜聪明钱（机构/游资），被动持有者不跟主力叙事
+    if (p.canShort) {
+      const plan = this.liveLlmPlan();
+      if (plan && plan.bias) {
+        const scale = n.type === 'hot' ? plan.scaleHot != null ? plan.scaleHot : 0.55 : 1;
+        s += plan.bias * scale;
+      }
+    }
 
     n.ownBias += gauss() * 0.06;
     n.ownBias *= 0.95; // 缓慢回归

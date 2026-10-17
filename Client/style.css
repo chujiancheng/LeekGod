@@ -900,6 +900,7 @@ input { font: inherit; color: inherit; }
 .grid-table .tag.role-mid { color: var(--muted); border-color: color-mix(in srgb, var(--muted) 35%, transparent); }
 .grid-table .tag.role-retail { color: var(--muted); }
 .grid-table .tag.role-player { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, transparent); }
+.grid-table .tag.role-whale { color: #5eead4; border-color: rgba(94, 234, 212, 0.5); }
 .grid-table tr.row-mine td { background: color-mix(in srgb, var(--blue) 12%, transparent); }
 
 /* ---------- 股东 tab ---------- */

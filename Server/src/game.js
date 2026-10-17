@@ -15,6 +15,7 @@ const { DayCycle } = require('./daycycle');
 const flow = require('./flow');
 const broker = require('./broker');
 const milestones = require('./milestones');
+const { WhaleManager } = require('./llm/whales');
 
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
@@ -84,6 +85,8 @@ class Game {
     this.index.dayCycle = this.day;
 
     this.auto = new AutoManager(this.markets, this.stocksById, this.store);
+    // 大模型主力脑（config.npc.llm.enabled 时才真正调 API；默认关闭）
+    this.whales = new WhaleManager(this);
     this.persist = opts.persist || null;
     this.auto.journal = this.persist;
     this.timer = null;
@@ -157,6 +160,8 @@ class Game {
     if (resumed) this.catchUpDay(Date.now());
     // NPC 首轮报价（续跑时报价单不入存档，靠这一步把双边盘口重新挂上）
     for (const npc of this.npcs.values()) npc.step(Date.now());
+    // AI 主力账户：新开局发初始资金；续跑只补内存标记（现金/持仓来自存档）
+    this.whales.ensureAccounts({ fresh: !resumed });
     this.refreshStats();
     // 新开局的基线立即落盘：初始持仓、分时起点与行情断点，第一秒内被杀也能续跑
     if (!resumed && this.persist) {
@@ -567,6 +572,12 @@ class Game {
     if (!prev) {
       logger.info(`[我是股神] 交易时钟就位：第 ${next.day} 个交易日 · ${next.phase.label}`);
       return;
+    }
+    // 大模型主力脑：开盘/收盘竞价起各决策一次（异步，不阻塞本帧撮合）
+    try {
+      this.whales.onPhase(next, now);
+    } catch (e) {
+      logger.error('[LLM] onPhase 钩子异常:', e);
     }
     if (prev.phase.auction) {
       const kind = prev.phase.auction === 'open' ? '开盘' : '收盘';
@@ -1812,7 +1823,9 @@ class Game {
       rows.push({
         account: acc.name, // 快照与"我"的判定都按账号走，昵称改名不影响
         name: Game.displayName(acc),
-        role, // inst / hot / big / mid / small / player
+        role, // inst / hot / big / mid / small / whale / player
+        ai: !!acc.ai,
+        aiLabel: acc.aiLabel || null,
         qty,
         pct: r2((qty / total) * 100),
         change: qty - base,
@@ -1912,6 +1925,8 @@ class Game {
           account: h.account,
           name: h.name,
           role: h.role,
+          ai: !!h.ai,
+          aiLabel: h.aiLabel || null,
           qty: h.qty,
           pct: h.pct,
           change: h.change,

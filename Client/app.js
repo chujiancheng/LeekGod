@@ -2198,6 +2198,7 @@
     retail: '散户',
     player: '玩家',
     npc: '投资者',
+    whale: 'AI主力',
   };
   const ROLE_CLS = {
     inst: 'role-inst',
@@ -2207,6 +2208,7 @@
     small: 'role-retail',
     retail: 'role-retail',
     player: 'role-player',
+    whale: 'role-whale',
   };
   const HOLDER_ACTION_LABEL = {
     login: '登录',
@@ -2263,7 +2265,7 @@
           return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.account)}" data-nick="${esc(h.name)}">
             <td>${i + 1}</td>
             <td>${esc(h.name)}${mine ? '（我）' : ''}</td>
-            <td><span class="tag ${roleCls}">${esc(ROLE_LABEL[h.role] || h.role)}</span></td>
+            <td><span class="tag ${roleCls}">${esc(ROLE_LABEL[h.role] || h.role)}${h.ai ? ' · AI' : ''}</span></td>
             <td>${fmtQty(h.qty)}</td>
             <td>${h.pct.toFixed(2)}%</td>
             <td class="delta-cell">${openCell}</td>
