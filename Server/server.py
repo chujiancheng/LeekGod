@@ -1,6 +1,6 @@
 """
 游戏服务器管理脚本
-用法: python server.py [start|stop|restart|status|halt|resume]
+用法: python server.py [start|stop|restart|status|halt|resume|whales]
 
 halt / resume 通过服务端的运维接口实现（口令见 data/admin.token），
 需要服务正在运行；端口口径与 node 一致，都取环境变量 PORT，默认 3000。
@@ -250,9 +250,74 @@ def resume():
     admin_post("/api/admin/resume", {})
 
 
+def whales():
+    """打印 AI 主力完整持仓（仅运维口令；不会出现在任何玩家接口里）"""
+    try:
+        with open(ADMIN_TOKEN_FILE, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+    except OSError:
+        token = ""
+    if not token:
+        print(f"读不到运维口令: {ADMIN_TOKEN_FILE}")
+        return
+    port = os.environ.get("PORT", "3000")
+    req = urlrequest.Request(
+        f"http://127.0.0.1:{port}/api/admin/whales",
+        headers={"X-Admin-Token": token},
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urlerror.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            data = {}
+        print(f"查询被拒绝: {data.get('error', e.reason)}")
+        return
+    except Exception as e:
+        print(f"调用失败: {e}")
+        print("服务没在运行？先 python server.py status")
+        return
+
+    print(
+        f"AI 主力组合 | 第 {data.get('day')} 交易日 · {data.get('phaseLabel')} | "
+        f"LLM={'开' if data.get('llmEnabled') else '关'}"
+    )
+    print("-" * 72)
+    for w in data.get("whales", []):
+        print(
+            f"[{w['label']}] {w['account']}  "
+            f"权益 {w['equity']:,.2f}  现金 {w['cash']:,.2f}  "
+            f"已实现 {w['realizedPnL']:,.2f}  风险度 {w['marginUsage']:.2%}"
+        )
+        if not w["positions"]:
+            print("  持仓: （空仓）")
+        for p in w["positions"]:
+            sides = []
+            if p["longQty"]:
+                sides.append(f"多 {p['longQty']}股 成本{p['longCost']} 盈亏{p['longPnl']}")
+            if p["shortQty"]:
+                sides.append(f"空 {p['shortQty']}股 成本{p['shortCost']} 盈亏{p['shortPnl']}")
+            print(f"  {p['stockName']}({p['stockId']}) 现价{p['last']}: " + " | ".join(sides))
+        if w["orders"]:
+            print(f"  在途委托 {len(w['orders'])} 笔:")
+            for o in w["orders"]:
+                print(
+                    f"    {o['stockName']} {o['action']} {o['qty']}@{o['price']} "
+                    f"({o['status']} 成交{o['filled']})"
+                )
+        if w["recentTrades"]:
+            print(f"  最近成交 {len(w['recentTrades'])} 笔:")
+            for t in w["recentTrades"][:5]:
+                print(f"    {t['stockName']} {t['action']} {t['qty']}@{t['price']}")
+        print()
+
+
 def main():
     if len(sys.argv) < 2:
-        print("用法: python server.py [start|stop|restart|status|halt|resume]")
+        print("用法: python server.py [start|stop|restart|status|halt|resume|whales]")
         return
 
     cmd = sys.argv[1].lower()
@@ -263,13 +328,14 @@ def main():
         "status": status,
         "halt": halt,
         "resume": resume,
+        "whales": whales,
     }
 
     if cmd in actions:
         actions[cmd]()
     else:
         print(f"未知命令: {cmd}")
-        print("可用命令: start, stop, restart, status, halt, resume")
+        print("可用命令: start, stop, restart, status, halt, resume, whales")
 
 
 if __name__ == "__main__":

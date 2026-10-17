@@ -463,6 +463,15 @@ function createServer(game) {
         return json(res, r.ok ? 200 : 400, r);
       }
 
+      // ---- 运维：AI 主力持仓组合（口令同停牌；玩家接口一律不下发）----
+      if (p === '/api/admin/whales' && req.method === 'GET') {
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[LLM] 运维持仓接口口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        return json(res, 200, game.whalePortfolio());
+      }
+
       // ---- 运维：停牌 / 复牌（口令见 config.admin.tokenFile）----
       if (p === '/api/admin/halt' || p === '/api/admin/resume') {
         if (req.method !== 'POST') return json(res, 405, { ok: false, error: '仅支持 POST' });

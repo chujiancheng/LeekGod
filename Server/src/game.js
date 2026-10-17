@@ -1798,6 +1798,95 @@ class Game {
     return this._brokerBoard || [];
   }
 
+  /**
+   * AI 主力完整持仓组合（**仅运维接口**）：现金 / 权益 / 多空明细 / 挂单 / 最近决策。
+   * 绝不进 stateFor 或任何玩家 API——玩家只能在股东榜看到「谁持了多少股」这类公开盘面信息。
+   */
+  whalePortfolio() {
+    const priceOf = (s) => this.priceOf(s);
+    const day = this.day.ok ? this.day.locate(Date.now()) : null;
+    const whales = [];
+    for (const acc of this.store.all()) {
+      if (!acc.ai && acc.role !== 'whale') continue;
+      const positions = [];
+      const stockIds = new Set([...acc.longs.keys(), ...acc.shorts.keys()]);
+      for (const stockId of stockIds) {
+        if (!this.markets.has(stockId)) continue;
+        const stock = this.stocksById.get(stockId);
+        const longQty = acc.longQty(stockId);
+        const shortQty = acc.shortQty(stockId);
+        if (longQty <= 0 && shortQty <= 0) continue;
+        const last = this.priceOf(stockId);
+        const long = this.serializePosition(acc, stock, Date.now(), this.brokerOf(acc));
+        const shortP = long && long.short ? long.short : null;
+        const longP = long && long.long ? long.long : null;
+        positions.push({
+          stockId,
+          stockName: stock.name,
+          last: r2(last),
+          longQty,
+          shortQty,
+          longValue: r2(longQty * last),
+          shortValue: r2(shortQty * last),
+          longCost: longP ? longP.cost : null,
+          shortCost: shortP ? shortP.cost : null,
+          longPnl: longP ? longP.pnl : 0,
+          shortPnl: shortP ? shortP.pnl : 0,
+        });
+      }
+      positions.sort((a, b) => b.longValue + b.shortValue - (a.longValue + a.shortValue));
+      const orders = [];
+      for (const o of acc.orders.values()) {
+        orders.push({
+          id: o.id,
+          stockId: o.stockId,
+          stockName: this.stocksById.get(o.stockId)?.name || o.stockId,
+          action: o.action,
+          price: o.price,
+          qty: o.qty,
+          filled: o.filled || 0,
+          status: o.status,
+          t: o.t,
+        });
+      }
+      const trades = acc.tradeHistory.slice(0, 10).map((t) => ({
+        stockId: t.stockId,
+        stockName: this.stocksById.get(t.stockId)?.name || t.stockId,
+        action: t.action,
+        price: t.price,
+        qty: t.qty,
+        side: t.side,
+        t: t.t,
+      }));
+      const equity = r2(acc.equity(priceOf));
+      whales.push({
+        account: acc.name,
+        label: acc.aiLabel || Game.displayName(acc),
+        aiId: acc.aiId || null,
+        cash: r2(acc.cash),
+        orderFrozen: r2(acc.orderFrozen),
+        equity,
+        realizedPnL: r2(acc.realizedPnL),
+        marginUsage: this.marginUsageOf(acc, equity),
+        longValue: r2(acc.totalLongValue(priceOf)),
+        shortValue: r2(acc.totalShortMV(priceOf)),
+        positions,
+        orders,
+        recentTrades: trades,
+      });
+    }
+    whales.sort((a, b) => b.equity - a.equity);
+    return {
+      ok: true,
+      t: Date.now(),
+      day: day ? day.day : null,
+      phase: day ? day.phase.key : null,
+      phaseLabel: day ? day.phase.label : null,
+      llmEnabled: !!(config.npc.llm && config.npc.llm.enabled),
+      whales,
+    };
+  }
+
   /** 某只股票的前十大股东（走 tick 缓存） */
   topHolders(stockId) {
     if (!this._stats) this.refreshStats();
