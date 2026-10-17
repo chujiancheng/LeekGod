@@ -20,5 +20,9 @@ Server/data/
 # 本地输出产物（截图/生成物，不入库）
 output/
 
+# 设计稿画布（AI 出图的迭代底稿 + 素材副本，正式立绘已进 Client/img，不入库）
+*.miora
+*_assets/
+
 # 智能体工作目录（记忆 + 临时产物，不入库）
 .workbuddy/

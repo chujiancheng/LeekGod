@@ -82,9 +82,9 @@
     // 供选择卡（56px）与彩蛋横幅头像（44px）用——原图 1024/1~2MB，别在这两处引用
     { id: 'sakura',  name: '和服猫耳少女', img: '/img/mascot-sakura-256.png', thumb: '/img/mascot-sakura-96.png', desc: '樱色原配' },
     { id: 'magic',   name: '魔法少女', img: '/img/mascot-magic-256.png', thumb: '/img/mascot-magic-96.png', desc: '夜空原配' },
-    { id: 'maodiao', name: '耄耋猫', img: '/img/mascot-maodiao-256.png', thumb: '/img/mascot-maodiao-96.png', desc: '亏麻了，面无表情' },
+    { id: 'maodiao', name: '耄耋猫', img: '/img/mascot-maodiao-256.png', thumb: '/img/mascot-maodiao-96.png', desc: '亏麻了，也要招财' },
     { id: 'orange',  name: '丑橘猫', img: '/img/mascot-orange-256.png', thumb: '/img/mascot-orange-96.png', desc: '涨了！傻乐' },
-    { id: 'doro',    name: '小恶魔朵洛', img: '/img/mascot-doro-256.png', thumb: '/img/mascot-doro-96.png', desc: 'Doro 味原创同人' },
+    { id: 'doro',    name: '小恶魔朵洛', img: '/img/mascot-doro-256.png', thumb: '/img/mascot-doro-96.png', desc: '举爪招涨' },
     { id: 'duck',    name: '咕咕嘎嘎', img: '/img/mascot-duck-256.png', thumb: '/img/mascot-duck-96.png', desc: 'duck 不服' },
     { id: 'knight',  name: '刀盾骑士', img: '/img/mascot-knight-256.png', thumb: '/img/mascot-knight-96.png', desc: '我的刀！我的盾！' },
   ];
