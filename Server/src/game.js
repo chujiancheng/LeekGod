@@ -1799,7 +1799,24 @@ class Game {
   }
 
   /**
-   * AI 主力完整持仓组合（**仅运维接口**）：现金 / 权益 / 多空明细 / 挂单 / 最近决策。
+   * AI 主力完整持仓组合。
+   * 玩家侧仅白名单账号可见（当前写死 `chu`）；运维另走 `/api/admin/whales`。
+   * 绝不进 stateFor——普通玩家只能在股东榜看到公开持股数量。
+   */
+  static whaleViewerAccounts() {
+    // 写死白名单：只有这些账号能开 /whales 页与 /api/whales
+    return ['chu'];
+  }
+
+  /** 该玩家令牌是否允许看 AI 主力详情 */
+  canViewWhales(token) {
+    const acc = this.accountFor(token);
+    if (!acc) return false;
+    return Game.whaleViewerAccounts().includes(acc.name);
+  }
+
+  /**
+   * AI 主力完整持仓组合（详情：现金 / 权益 / 多空明细 / 挂单）。
    * 绝不进 stateFor 或任何玩家 API——玩家只能在股东榜看到「谁持了多少股」这类公开盘面信息。
    */
   whalePortfolio() {

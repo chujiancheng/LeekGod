@@ -19,6 +19,10 @@ const STATIC_FILES = {
   '/app.js': { file: 'app.js', type: 'application/javascript; charset=utf-8' },
   '/style.css': { file: 'style.css', type: 'text/css; charset=utf-8' },
   '/lore.js': { file: 'lore.js', type: 'application/javascript; charset=utf-8' },
+  // AI 主力观测页：仅白名单账号（写死 chu）能拉 /api/whales
+  '/whales.html': { file: 'whales.html', type: 'text/html; charset=utf-8' },
+  '/whales.js': { file: 'whales.js', type: 'application/javascript; charset=utf-8' },
+  '/whales.css': { file: 'whales.css', type: 'text/css; charset=utf-8' },
 };
 
 /**
@@ -461,6 +465,16 @@ function createServer(game) {
         if (!guardWrite(req, res, ip, limiters.order)) return;
         const r = game.useCouponFor(bearerToken(req));
         return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- AI 主力详情：仅白名单玩家账号（写死 chu）；口令走玩家会话 token ----
+      if (p === '/api/whales' && req.method === 'GET') {
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.canViewWhales(token)) {
+          logger.warn(`[LLM] AI 持仓页鉴权失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '无权查看' });
+        }
+        return json(res, 200, game.whalePortfolio());
       }
 
       // ---- 运维：AI 主力持仓组合（口令同停牌；玩家接口一律不下发）----

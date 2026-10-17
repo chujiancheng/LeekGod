@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 主力观测 · 仅限授权账号</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/whales.css">
+</head>
+<body class="whales-page">
+  <header class="whales-head">
+    <div>
+      <div class="whales-title">AI 主力观测台</div>
+      <div class="whales-sub" id="meta">读取中…</div>
+    </div>
+    <div class="whales-actions">
+      <button type="button" id="refreshBtn">刷新</button>
+      <a class="ghost-link" href="/">返回交易端</a>
+    </div>
+  </header>
+
+  <main id="list" class="whales-list"></main>
+  <div id="denied" class="whales-denied" hidden>
+    当前账号无权访问。请先在交易端用授权账号登录后再打开本页。
+  </div>
+
+  <script src="/whales.js"></script>
+</body>
+</html>

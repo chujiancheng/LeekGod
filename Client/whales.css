@@ -1,0 +1,137 @@
+/* AI 主力观测页：仅白名单账号用，样式独立，少依赖终端布局 */
+.whales-page {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg, #0b0f14);
+  color: var(--ink, #e8eef5);
+  font-family: var(--font, system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif);
+  padding: 20px 16px 40px;
+  box-sizing: border-box;
+}
+
+.whales-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  max-width: 960px;
+  margin: 0 auto 16px;
+}
+
+.whales-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.whales-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted, #8a96a3);
+}
+
+.whales-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.whales-actions button {
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--gold, #d4a017) 40%, transparent);
+  background: transparent;
+  color: var(--gold, #d4a017);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+.ghost-link {
+  color: var(--muted, #8a96a3);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.whales-list {
+  max-width: 960px;
+  margin: 0 auto;
+  display: grid;
+  gap: 12px;
+}
+
+.whale-card {
+  border: 1px solid color-mix(in srgb, var(--line, #2a3540) 90%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel, #121a22) 88%, black);
+  padding: 14px 16px;
+}
+
+.whale-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.whale-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.whale-name .ai-chip {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #5eead4;
+  border: 1px solid rgba(94, 234, 212, 0.45);
+  border-radius: 999px;
+  padding: 1px 8px;
+  vertical-align: middle;
+}
+
+.whale-kv {
+  font-size: 12px;
+  color: var(--muted, #8a96a3);
+}
+
+.whale-kv b {
+  color: var(--ink, #e8eef5);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+table.whale-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+table.whale-table th,
+table.whale-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line, #2a3540) 70%, transparent);
+  white-space: nowrap;
+}
+
+table.whale-table th {
+  color: var(--muted, #8a96a3);
+  font-weight: 500;
+}
+
+.empty {
+  color: var(--muted, #8a96a3);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.whales-denied {
+  max-width: 480px;
+  margin: 48px auto;
+  text-align: center;
+  color: var(--muted, #8a96a3);
+  font-size: 14px;
+  line-height: 1.6;
+}
