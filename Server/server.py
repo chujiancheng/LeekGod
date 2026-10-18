@@ -15,10 +15,11 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 PID_FILE = os.path.join(os.path.dirname(__file__), "server.pid")
-# node 的业务日志由 log4js 按天切割落盘（Server/server.YYYY-MM-DD.log）；
-# 这里重定向的只是 logger 初始化之前的崩溃输出（缺模块、语法错误等）
-CONSOLE_LOG = os.path.join(os.path.dirname(__file__), "server-console.log")
 SERVER_DIR = os.path.dirname(__file__)
+LOG_DIR = os.path.join(SERVER_DIR, "log")
+# node 的业务日志由 log4js 按天切割落盘（Server/log/server.YYYY-MM-DD.log）；
+# 这里重定向的只是 logger 初始化之前的崩溃输出（缺模块、语法错误等）
+CONSOLE_LOG = os.path.join(LOG_DIR, "server-console.log")
 SERVER_ENTRY = os.path.join(SERVER_DIR, "index.js")
 ADMIN_TOKEN_FILE = os.path.join(SERVER_DIR, "data", "admin.token")
 
@@ -120,6 +121,7 @@ def start():
         return
 
     print("正在启动服务器...")
+    os.makedirs(LOG_DIR, exist_ok=True)
     rotate_log()
     log = open(CONSOLE_LOG, "a", encoding="utf-8")
     creationflags = 0
@@ -151,7 +153,7 @@ def start():
     else:
         print(f"服务器已启动 (PID: {process.pid})")
         print(f"访问地址: http://{os.environ.get('HOST', '0.0.0.0')}:{os.environ.get('PORT', '3000')}")
-        print(f"日志文件: {os.path.join(SERVER_DIR, 'server.' + time.strftime('%Y-%m-%d') + '.log')}（按天切割，保留 30 天）")
+        print(f"日志文件: {os.path.join(LOG_DIR, 'server.' + time.strftime('%Y-%m-%d') + '.log')}（按天切割，保留 30 天）")
 
 
 def stop():

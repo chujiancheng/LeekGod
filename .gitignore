@@ -2,6 +2,7 @@
 node_modules/
 
 # 运行时产物
+Server/log/
 Server/server.log*
 Server/server.*.log*
 Server/server-console.log*
