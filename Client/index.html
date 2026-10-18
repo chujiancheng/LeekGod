@@ -260,11 +260,14 @@
       <main class="main">
         <section class="panel chart-panel">
           <div class="panel-title">
-            <!-- 分时（tick 级走势）与日线（K 线）共用一块画布，只切画法不切数据源：
-                 分时吃 /api/history，日线吃 /api/daily + 实时行情现拼的当日那根 -->
+            <!-- 分时（tick 级走势）与日/周/月线（K 线）共用一块画布，只切画法不切数据源：
+                 分时吃 /api/history，K 线吃 /api/daily + 实时行情现拼的当期那根；
+                 周/月线由客户端把日线按交易日号聚合（周=7 天、月=4 周） -->
             <span class="chart-modes" id="chartModes">
               <button class="chart-mode on" type="button" data-mode="minute">分时</button>
               <button class="chart-mode" type="button" data-mode="day">日线</button>
+              <button class="chart-mode" type="button" data-mode="week">周线</button>
+              <button class="chart-mode" type="button" data-mode="month">月线</button>
             </span>
             <!-- 分时取数窗口：默认只看当天（服务端的分时是跨天连续的一整条，不切的话
                  昨天、前天的走势会一直连在左边），也可以连着看 5 个交易日 -->

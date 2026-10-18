@@ -40,8 +40,22 @@
   let holdersAt = 0;
   // 消息过滤：all = 全部，index = 只大盘，个股 stockId
   let newsFilter = 'all';
-  // 图表模式：minute = 分时（tick 级走势），day = 日线（K 线）。选择记在本地，刷新后保持
-  let chartMode = localStorage.getItem('gushen_chart') === 'day' ? 'day' : 'minute';
+  // 图表模式：minute = 分时（tick 级走势），day/week/month = 日/周/月 K 线。选择记在本地，刷新后保持
+  const CHART_MODES = ['minute', 'day', 'week', 'month'];
+  const chartModeRaw = localStorage.getItem('gushen_chart');
+  let chartMode = CHART_MODES.includes(chartModeRaw) ? chartModeRaw : 'minute';
+  // 日/周/月共用一套 K 线画法与日线缓存，只有「是不是分时」需要分支
+  const isKline = () => chartMode !== 'minute';
+  // 日线抓多少根：日线一屏 120 根就够看；**周/月线是「多根并一根」，根数不够就并不出东西**
+  //（周线 120 根只剩 17 根、月线只剩 4 根，MACD 与 MA10 全废）。所以进了 K 线模式按服务端
+  // 上限 260 抓（config.market.dailyBarsKeep），日线只画最近 120 根，免得 260 根挤成发丝。
+  const DAILY_LIMIT_DAY = 120;
+  const DAILY_LIMIT_KLINE = 260;
+  const DAY_SHOW_MAX = 120;
+  // MACD 预热门槛：DIF = EMA12 − EMA26、DEA 再套 EMA9，不足慢线 + 信号线（26 + 9）根时
+  // 数值只是「从第一根开始推」的初始化残差，不是 MACD。图上要标「未预热」而不是让它冒充指标
+  //（实测月线常常只有 4 根、周线 10 根，都在这条线以下）
+  const MACD_MIN_BARS = 35;
   // 分时的取数窗口（只有分时模式用得上）：
   //   day = 只看当天（默认；真实行情软件的分时口径，跨天不再连成一条）
   //   5d  = 连续 5 个交易日
@@ -53,7 +67,9 @@
   // 日线：每只标的**已收盘**的 K 线（/api/daily 按需拉）。当日那根要到收盘结算才定格，
   // 由客户端拿实时行情现拼，所以它每帧都在动、不需要额外推送
   const dayBars = new Map(); // stockId -> [{day, open, high, low, close, volume, turnover, net}]
-  const dayLoaded = new Set(); // 已拉过日线的标的（与 histLoaded 同理，不能用 dayBars.has 判断）
+  // 已拉过日线的标的 → 已拉的根数（与 histLoaded 同理，不能用 dayBars.has 判断）。
+  // 用 Map 而不是 Set：周/月线要多得多的根数，拉到「服务端全量」时记 Infinity，之后不再重拉
+  const dayLoaded = new Map();
   // 「交易日号 + 是否已收盘结算」：跨天与进入夜间都要作废日线缓存（见 onState）
   let lastDayKey = '';
 
@@ -421,7 +437,7 @@
     priceDirty = false;
     loadHistory(stockId);
     loadHolders(stockId, true);
-    if (chartMode === 'day') loadDaily(stockId);
+    if (isKline()) loadDaily(stockId);
     renderStockTabs();
     if (activeView === 'trade') {
       renderHeader();
@@ -1489,7 +1505,7 @@
         loadHistory(activeStockId);
         loadHolders(activeStockId, true);
       }
-      if (chartMode === 'day') loadDaily(activeStockId); // 日线同理：只在真要看的时候拉
+      if (isKline()) loadDaily(activeStockId); // K 线同理：只在真要看的时候拉
       renderStockTabs();
       renderHeader();
       renderDepth();
@@ -1533,7 +1549,7 @@
         ensureStock();
         loadHistory(activeStockId);
         loadSparks();
-        if (chartMode === 'day') loadDaily(activeStockId);
+        if (isKline()) loadDaily(activeStockId);
       })
       .catch(() => toast('状态加载失败', 'err'));
   }
@@ -1668,7 +1684,7 @@
     if (dayKey && dayKey !== lastDayKey) {
       lastDayKey = dayKey;
       dayLoaded.clear();
-      if (chartMode === 'day') loadDaily(activeStockId);
+      if (isKline()) loadDaily(activeStockId);
     }
 
     renderHeader();
@@ -1900,10 +1916,10 @@
         b.classList.toggle('on', b.dataset.mode === chartMode);
       });
     }
-    // 「当日 / 5 日」只对分时有效，日线模式整块隐藏（K 线本来就是按天一根一根的）
+    // 「当日 / 5 日」只对分时有效，K 线模式整块隐藏（K 线本来就是按期一根一根的）
     const ranges = $('chartRanges');
     if (ranges) {
-      ranges.hidden = chartMode !== 'minute';
+      ranges.hidden = isKline();
       ranges.querySelectorAll('.chart-mode').forEach((b) => {
         b.classList.toggle('on', b.dataset.range === minuteRange);
       });
@@ -1911,8 +1927,11 @@
     const m = curMarket() || {};
     const sub = $('chartSub');
     if (!sub) return;
-    if (chartMode === 'day') {
-      sub.textContent = m.isIndex ? '大盘指数日线 · 蜡烛 + 成交量 + MA5/MA10' : '日线 · 蜡烛 + 成交量 + MA5/MA10';
+    if (isKline()) {
+      // 周/月线由日线聚合（周 = 每 N 个交易日、月 = 每 4 周），副标题说清口径
+      const label = chartMode === 'week' ? '周线' : chartMode === 'month' ? '月线' : '日线';
+      const unit = chartMode === 'week' ? ` · 每 ${weekPer()} 个交易日` : chartMode === 'month' ? ' · 每 4 周' : '';
+      sub.textContent = `${m.isIndex ? '大盘指数' : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)`;
       return;
     }
     const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
@@ -1936,12 +1955,12 @@
     if (wrap) {
       wrap.querySelectorAll('.chart-mode').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const mode = btn.dataset.mode === 'day' ? 'day' : 'minute';
-          if (mode === chartMode) return;
+          const mode = btn.dataset.mode;
+          if (!CHART_MODES.includes(mode) || mode === chartMode) return;
           chartMode = mode;
           localStorage.setItem('gushen_chart', chartMode);
           renderChartMode();
-          if (chartMode === 'day') loadDaily(activeStockId);
+          if (isKline()) loadDaily(activeStockId);
           drawChart();
         });
       });
@@ -3616,7 +3635,7 @@
     if (changed) {
       loadHistory(stockId);
       loadHolders(stockId, true);
-      if (chartMode === 'day') loadDaily(stockId);
+      if (isKline()) loadDaily(stockId);
     }
     setView('trade');
     renderStockTabs();
@@ -4580,22 +4599,31 @@
       });
   }
 
-  // ---------- 分时 / 日线 ----------
+  // ---------- 分时 / K 线（日/周/月） ----------
   const canvas = () => $('chart');
 
-  /** 拉某只标的的已收盘日线（切到日线模式 / 换标的 / 跨天时各拉一次） */
+  /**
+   * 拉某只标的的已收盘日线（切到 K 线模式 / 换标的 / 跨天时各拉一次）。
+   * 按**当前模式**决定请求根数：日线 120，周/月线 260（服务端上限）。已经拉过够长的就不再拉；
+   * 服务端返回的根数达不到请求数说明库里就这么点（记 Infinity），不必为同一批数据再打一次。
+   */
   function loadDaily(stockId) {
-    if (!stockId || dayLoaded.has(stockId)) return;
-    dayLoaded.add(stockId);
-    apiGet('/api/daily?stock=' + encodeURIComponent(stockId))
+    if (!stockId) return;
+    const want = isKline() ? DAILY_LIMIT_KLINE : DAILY_LIMIT_DAY;
+    if ((dayLoaded.get(stockId) || 0) >= want) return;
+    dayLoaded.set(stockId, want); // 先占位，避免同一帧连发多次
+    apiGet('/api/daily?stock=' + encodeURIComponent(stockId) + '&limit=' + want)
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (!res || !res.ok) {
           dayLoaded.delete(stockId); // 失败允许下次再试
           return;
         }
-        dayBars.set(stockId, res.bars || []);
-        if (stockId === activeStockId && activeView === 'trade' && chartMode === 'day') drawChart();
+        const bars = res.bars || [];
+        dayBars.set(stockId, bars);
+        // 拿到的比要的少 = 服务端只有这么多（新局 / 刚开几天），别再为它重拉
+        dayLoaded.set(stockId, bars.length < want ? Infinity : want);
+        if (stockId === activeStockId && activeView === 'trade' && isKline()) drawChart();
       })
       .catch(() => {
         dayLoaded.delete(stockId);
@@ -4611,30 +4639,92 @@
   function daySeriesOf(m) {
     const bars = (dayBars.get(m.stockId) || []).slice();
     const today = state && state.day && state.day.day ? state.day.day : null;
-    if (!today || bars.some((b) => b.day === today)) return bars;
-    bars.push({
-      day: today,
-      open: m.open,
-      high: m.high,
-      low: m.low,
-      close: m.last,
-      volume: m.volume,
-      turnover: m.turnover,
-      net: m.flow ? m.flow.net : 0,
-      live: true,
-    });
-    return bars;
+    if (today && !bars.some((b) => b.day === today)) {
+      bars.push({
+        day: today,
+        open: m.open,
+        high: m.high,
+        low: m.low,
+        close: m.last,
+        volume: m.volume,
+        turnover: m.turnover,
+        net: m.flow ? m.flow.net : 0,
+        live: true,
+      });
+    }
+    // 日线只画最近 DAY_SHOW_MAX 根（含当日那根）：抓 260 根是给周/月线并期用的，
+    // 日线全铺上会挤成发丝；周/月线必须吃全量，否则并不出足够多的期
+    return chartMode === 'day' ? bars.slice(-DAY_SHOW_MAX) : bars;
   }
 
-  /** 日线图的几何布局：绘制与十字光标共用一套，避免两处坐标算法跑偏 */
+  /**
+   * 一周几个交易日：**必须跟服务端同源**——broker.weeklyPick 用的是
+   * `Math.floor((day-1)/config.brokers.weekly.daysPerWeek)`，运营把这个值调了，
+   * 客户端写死 7 的话周线分组会和「当周之星」错位。配置没下发时回落 7。
+   */
+  function weekPer() {
+    const w = (state && state.rules && state.rules.brokerMeta && state.rules.brokerMeta.weekly) || {};
+    const per = Math.floor(Number(w.daysPerWeek));
+    return Number.isFinite(per) && per >= 1 ? per : 7;
+  }
+
+  /**
+   * K 线序列（按当前模式）：日线原样；周/月线把日线按交易日号聚合——
+   * 周 = 每 `daysPerWeek` 个交易日（与券商「当周之星」同口径）、月 = 每 4 周。
+   * 聚合规则与行情软件一致：开取期内第一根的开、收取期内最后一根的收、高/低取极值、量额净流入累加。
+   */
+  function klineSeriesOf(m) {
+    const days = daySeriesOf(m);
+    if (chartMode === 'day') return days;
+    const per = chartMode === 'week' ? weekPer() : weekPer() * 4;
+    const unit = chartMode === 'week' ? '周' : '月';
+    const out = [];
+    let cur = null;
+    let curIdx = -1;
+    for (const b of days) {
+      const idx = Math.floor((b.day - 1) / per);
+      if (!cur || idx !== curIdx) {
+        curIdx = idx;
+        cur = {
+          day: b.day,
+          label: '第' + (idx + 1) + unit,
+          dayFrom: b.day,
+          dayTo: b.day,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+          volume: b.volume || 0,
+          turnover: b.turnover || 0,
+          net: b.net || 0,
+          live: !!b.live,
+        };
+        out.push(cur);
+      } else {
+        cur.high = Math.max(cur.high, b.high);
+        cur.low = Math.min(cur.low, b.low);
+        cur.close = b.close;
+        cur.volume += b.volume || 0;
+        cur.turnover += b.turnover || 0;
+        cur.net += b.net || 0;
+        cur.live = !!b.live;
+        cur.dayTo = b.day;
+      }
+    }
+    return out;
+  }
+
+  /** K 线图的几何布局：绘制与十字光标共用一套，避免两处坐标算法跑偏。价格 / 成交量 / MACD 三带 */
   function dayLayout(W, H, bars) {
     const PAD_L = 8;
     const PAD_R = 58;
     const PAD_T = 14;
     const PAD_B = 20;
-    const VOL_H = Math.max(24, Math.min(56, H * 0.18));
-    const priceH = H - PAD_T - PAD_B - VOL_H - 10;
-    const volTop = PAD_T + priceH + 10;
+    const VOL_H = Math.max(18, Math.min(36, H * 0.11));
+    const MACD_H = Math.max(36, Math.min(72, H * 0.18));
+    const priceH = H - PAD_T - PAD_B - VOL_H - MACD_H - 16;
+    const volTop = PAD_T + priceH + 8;
+    const macdTop = volTop + VOL_H + 8;
     let lo = Infinity;
     let hi = -Infinity;
     let maxVol = 1;
@@ -4648,7 +4738,7 @@
     hi += padP;
     const slot = (W - PAD_L - PAD_R) / Math.max(bars.length, 1);
     return {
-      W, H, PAD_L, PAD_R, PAD_T, PAD_B, VOL_H, priceH, volTop, lo, hi, maxVol, slot,
+      W, H, PAD_L, PAD_R, PAD_T, PAD_B, VOL_H, MACD_H, priceH, volTop, macdTop, lo, hi, maxVol, slot,
       // 蜡烛中心与价格轴映射
       xc: (i) => PAD_L + slot * (i + 0.5),
       y: (p) => PAD_T + ((hi - p) / (hi - lo)) * priceH,
@@ -4668,9 +4758,20 @@
   }
 
   /**
-   * 日线图：蜡烛 + 成交量 + MA5/MA10。
+   * K 线的 MACD：直接现算，**不做缓存**。
+   * 分时那边要缓存是因为一条序列 10300 点、光标一动就全量重算；K 线最多 260 根，
+   * 一次 O(n) 循环可以忽略。而「缓存键」这种东西在 K 线上反而不安全——键只能取到
+   * 根数 / 首末值，中间某根被结算改写（或 dayBars 整体换掉）时根数与末根收盘都可能不变，
+   * 于是读到上一次的 MACD。少一层缓存就少一类这种 bug。
+   */
+  function klineMacdOf(bars) {
+    return computeMacd(bars.map((b) => ({ price: b.close })));
+  }
+
+  /**
+   * K 线图（日/周/月）：蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)。
    * 蜡烛按「收 ≥ 开」上色，与分时图同一套 A 股配色（涨红跌绿）；
-   * 最后一根是「正在走」的当日 K 线时，在收盘价上点一个空心圈作标记。
+   * 最后一根是「正在走」的当期 K 线时，在收盘价上点一个空心圈作标记。
    */
   function drawDayChart(c, m) {
     const ctx = c.getContext('2d');
@@ -4680,13 +4781,14 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
 
-    const bars = daySeriesOf(m);
+    const bars = klineSeriesOf(m);
+    const modeLabel = chartMode === 'week' ? '周线' : chartMode === 'month' ? '月线' : '日线';
     ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
     if (!bars.length) {
       ctx.fillStyle = themeC.muted;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('暂无日线数据（收盘结算后每根 K 线落一笔）', W / 2, H / 2);
+      ctx.fillText('暂无' + modeLabel + '数据（收盘结算后每根 K 线落一笔）', W / 2, H / 2);
       return;
     }
 
@@ -4710,7 +4812,7 @@
       ctx.fillText(p.toFixed(2), W - L.PAD_R + 6, yy);
     }
 
-    // 时间刻度（纵线，标签用交易日号，与顶栏「第 N 天」同一口径）
+    // 时间刻度（纵线，日线标签用交易日号，周/月线用期号）
     const ticks = Math.min(6, n);
     ctx.textAlign = 'center';
     for (let k = 0; k < ticks; k++) {
@@ -4720,10 +4822,11 @@
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(xx, L.PAD_T);
-      ctx.lineTo(xx, L.volTop + L.VOL_H);
+      ctx.lineTo(xx, L.macdTop + L.MACD_H);
       ctx.stroke();
       ctx.fillStyle = themeC.muted;
-      ctx.fillText('第' + bars[i].day + '天', Math.min(Math.max(xx, L.PAD_L + 20), W - L.PAD_R - 22), H - L.PAD_B / 2 - 2);
+      const tickLabel = bars[i].label || '第' + bars[i].day + '天';
+      ctx.fillText(tickLabel, Math.min(Math.max(xx, L.PAD_L + 20), W - L.PAD_R - 22), H - L.PAD_B / 2 - 2);
     }
 
     // 蜡烛与成交量柱
@@ -4772,7 +4875,7 @@
     drawMa(ma5, themeC.gold);
     drawMa(ma10, themeC.blue);
 
-    // 当日未收盘的标记
+    // 当期未收盘的标记
     const last = bars[n - 1];
     if (last.live) {
       ctx.beginPath();
@@ -4782,25 +4885,86 @@
       ctx.stroke();
     }
 
+    // MACD(12,26,9)：柱 = 2×(DIF−DEA)，红柱 DIF>DEA / 绿柱 DIF<DEA（与分时同一套画法）
+    const macd = klineMacdOf(bars);
+    let mAbs = 1e-9;
+    for (let i = 0; i < n; i++) {
+      mAbs = Math.max(mAbs, Math.abs(macd.dif[i]), Math.abs(macd.dea[i]), Math.abs(macd.hist[i]));
+    }
+    const mMid = L.macdTop + L.MACD_H / 2;
+    const mY = (v) => mMid - (v / mAbs) * (L.MACD_H / 2 - 8);
+    ctx.strokeStyle = themeC.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(L.PAD_L, mMid);
+    ctx.lineTo(W - L.PAD_R, mMid);
+    ctx.stroke();
+    for (let i = 0; i < n; i++) {
+      const h = (Math.abs(macd.hist[i]) / mAbs) * (L.MACD_H / 2 - 8);
+      if (h < 0.4) continue;
+      ctx.fillStyle = macd.hist[i] > 0 ? withA(themeC.red, .9) : withA(themeC.green, .9);
+      ctx.fillRect(L.xc(i) - bw / 2, macd.hist[i] > 0 ? mMid - h : mMid, bw, h);
+    }
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const px = L.xc(i);
+      const py = mY(macd.dif[i]);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = themeC.gold;
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const px = L.xc(i);
+      const py = mY(macd.dea[i]);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = themeC.blue;
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+
     // 图例
     ctx.textAlign = 'left';
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
     ctx.fillStyle = themeC.muted;
     let lx = L.PAD_L + 4;
     const maV = (arr) => (arr[n - 1] == null ? '--' : arr[n - 1].toFixed(2));
-    ctx.fillText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`, lx, L.PAD_T - 3);
-    lx += ctx.measureText(`日线 · 共 ${n} 根${last.live ? '（含当日未收盘）' : ''}`).width + 12;
+    const head = `${modeLabel} · 共 ${n} 根${last.live ? '（含当期未收盘）' : ''}`;
+    ctx.fillText(head, lx, L.PAD_T - 3);
+    lx += ctx.measureText(head).width + 12;
     ctx.fillStyle = themeC.gold;
     ctx.fillText('MA5 ' + maV(ma5), lx, L.PAD_T - 3);
     lx += ctx.measureText('MA5 ' + maV(ma5)).width + 12;
     ctx.fillStyle = themeC.blue;
     ctx.fillText('MA10 ' + maV(ma10), lx, L.PAD_T - 3);
+    // MACD 图例（与分时同款，标在 MACD 带左上角）。
+    // **根数不足 MACD_MIN_BARS 时不报 DIF/DEA 数值**：那时 EMA26/EMA9 还没收敛，
+    // 写出来的数字只是初始化残差（月线只有 4 根时尤其离谱），改标「未预热」。
+    // 精确数值仍可在十字光标里看（那里同样带「样本不足」字样）。
+    lx = L.PAD_L + 4;
+    ctx.fillStyle = themeC.muted;
+    ctx.fillText('MACD(12,26,9)', lx, L.macdTop + 8);
+    lx += ctx.measureText('MACD(12,26,9)').width + 10;
+    if (n < MACD_MIN_BARS) {
+      ctx.fillStyle = themeC.gold;
+      ctx.fillText(`样本 ${n} 根 · 未预热`, lx, L.macdTop + 8);
+    } else {
+      ctx.fillStyle = themeC.gold;
+      const difTxt = 'DIF ' + macd.dif[n - 1].toFixed(3);
+      ctx.fillText(difTxt, lx, L.macdTop + 8);
+      lx += ctx.measureText(difTxt).width + 12;
+      ctx.fillStyle = themeC.blue;
+      ctx.fillText('DEA ' + macd.dea[n - 1].toFixed(3), lx, L.macdTop + 8);
+    }
   }
 
-  /** 日线的十字光标：显示该根的开高低收、成交量与资金净流入 */
+  /** K 线的十字光标：显示该根的开高低收、成交量、资金净流入与 MACD */
   function dayCrosshair(m, rect, mx, my) {
     const tip = $('chartTip');
-    const bars = daySeriesOf(m);
+    const bars = klineSeriesOf(m);
     if (!bars.length) {
       tip.hidden = true;
       return;
@@ -4816,18 +4980,28 @@
     const prev = bars[i - 1] ? bars[i - 1].close : b.open;
     const pct = prev ? ((b.close - prev) / prev) * 100 : 0;
     const c = cls(b.close - prev);
+    // 期号标签：日线「第 N 天」；周/月线带日区间，便于对照顶栏交易日号
+    const title = b.label
+      ? `${b.label}（第 ${b.dayFrom}–${b.dayTo} 天${b.live ? '，含未收盘' : ''}）`
+      : `第 ${b.day} 天${b.live ? '（未收盘）' : ''}`;
+    const md = klineMacdOf(bars);
+    const difV = md.dif[i] || 0;
+    const deaV = md.dea[i] || 0;
+    // 根数不到预热门槛时给个明确提示：此时 DIF/DEA 是初始化残差，不是 MACD
+    const macdWarn = bars.length < MACD_MIN_BARS ? ` <span class="t">（样本 ${bars.length} 根，未预热）</span>` : '';
     tip.innerHTML =
-      `<span class="t">${esc('第 ' + b.day + ' 天' + (b.live ? '（未收盘）' : ''))}</span><br>` +
+      `<span class="t">${esc(title)}</span><br>` +
       `开 <b>${fmtP(b.open)}</b> 高 <b>${fmtP(b.high)}</b><br>` +
       `低 <b>${fmtP(b.low)}</b> 收 <b class="${c}">${fmtP(b.close)}</b> ` +
       `<span class="${c}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br>` +
       `<span class="t">成交量</span> ${fmtVol(b.volume || 0)}<br>` +
       `<span class="t">成交额</span> ${fmtAmount(b.turnover || 0)} · <span class="t">净流入</span> ` +
-      `<b class="${cls(b.net)}">${(b.net >= 0 ? '+' : '-') + fmtAmount(Math.abs(b.net || 0))}</b>`;
+      `<b class="${cls(b.net)}">${(b.net >= 0 ? '+' : '-') + fmtAmount(Math.abs(b.net || 0))}</b><br>` +
+      `<span class="t">MACD</span> DIF <b class="${cls(difV)}">${difV.toFixed(3)}</b> DEA <b class="${cls(deaV)}">${deaV.toFixed(3)}</b>${macdWarn}`;
     tip.hidden = false;
     const tw = tip.offsetWidth;
     tip.style.left = Math.min(mx + 14, rect.width - tw - 6) + 'px';
-    tip.style.top = Math.min(my + 14, rect.height - 104) + 'px';
+    tip.style.top = Math.min(my + 14, rect.height - 120) + 'px';
   }
 
   /** MACD(12,26,9)：DIF=EMA12−EMA26，DEA=DIF 的 EMA9，柱=2×(DIF−DEA) */
@@ -4890,7 +5064,7 @@
     if (!m) return;
     const c = canvas();
     if (c.width === 0) return;
-    if (chartMode === 'day') drawDayChart(c, m);
+    if (isKline()) drawDayChart(c, m);
     else drawMinuteChart(c, m);
   }
 
@@ -5127,8 +5301,8 @@
       const rect = c.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
-      // 日线走自己那套（单根 K 线的开高低收），几何与 drawDayChart 同一份布局
-      if (chartMode === 'day') {
+      // K 线走自己那套（单根的开高低收 + MACD），几何与 drawDayChart 同一份布局
+      if (isKline()) {
         dayCrosshair(m, rect, mx, my);
         return;
       }

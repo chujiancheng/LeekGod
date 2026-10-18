@@ -195,6 +195,10 @@ src = src.replace(
     setHistory: (id, arr) => { histories.set(id, arr); },
     histOf, minutePts, minuteFrom, macdOf, setMinuteRange,
     minuteRangeOf: () => minuteRange,
+    // K 线（日/周/月）：注入日线缓存、聚合、布局与 MACD
+    setDayBars: (id, arr) => { dayBars.set(id, arr); },
+    dayLoadedOf: (id) => dayLoaded.get(id),
+    klineSeriesOf, dayLayout, klineMacdOf, computeMacd, daySeriesOf, weekPer,
     // 账号 / 昵称 / 登录开户
     doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
     // 游戏规则（主页入口 + 分类弹窗）
@@ -537,7 +541,10 @@ console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
   // 第 14 天盘中：第一次进日线模式 → 拉一次
   api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'morning', label: '上午连续竞价', auction: null }, null));
   assert(dailyCalls() === 1, `盘中首帧拉一次日线（${dailyCalls()} 次）`);
-  assert(api.el('chartSub').textContent === '日线 · 蜡烛 + 成交量 + MA5/MA10', `日线副标题 ${api.el('chartSub').textContent}`);
+  assert(
+    api.el('chartSub').textContent === '日线 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+    `日线副标题 ${api.el('chartSub').textContent}`
+  );
   // 同一帧反复推：不能再拉（缓存有效）
   api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'morning', label: '上午连续竞价', auction: null }, null));
   assert(dailyCalls() === 1, `同一阶段不重复拉（${dailyCalls()} 次）`);
@@ -553,6 +560,153 @@ console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
   assert(dailyCalls() === 3, `分时模式不拉日线（${dailyCalls()} 次）`);
   api.setChartMode('day');
   resetFetch();
+}
+
+console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与副标题跟模式走');
+{
+  const st = mkState({ ...AUCTION_DAY, day: 16, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  api.setState(st);
+  api.setActiveView('trade');
+  // 16 根已收盘日线（day 1..16），当日 day=16 不再现拼（缓存里已有）
+  const mkBar = (day, o, h, l, c, v) => ({ day, open: o, high: h, low: l, close: c, volume: v, turnover: v * c, net: 0 });
+  const dayBars = [];
+  for (let d = 1; d <= 16; d++) dayBars.push(mkBar(d, 10 + d, 11 + d, 9 + d, 10.5 + d, 1000 + d));
+  api.setDayBars(STOCK, dayBars);
+  const market = st.markets[0];
+
+  // ---- 日线原样返回 ----
+  api.setChartMode('day');
+  const days = api.klineSeriesOf(market);
+  assert(days.length === 16, `日线 16 根（${days.length}）`);
+  assert(days[0].label == null, '日线不带期号标签（沿用「第 N 天」）');
+
+  // ---- 周线：每 7 个交易日一根（day 1-7 / 8-14 / 15-16）----
+  api.setChartMode('week');
+  const weeks = api.klineSeriesOf(market);
+  assert(weeks.length === 3, `周线 3 根（${weeks.length}）`);
+  assert(weeks[0].label === '第1周' && weeks[1].label === '第2周' && weeks[2].label === '第3周',
+    `周标签 ${weeks.map((w) => w.label).join(',')}`);
+  assert(weeks[0].open === 11 && weeks[0].dayFrom === 1 && weeks[0].dayTo === 7,
+    `第1周开=${weeks[0].open} 区间=${weeks[0].dayFrom}-${weeks[0].dayTo}`);
+  // 第1周：day7 的 close = 10.5+7 = 17.5；high = max(12..18)=18；low = min(10..16)=10
+  assert(weeks[0].close === 17.5 && weeks[0].high === 18 && weeks[0].low === 10,
+    `第1周 收=${weeks[0].close} 高=${weeks[0].high} 低=${weeks[0].low}`);
+  // 量累加：1001+…+1007 = 7*1001 + (0+…+6) = 7007+21 = 7028
+  assert(weeks[0].volume === 7028, `第1周量累加 ${weeks[0].volume}`);
+  // 末周只有 day15-16 两根，live 跟随最后一根日线（day16 是缓存里的已收盘根，不 live）
+  assert(weeks[2].dayFrom === 15 && weeks[2].dayTo === 16 && !weeks[2].live,
+    `第3周 区间=${weeks[2].dayFrom}-${weeks[2].dayTo} live=${weeks[2].live}`);
+
+  // ---- 月线：每 4 周（28 个交易日）一根；16 天只有 1 根 ----
+  api.setChartMode('month');
+  const months = api.klineSeriesOf(market);
+  assert(months.length === 1, `月线 1 根（${months.length}）`);
+  assert(months[0].label === '第1月' && months[0].dayFrom === 1 && months[0].dayTo === 16,
+    `月标签 ${months[0].label} 区间 ${months[0].dayFrom}-${months[0].dayTo}`);
+  assert(months[0].open === 11 && months[0].close === 26.5, `月线开收 ${months[0].open}/${months[0].close}`);
+
+  // ---- 当日现拼的 live 根并进当周/当月 ----
+  st.day.day = 17;
+  st.markets[0].open = 28;
+  st.markets[0].high = 29;
+  st.markets[0].low = 27.5;
+  st.markets[0].last = 28.2;
+  st.markets[0].volume = 500;
+  api.setState(st);
+  api.setChartMode('week');
+  const weeks2 = api.klineSeriesOf(st.markets[0]);
+  assert(weeks2.length === 3, `含当日后仍 3 根周线（${weeks2.length}）`);
+  assert(weeks2[2].live === true && weeks2[2].dayTo === 17 && weeks2[2].close === 28.2,
+    `第3周吸收当日 live 根：live=${weeks2[2].live} dayTo=${weeks2[2].dayTo} 收=${weeks2[2].close}`);
+
+  // ---- 副标题与「当日/5日」显隐 ----
+  api.renderChartMode();
+  assert(api.el('chartSub').textContent === '周线 · 每 7 个交易日 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+    `周线副标题 ${api.el('chartSub').textContent}`);
+  assert(api.el('chartRanges').hidden === true, '周线模式隐藏「当日 / 5 日」');
+  api.setChartMode('month');
+  api.renderChartMode();
+  assert(api.el('chartSub').textContent === '月线 · 每 4 周 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+    `月线副标题 ${api.el('chartSub').textContent}`);
+
+  // ---- 布局含 MACD 带；K 线 MACD 按收盘价算且缓存键跟模式 ----
+  const L = api.dayLayout(600, 300, months);
+  assert(L.MACD_H > 0 && L.macdTop > L.volTop, `布局有 MACD 带（H=${L.MACD_H} top=${L.macdTop}）`);
+  const md1 = api.klineMacdOf(months);
+  assert(md1.dif.length === 1, `月线 MACD 根数跟随（${md1.dif.length}）`);
+  const mdDay = (() => {
+    api.setChartMode('day');
+    return api.klineMacdOf(days);
+  })();
+  assert(mdDay.dif.length === 16, `日线 MACD 16 根（${mdDay.dif.length}）`);
+  // 算法与分时共用 computeMacd：手工验一根（2 根收盘价 10.5+1=11.5、10.5+2=12.5）
+  const man = api.computeMacd([{ price: 11.5 }, { price: 12.5 }]);
+  assert(man.dif.length === 2 && Math.abs(man.hist[1] - 2 * (man.dif[1] - man.dea[1])) < 1e-12,
+    'computeMacd 柱 = 2×(DIF−DEA)');
+
+  // ---- 脏 chartMode 回落分时（localStorage 手改成未知值不抛错）----
+  api.setChartMode('week');
+  api.setChartMode('minute');
+  api.renderChartMode();
+  assert(api.el('chartRanges').hidden === false, '分时模式恢复「当日 / 5 日」');
+
+  // ================= 10b-2：数据量与口径（实测存档只有 65 根日线 / 4 根月线）=================
+  // ---- 日线抓 260 根只为周/月线：日线自己只画最近 120 根 ----
+  const long = [];
+  for (let d = 1; d <= 260; d++) long.push(mkBar(d, 10, 11, 9, 10 + d * 0.1, 1000));
+  api.setDayBars(STOCK, long);
+  const stLong = mkState({ ...AUCTION_DAY, day: 260, phase: 'morning', auction: null }, null);
+  api.setState(stLong);
+  api.setChartMode('day');
+  const d120 = api.daySeriesOf(stLong.markets[0]);
+  assert(d120.length === 120, `日线只画最近 120 根（${d120.length} 根）`);
+  assert(d120[d120.length - 1].day === 260, `截的是尾部、末根仍是第 260 天（${d120[d120.length - 1].day}）`);
+  api.setChartMode('week');
+  const wk260 = api.klineSeriesOf(stLong.markets[0]);
+  assert(wk260.length === 38, `周线吃全量 260 根并期（${wk260.length} 根，期望 38）`);
+  api.setChartMode('month');
+  assert(api.klineSeriesOf(stLong.markets[0]).length === 10, `月线吃全量 260 根并期（期望 10 根）`);
+
+  // ---- 周线周期跟服务端配置走（rules.brokerMeta.weekly.daysPerWeek），不再写死 7 ----
+  api.setDayBars(STOCK, dayBars); // 换回 16 根（day 1..16）
+  const stPer = mkState({ ...AUCTION_DAY, day: 16, phase: 'morning', auction: null }, null);
+  api.setState(stPer);
+  assert(api.weekPer() === 7, `配置没下发时回落 7（${api.weekPer()}）`);
+  stPer.rules.brokerMeta = { weekly: { daysPerWeek: 5 } };
+  api.setState(stPer);
+  assert(api.weekPer() === 5, `跟随 daysPerWeek=5（${api.weekPer()}）`);
+  api.setChartMode('week');
+  const w5 = api.klineSeriesOf(stPer.markets[0]);
+  assert(w5.length === 4 && w5[0].dayTo === 5 && w5[3].dayFrom === 16,
+    `5 天一周：16 天并 4 根（${w5.length} 根，首周 1-${w5[0].dayTo}、末周 ${w5[3].dayFrom} 起）`);
+  api.setChartMode('month');
+  assert(api.klineSeriesOf(stPer.markets[0]).length === 1, '5 天一周时「月」= 20 个交易日 → 16 天并 1 根');
+  api.setChartMode('week');
+  api.renderChartMode();
+  assert(api.el('chartSub').textContent === '周线 · 每 5 个交易日 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+    `副标题跟着配置改口（${api.el('chartSub').textContent}）`);
+  delete stPer.rules.brokerMeta;
+  api.setState(stPer);
+  assert(api.weekPer() === 7, '配置被摘掉后回落 7');
+
+  // ---- 手机画布 238px（减 4px 内外边距 = 230）三带都要留得下，价格区不能被压没 ----
+  const Lm = api.dayLayout(360, 230, wk260);
+  assert(Lm.priceH >= 100, `手机价格区高度 ${Lm.priceH.toFixed(1)}px（≥100）`);
+  assert(Lm.volTop >= Lm.PAD_T + Lm.priceH && Lm.macdTop >= Lm.volTop + Lm.VOL_H, '价格 / 量 / MACD 三带不重叠');
+  assert(Math.abs(Lm.macdTop + Lm.MACD_H - (230 - Lm.PAD_B)) < 1e-9,
+    `MACD 带底部正好抵住 PAD_B（${(Lm.macdTop + Lm.MACD_H).toFixed(2)} vs ${230 - Lm.PAD_B}）`);
+
+  // ---- K 线 MACD 不缓存：根数与末根收盘都没变、只改中间那根，也必须重算 ----
+  api.setChartMode('day');
+  const s1 = dayBars.map((b) => ({ ...b }));
+  const a1 = api.klineMacdOf(s1);
+  const s2 = s1.map((b) => ({ ...b }));
+  s2[1].close += 5; // 根数不变、末根收盘不变
+  const a2 = api.klineMacdOf(s2);
+  assert(Math.abs(a1.dif[1] - a2.dif[1]) > 1e-6,
+    `中间根改写后 MACD 要重算（${a1.dif[1].toFixed(4)} → ${a2.dif[1].toFixed(4)}）`);
+  assert(Math.abs(a1.dif[1] - api.klineMacdOf(s1).dif[1]) < 1e-12, '同一份序列重算结果稳定');
+  api.setChartMode('minute');
 }
 
 // ---- 券商 UI：卡片墙 / 我的券商卡 / 席位 / 追保预警 / 提前消息 ----
@@ -1249,6 +1403,10 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     // ---- 骨架：两块控件都在 HTML 里（桩环境的 querySelectorAll 是空的，只能查源码）----
     const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
     assert(html.indexOf('id="chartRanges"') >= 0 && html.indexOf('data-range="5d"') >= 0, 'HTML 里有「当日 / 5 日」这组控件');
+    assert(
+      html.indexOf('data-mode="week"') >= 0 && html.indexOf('data-mode="month"') >= 0,
+      'HTML 里有周线/月线模式按钮'
+    );
   }
 
   // ==================================================================
