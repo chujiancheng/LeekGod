@@ -194,7 +194,7 @@ console.log('\n[8] 资金不足拒绝买入');
 }
 
 // ---- 9. 涨跌停 ----
-console.log('\n[9] 涨跌停（相对昨收 ±10%，依赖交易日时钟）');
+console.log('\n[9] 涨跌停（相对昨收 ±30%，依赖交易日时钟）');
 {
   const { m, A } = fresh();
   // 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收由每个交易日的收盘结算滚动而来，
@@ -205,14 +205,14 @@ console.log('\n[9] 涨跌停（相对昨收 ±10%，依赖交易日时钟）');
   m.dayCycle = new DayCycle(config.day, 0);
   const now = 120000;
   const band = m.band();
-  assert(band.up === 22 && band.down === 18, `昨收 20 → 涨跌停 18 ~ 22（${band.down} ~ ${band.up}）`);
-  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 25.0, now });
+  assert(band.up === 26 && band.down === 14, `昨收 20 → 涨跌停 14 ~ 26（${band.down} ~ ${band.up}）`);
+  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now });
   assert(!r1.ok && /涨跌停/.test(r1.error), '超过涨停价被拒');
   const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 19.0, now: now + 100 });
   assert(r2.ok, '区间内价格可下单');
   config.priceLimit.enabled = false;
-  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 25.0, now: now + 5000 });
-  assert(r3.ok, '关掉涨跌停后 25 元放行（开关生效）');
+  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: now + 5000 });
+  assert(r3.ok, '关掉涨跌停后 27 元放行（开关生效）');
   config.priceLimit.enabled = true;
 }
 

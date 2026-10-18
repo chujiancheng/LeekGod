@@ -224,14 +224,14 @@ console.log('\n[6] 集合竞价：最大成交量原则 + 阶段结束按统一�
 console.log('\n[7] 集合竞价：竞价位沿用涨跌停，但不受价格笼子约束');
 {
   const { m, B1, S1 } = fresh();
-  assert(m.band().up === 22 && m.band().down === 18, '昨收 20 → 涨跌停 18 ~ 22');
+  assert(m.band().up === 26 && m.band().down === 14, '昨收 20 → 涨跌停 14 ~ 26');
 
-  const over = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 100, price: 23.0, now: 1000 });
+  const over = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: 1000 });
   assert(!over.ok && /涨跌停/.test(over.error), '竞价阶段照样被涨停价拦住');
-  const edge = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 100, price: 22.0, now: 1000 });
+  const edge = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 100, price: 26.0, now: 1000 });
   assert(edge.ok, '正好挂在涨停价上放行');
 
-  // 竞价相对昨收可以有 ±10% 跳空：笼子只认「上一笔成交价 ±5%」，
+  // 竞价相对昨收可以有大跳空（涨跌停区间内即可）：笼子只认「上一笔成交价 ±5%」，
   // 照笼子判会把所有跳空单都判成脱笼——所以竞价撮合必须绕开笼子
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 100, price: 21.9, now: 1000, noCooldown: true });
   const r = m.runAuction(P.auction + 30001);
@@ -335,7 +335,7 @@ console.log('\n[11] 日终结算：昨收滚动、当日高低量额归零、委
   assert(C.orders.size === 0 && C.orderFrozen === 0, '委托作废后账户挂单表与冻结归零');
   assert(Math.abs(C.cash - 100000000) < 0.01, '冻结资金全额退回');
   const band = m.band();
-  assert(band.up === 23.1 && band.down === 18.9, `涨跌停区间随新昨收滚动到 ${band.down} ~ ${band.up}`);
+  assert(band.up === 27.3 && band.down === 14.7, `涨跌停区间随新昨收滚动到 ${band.down} ~ ${band.up}`);
 }
 
 // ============================================================
@@ -351,8 +351,8 @@ console.log('\n[12] 次日开盘竞价：隔夜跳空');
 
   // 第 2 天开盘竞价（区间 P.dayMs ~ P.dayMs+30s）
   const d2 = P.dayMs + 1000;
-  const rd = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 22.9, now: d2 });
-  assert(rd.ok, `次日竞价买单挂入（涨停已放宽到 23.1）`);
+  const rd = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 27.3, now: d2 });
+  assert(rd.ok, `次日竞价买单挂入（涨停已放宽到 27.3）`);
   m.place(C, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 21.5, now: d2, noCooldown: true });
   const r = m.runAuction(P.dayMs + P.auction + 30001);
   assert(r.price === 21.5 && r.qty === 1000, `次日开盘成交价 ${r.price} × ${r.qty}`);

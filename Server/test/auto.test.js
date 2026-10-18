@@ -16,7 +16,7 @@ const STOCK = config.stocks[0];
 const P = (g) => g.markets.get(STOCK.id);
 const N = (g) => g.npcs.get(STOCK.id);
 
-// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是策略参数校验与触发，
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±pct）。本文件验的是策略参数校验与触发，
 // 用例里按盘口 1.05 倍打价是常态，开着涨跌停会被拦在门外。
 // 涨跌停与集合竞价、日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
 config.priceLimit.enabled = false;

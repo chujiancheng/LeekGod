@@ -19,7 +19,7 @@ const P = (g) => g.markets.get(STOCK.id);
 const N = (g) => g.npcs.get(STOCK.id);
 // 本文件要验证开空后的空头批次/保证金落盘，临时放开裸空（生产默认禁止）
 config.margin.allowNakedShort = true;
-// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是存档往返，
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±pct）。本文件验的是存档往返，
 // 用例里按 0.9 / 1.1 倍打价是常态，开着涨跌停会被拦在门外。
 // 涨跌停、集合竞价与日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
 config.priceLimit.enabled = false;

@@ -5,7 +5,7 @@ const { Game, ACTIONS } = require('../src/game');
 const config = require('../src/config');
 const { NewsSystem, TEMPLATES, STOCK_TEMPLATES, ANNOUNCE_TEMPLATES } = require('../src/news');
 
-// 涨跌停是**日频机制**（区间以昨收为基准，价格一天最多走 ±10%）。本文件验的是撮合 /
+// 涨跌停是**日频机制**（区间以昨收为基准，价格一天最多走 ±pct）。本文件验的是撮合 /
 // 风控 / 快照 / 消息本身，用例里按盘口 ±0.05 打价是常态，开着涨跌停会把它们拦在门外。
 // 涨跌停、集合竞价与日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
 config.priceLimit.enabled = false;

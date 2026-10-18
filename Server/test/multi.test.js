@@ -18,7 +18,7 @@ const ALL_IDS = config.stocks.map((s) => s.id);
 // 指数也用同一套 market_state/prices 落盘，读取时同样要把它列进标的清单
 const ALL_MARKET_IDS = [...ALL_IDS, config.index.code];
 
-// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±10%）。本文件验的是多股票机制，
+// 涨跌停是日频机制（区间以昨收为基准，一天最多 ±pct）。本文件验的是多股票机制，
 // 用例里按 0.9 / 1.1 / 1.2 倍打价是常态，开着涨跌停会被拦在门外。
 // 涨跌停与集合竞价、日终结算由 test/day.test.js 专门覆盖（那边用真实配置）。
 config.priceLimit.enabled = false;
