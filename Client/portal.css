@@ -2,11 +2,18 @@
    与交易端共用 style.css 的主题 token；这里只写本页布局，不覆盖全局配色，
    所以在四套主题下都会跟着变。 */
 
+/* style.css 对 html/body 写了 height:100% + overflow:hidden（交易终端）。
+   portal / docs 靠文档流滚动；只给 body 设 overflow-y:auto 在 html:hidden 下无效。 */
+html {
+  height: auto;
+  overflow: visible;
+  overflow-y: scroll;
+}
+
 .portal-page {
   height: auto;
-  min-height: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
+  min-height: 100vh;
+  overflow: visible;
 }
 
 /* 文档入口按钮行 */

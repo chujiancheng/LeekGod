@@ -207,6 +207,7 @@ const pingWith = async (key) => {
   assert(res.status === 200 && /text\/html/.test(res.headers.get('content-type') || ''), 'GET /docs.html 返回 HTML');
   const docsHtml = await res.text();
   assert(docsHtml.includes('/docs.js') && docsHtml.includes('/docs.css'), '阅读页引用自己的 js/css');
+  assert(docsHtml.includes('/portal.css'), '阅读页也引 portal.css（顶栏/按钮样式）');
   res = await fetch(base + '/docs.js');
   assert(res.status === 200, 'GET /docs.js 可访问');
   res = await fetch(base + '/docs.css');

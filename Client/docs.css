@@ -1,7 +1,18 @@
 /* 开放平台文档阅读页（与 portal 共用主题变量） */
 
-.docs-page {
+/* style.css 对 html/body 写了 height:100% + overflow:hidden（交易终端防整页滚动）。
+   文档页要靠文档流滚动，这里必须整页放开，否则正文超过一屏就被裁掉。 */
+html {
+  height: auto;
+  overflow: visible;
+  overflow-y: scroll;
+}
+
+body.docs-page,
+body.portal-page {
+  height: auto;
   min-height: 100vh;
+  overflow: visible;
 }
 
 .docs-bar {
