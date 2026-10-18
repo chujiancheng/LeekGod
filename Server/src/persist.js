@@ -13,6 +13,7 @@ const config = require('./config');
 const { openDatabase } = require('./db');
 const { r2 } = require('./store');
 const milestones = require('./milestones');
+const { logger } = require('./logger');
 
 const ORDER_HISTORY_KEEP = 100; // 每个账户保留的已完结委托行数（与内存 orderHistory 一致）
 const TAPE_KEEP = 500; // 逐笔成交恢复条数（与 config.market.tradeTapeSize 一致）
@@ -245,6 +246,12 @@ class Persister {
   commitInner({ now, markets, allAccounts }) {
     this.tickCount += 1;
 
+    // 成交流水先「摘走」再写：后面任何一步（writeAccount / upsertBar / prune / 事务提交）
+    // 抛错都不会把这一批留在 pendingTrades 里。旧实现把清空放在写入之后，
+    // 一旦 commit 中途抛出，下一 tick 就在旧队列上再叠一层——长跑几小时即 heap OOM
+    const trades = this.pendingTrades;
+    this.pendingTrades = [];
+
     for (const acc of this.dirty.values()) this.writeAccount(acc);
     this.dirty.clear();
 
@@ -252,13 +259,21 @@ class Persister {
     this.writeAutos();
     this.verifyLiveOrders(allAccounts);
 
-    for (const r of this.pendingTrades) {
-      this.st.insTrade.run(
-        r.account, r.role, r.orderId, r.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t,
-        r.broker || null, r.counterBroker || null
-      );
+    // 成交流水：单行失败只丢这一行（并 warn），不牵连同批其它行、更不拖垮队列
+    let tradeFail = 0;
+    for (const r of trades) {
+      try {
+        this.st.insTrade.run(
+          r.account, r.role, r.orderId, r.stockId, r.action, r.side, r.price, r.qty, r.fee, r.tradeSeq, r.t,
+          r.broker || null, r.counterBroker || null
+        );
+      } catch (e) {
+        tradeFail += 1;
+      }
     }
-    this.pendingTrades.length = 0;
+    if (tradeFail) {
+      logger.warn(`[存档] 本 tick 有 ${tradeFail} 条成交流水写入失败，已丢弃（账面资金不受影响）`);
+    }
     // 成交流水每 tick 裁一次（带 idx_trades_t 的区间删除，稳态下删的行数≈本 tick 新写的行数）：
     // 体量因此被压在「保留窗口 × 成交速度」，不会像 prices/orders 那样攒到几百轮再删
     const tradeKeepMs = config.persistence.tradeKeepMs;

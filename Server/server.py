@@ -127,8 +127,13 @@ def start():
             subprocess.CREATE_NEW_PROCESS_GROUP
             | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         )
+    # 显式抬高 V8 老生代上限：3160 NPC + 高频成交下默认 ~4GB 曾被挤爆
+    # （heap out of memory）。可用 NODE_OPTIONS 覆盖
+    node_cmd = ["node", SERVER_ENTRY]
+    if "NODE_OPTIONS" not in os.environ:
+        node_cmd = ["node", "--max-old-space-size=6144", SERVER_ENTRY]
     process = subprocess.Popen(
-        ["node", SERVER_ENTRY],
+        node_cmd,
         cwd=SERVER_DIR,
         stdin=subprocess.DEVNULL,
         stdout=log,

@@ -3,6 +3,7 @@
  * 存档器由外部注入（见 index.js）：未注入时纯内存运行，测试脚本即走这条路径。
  */
 const crypto = require('crypto');
+const v8 = require('v8');
 const config = require('./config');
 const { logger } = require('./logger');
 const { Store, Account, r2 } = require('./store');
@@ -19,6 +20,9 @@ const { WhaleManager } = require('./llm/whales');
 
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
+
+// 堆内存巡检间隔：3160 NPC 长跑曾 heap OOM，每 5 分钟打一条 used/limit 便于事后对时间线
+const HEAP_LOG_EVERY_TICKS = Math.max(1, Math.round(5 * 60 * 1000 / (config.tickIntervalMs || 700)));
 
 // 股东快照：每个账户保留最近若干次自己的操作快照（内存环形缓冲，重启清空）。
 // 快照给「较上次操作」的变动列和股东占比走势图提供基线与历史点。
@@ -572,6 +576,13 @@ class Game {
     // 本 tick 的全部变更（账户、委托、成交、行情）在一个事务里落盘。
     // markets 含 10 只股票 + 指数，接口同构所以一起写
     this.persist?.commit({ now, markets: [...this.markets.values()], allAccounts });
+
+    if (this.tickCount % HEAP_LOG_EVERY_TICKS === 0) {
+      const hs = v8.getHeapStatistics();
+      const usedMb = (hs.used_heap_size / 1048576).toFixed(0);
+      const limitMb = (hs.heap_size_limit / 1048576).toFixed(0);
+      logger.info(`[我是股神] 堆内存 used=${usedMb}MB / limit=${limitMb}MB（accounts=${allAccounts.length}）`);
+    }
   }
 
   // ---------- 交易日（见 src/daycycle.js） ----------

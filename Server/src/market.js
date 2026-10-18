@@ -1077,8 +1077,12 @@ class Market {
     };
 
     account.orders.set(order.id, order);
-    account.orderHistory.unshift(order);
-    if (account.orderHistory.length > 100) account.orderHistory.length = 100;
+    // 普通 NPC 不记委托/成交历史：3160 个账户各留 100 条会在长跑后把 V8 堆挤爆，
+    // 而这两份历史只有玩家 UI 与 AI 主力观测页会读（AI whale 有 ai=true，照常记）
+    if (!account.isNPC || account.ai) {
+      account.orderHistory.unshift(order);
+      if (account.orderHistory.length > 100) account.orderHistory.length = 100;
+    }
     if (!account.isNPC && !opts.noCooldown) account.lastOrderAt = now;
 
     // 集合竞价阶段：**只入簿、不撮合**。成交要等阶段结束时按「最大成交量原则」
@@ -1235,8 +1239,11 @@ class Market {
         t: now,
         side: aggressorSide,
       };
-      o.account.tradeHistory.unshift(rec);
-      if (o.account.tradeHistory.length > 100) o.account.tradeHistory.length = 100;
+      // 与 orderHistory 同规矩：普通 NPC 不留内存成交史（AI whale 与玩家照记）
+      if (!o.account.isNPC || o.account.ai) {
+        o.account.tradeHistory.unshift(rec);
+        if (o.account.tradeHistory.length > 100) o.account.tradeHistory.length = 100;
+      }
       // SYSTEM 是虚拟对手盘，不是真实账户，不进成交流水
       if (this.journal && o.account.name !== 'SYSTEM') {
         this.journal.recordTrade({
