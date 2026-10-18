@@ -72,6 +72,11 @@ body.portal-page {
   font-size: 14px;
 }
 
+/* 顶栏 sticky，锚点跳转要留出高度，否则标题被顶栏挡住 */
+.docs-article [id] {
+  scroll-margin-top: 72px;
+}
+
 .docs-h1 {
   font-size: 22px;
   margin: 0 0 16px;

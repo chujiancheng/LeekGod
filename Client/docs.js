@@ -25,6 +25,18 @@
     return DOCS[q] ? q : 'player';
   }
 
+  /** GitHub 风格锚点：去标点、空白转连字符、保留中文；与文档目录里的 #xxx 一致 */
+  function slugify(text) {
+    return (
+      String(text)
+        .trim()
+        .toLowerCase()
+        // 标点/括号去掉，空白与部分符号变连字符
+        .replace(/[^\w一-鿿぀-ヿ\- ]+/g, '')
+        .replace(/\s+/g, '-')
+    );
+  }
+
   function esc(s) {
     return String(s)
       .replace(/&/g, '&amp;')
@@ -40,7 +52,12 @@
       .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (_, text, href) {
         var h = String(href).trim();
-        // 只放行站内与锚点，防止文档里出现奇怪外链
+        // 文档里相对路径 ./*.md 映射到阅读页 / 下载地址
+        if (/^\.\/玩家申请APIKey\.md$/i.test(h) || /玩家申请APIKey\.md$/i.test(h)) {
+          h = '/docs.html?doc=player';
+        } else if (/^\.\/开放平台API\.md$/i.test(h) || /开放平台API\.md$/i.test(h)) {
+          h = '/docs.html?doc=api';
+        }
         if (h.charAt(0) !== '/' && h.charAt(0) !== '#' && !/^https?:\/\//i.test(h)) {
           return text;
         }
@@ -54,6 +71,7 @@
     var html = [];
     var i = 0;
     var listOpen = null; // 'ul' | 'ol' | null
+    var slugSeen = Object.create(null);
 
     function closeList() {
       if (listOpen) {
@@ -106,12 +124,22 @@
         continue;
       }
 
-      // 标题
+      // 标题（带 id，目录 #锚点 才能跳）
       var hm = /^(#{1,6})\s+(.*)$/.exec(line);
       if (hm) {
         closeList();
         var lv = hm[1].length;
-        html.push('<h' + lv + ' class="docs-h' + lv + '">' + inline(hm[2]) + '</h' + lv + '>');
+        var title = hm[2].trim();
+        var base = slugify(title) || 'section';
+        var slug = base;
+        var n = slugSeen[base] || 0;
+        slugSeen[base] = n + 1;
+        if (n > 0) slug = base + '-' + n;
+        html.push(
+          '<h' + lv + ' class="docs-h' + lv + '" id="' + esc(slug) + '">' +
+            inline(title) +
+            '</h' + lv + '>'
+        );
         i += 1;
         continue;
       }
@@ -211,6 +239,16 @@
       })
       .then(function (text) {
         body.innerHTML = '<article class="docs-article">' + renderMd(text) + '</article>';
+        // 带 #hash 进入（含目录点击前的刷新）时滚到对应标题
+        if (location.hash && location.hash.length > 1) {
+          var el = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+          if (el) {
+            // 等布局稳定后再滚，避开 sticky 顶栏
+            setTimeout(function () {
+              el.scrollIntoView({ block: 'start', behavior: 'auto' });
+            }, 0);
+          }
+        }
       })
       .catch(function () {
         body.innerHTML =
