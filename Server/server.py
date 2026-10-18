@@ -15,7 +15,9 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 PID_FILE = os.path.join(os.path.dirname(__file__), "server.pid")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "server.log")
+# node 的业务日志由 log4js 按天切割落盘（Server/server.YYYY-MM-DD.log）；
+# 这里重定向的只是 logger 初始化之前的崩溃输出（缺模块、语法错误等）
+CONSOLE_LOG = os.path.join(os.path.dirname(__file__), "server-console.log")
 SERVER_DIR = os.path.dirname(__file__)
 SERVER_ENTRY = os.path.join(SERVER_DIR, "index.js")
 ADMIN_TOKEN_FILE = os.path.join(SERVER_DIR, "data", "admin.token")
@@ -97,16 +99,16 @@ def remove_pid():
 
 
 def rotate_log():
-    """日志超过阈值时轮转一次，避免长期运行无限增长"""
-    if not os.path.exists(LOG_FILE):
+    """控制台兜底日志超过阈值时轮转一次，避免无限增长（业务日志按天切割，不归这里管）"""
+    if not os.path.exists(CONSOLE_LOG):
         return
     try:
-        if os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
+        if os.path.getsize(CONSOLE_LOG) < LOG_MAX_BYTES:
             return
-        backup = LOG_FILE + ".1"
+        backup = CONSOLE_LOG + ".1"
         if os.path.exists(backup):
             os.remove(backup)
-        os.replace(LOG_FILE, backup)
+        os.replace(CONSOLE_LOG, backup)
     except OSError:
         pass
 
@@ -119,7 +121,7 @@ def start():
 
     print("正在启动服务器...")
     rotate_log()
-    log = open(LOG_FILE, "a", encoding="utf-8")
+    log = open(CONSOLE_LOG, "a", encoding="utf-8")
     creationflags = 0
     if os.name == "nt":
         # 独立进程组 + 与控制台解绑，避免父终端退出时带走服务
@@ -144,12 +146,12 @@ def start():
     time.sleep(1)
 
     if process.poll() is not None:
-        print("启动失败，查看 server.log")
+        print("启动失败，查看 server-console.log")
         remove_pid()
     else:
         print(f"服务器已启动 (PID: {process.pid})")
         print(f"访问地址: http://{os.environ.get('HOST', '0.0.0.0')}:{os.environ.get('PORT', '3000')}")
-        print(f"日志文件: {LOG_FILE}")
+        print(f"日志文件: {os.path.join(SERVER_DIR, 'server.' + time.strftime('%Y-%m-%d') + '.log')}（按天切割，保留 30 天）")
 
 
 def stop():

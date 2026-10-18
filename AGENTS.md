@@ -34,5 +34,6 @@ Server 需要 npm 依赖（log4js 日志 + better-sqlite3 存档）。新环境�
 - 停服时不要顺手删 game.db，先确认那是不是正式存档。
 
 # 日志
-统一走 Server/src/logger.js（log4js），落盘在 Server/server.log，超 5MB 轮转。
+统一走 Server/src/logger.js（log4js），**按天切割**落盘在 Server/server.YYYY-MM-DD.log，自动保留 30 天。
+node 的 stdout/stderr 由 server.py 重定向到 Server/server-console.log，只承接启动早期崩溃输出。
 新代码不要用 console.log/error（test/ 下测试脚本自身输出除外）。
