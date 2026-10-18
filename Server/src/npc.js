@@ -1018,7 +1018,14 @@ class NpcManager {
     // init() 不挂单，首个 step 里 recycleLiquidity 跑在报价循环**之前**，
     // 缺这道闸的话每次开服/换阶段都会给 10 只股票各记一条假的"买盘侧为空"
     const auction = this.market.auctionKind ? this.market.auctionKind(now) : null;
-    const noBid = !auction && this._quotedOnce && this.market.book.bids.length === 0;
+    // 判据从"整侧空"改成"深度不够"：`bids.length === 0` 只有归零才动作，是事后抢救，
+    // 玩家在看盘时早就看到五档全空了。改成按深度，能在空档形成之前就把钱补进去。
+    // 未配置 liquidityBidDepthLots 时退回原判据（探针 A/B 用）。
+    const minBid = cfg.liquidityBidDepthLots != null ? cfg.liquidityBidDepthLots * lot : 0;
+    const bidDepth = minBid > 0 ? this.sideDepth('bid') : 0;
+    const thinBid =
+      minBid > 0 ? bidDepth < minBid : this.market.book.bids.length === 0;
+    const noBid = !auction && this._quotedOnce && thinBid;
     if (!dry && (!noBid || this._topUpCool > 0)) {
       this._dryLogged = false;
       return;
@@ -1027,7 +1034,9 @@ class NpcManager {
       this._dryLogged = true;
       logger.info(
         `[我是股神] ${this.stock.name} NPC 池流动性不足（` +
-          (dry ? `全池现金 ${r2(cash)} < 地板 ${r2(floor)}` : `买盘侧为空`) +
+          (dry
+            ? `全池现金 ${r2(cash)} < 地板 ${r2(floor)}`
+            : `买盘深度 ${Math.round(bidDepth / lot)} 手 < 目标 ${Math.round(minBid / lot)} 手`) +
           `），开始回补`
       );
     }
@@ -1039,11 +1048,17 @@ class NpcManager {
       return;
     }
     // 买盘空了：只给最穷的几个人头补到目标，然后歇一会儿
-    const lots = cfg.liquidityTopUpLots != null ? cfg.liquidityTopUpLots : 8;
+    const baseLots = cfg.liquidityTopUpLots != null ? cfg.liquidityTopUpLots : 8;
     const heads = cfg.liquidityTopUpHeads != null ? cfg.liquidityTopUpHeads : 2;
     const cd = cfg.liquidityTopUpCooldown != null ? cfg.liquidityTopUpCooldown : 12;
     if (heads <= 0) return; // 配 0 = 关掉这条（探针 A/B 用）
-    const target = need * lots;
+    // 补款目标按**缺口摊到本轮人头**，单人封顶 40 手：
+    // 固定 8 手的旧口径下，一轮注入 ≈ 8 手 × 2 人，挂在五档里只够填一档的一半，
+    // 深度永远低于 thinBookFloor，主动卖单全被拦 → 买盘不消耗也不增长，盘面长时间冻住。
+    // 按缺口摊之后一轮就能把深度垫到目标；封顶与冷却保证不会逐 tick 无限注水。
+    const gapLots = minBid > 0 ? Math.max(0, Math.ceil((minBid - bidDepth) / lot)) : 0;
+    const perLots = Math.min(40, Math.max(baseLots, Math.ceil(gapLots / heads)));
+    const target = need * perLots;
     // 只补**还有买入空间**的账户：钱给了已经打满 longCapMult 的账户也进不了买盘，
     // 只会变成闲钱把池子现金越垫越高（进而抬高力量天平的"弹药"票）。
     // 这条同时给机制设了一个自然上界——全池买入空间被填满后它就不再注水
@@ -1108,10 +1123,25 @@ class NpcManager {
 
   /** 撤旧挂单并按公允价值+情绪挂双边报价 */
   requote(n, now) {
+    // 买盘供给保护：**本账户此刻挂不出新买单时，保留它原来那张买单**。
+    // requote 是先撤后挂；撤掉之后挂不回来，等于把盘口最后一张买单抹掉。
+    // 实测买盘空档那一刻：99.7% 的账户手上挂着卖单、**0% 挂着买单** —— 而当时
+    // 91.8% 的账户是"现金不够一手"（不是空头阵营、不是额度满）。
+    // 也就是说买盘不是被主动单吃光的（thinBookFloor + maxTake 已经保证至少留一档），
+    // 而是被自己的撤单动作抹掉的：一张买单在随机 requote 时被撤，随即因没钱挂不回去，
+    // 盘口就永久少一张。316 个账户轮流这么干，五档自然被啃到全空。
+    const canBid = n.acc.cash >= this.market.lastPrice * this.stock.lotSize;
     for (const o of n.ownResting) {
-      if (o.status === 'live') this.market.cancel(n.acc, o.id, now, { internal: true });
+      if (o.status !== 'live') continue;
+      const isBid = o.action === ACTIONS.BUY_OPEN || o.action === ACTIONS.BUY_CLOSE;
+      if (isBid && !canBid) continue;
+      this.market.cancel(n.acc, o.id, now, { internal: true });
     }
-    n.ownResting = [];
+    n.ownResting = n.ownResting.filter((o) => o.status === 'live');
+    // 上面保留下来的买单还在簿上，本 tick 不再重复挂一张（同一账户两张买单会虚增深度）
+    const keptBid = n.ownResting.some(
+      (o) => o.status === 'live' && (o.action === ACTIONS.BUY_OPEN || o.action === ACTIONS.BUY_CLOSE)
+    );
 
     const p = this.profileOf(n);
     // 有券可借就能开空（不必等裸空后门）；place 里会再查 lendAvailable
@@ -1162,7 +1192,7 @@ class NpcManager {
     const shortQty = n.acc.shortQty(this.stock.id);
     // 意图裁剪：派发期不开多、挤兑期不挂卖、吸筹期加大承接买盘
     const blockOpenBuy = wantShort || !!(ie && ie.suppressOpenBuy);
-    if ((!wantShort || shortQty > 0) && bidPx > 0.01) {
+    if (!keptBid && (!wantShort || shortQty > 0) && bidPx > 0.01) {
       let qty = roundLot(
         rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt) * (ie ? ie.bidBoost : 1) * this._mul.qty,
         lot
@@ -1313,9 +1343,17 @@ class NpcManager {
         const bidRemain = Math.max(0, bid.qty - bid.filled);
         const sellable = n.acc.freeSellableLong(this.stock.id, now);
         const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
+        // 给买盘留一口：impactCap 允许吃到最优档的 aggroDepthMult(3) 倍 ——
+        // 买一剩 5000 股时一笔卖单可砸 15000 股，买一到买五被一笔扫光是常态。
+        // **这才是"五档买盘突然全空"的机械原因**：旧口径只在买一 < 3000 股时才拦，
+        // 剩 3001 股时照样整侧扫穿；而扫穿后买盘补不回来（挂买的条件比挂卖严得多），
+        // 盘面就冻在那里——没人买、没人卖、价格不动，正好是玩家看到的"诡异"。
+        // 改成"砸完必须留 floor 股"，厚买盘时 maxTake 巨大，行为与原来一致。
+        const keep = Math.min(floor, bidRemain);
+        const maxTake = Math.max(0, bidRemain - keep);
         const sized = (cap) =>
-          Math.floor(Math.min(cap, this.impactCap(bid)) / lot) * lot;
-        if (bidRemain < floor) return;
+          Math.floor(Math.min(cap, this.impactCap(bid), maxTake) / lot) * lot;
+        if (maxTake < lot) return;
         if (sellable >= 100) {
           let qty = roundLot(
             rand(aq[0], aq[1]) * this.qtyScale * moodScale * (ie ? ie.aggroBoost : 1) * this._mul.qty,
