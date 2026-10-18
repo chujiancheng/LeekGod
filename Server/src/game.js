@@ -421,12 +421,22 @@ class Game {
       // 券商归属（席位数据源）与消息情报等级都是**由账户名确定性派生**的派生标签，
       // 不落盘，所以恢复时按同一套账户名重算一遍即可（§11.4.1）
       npc.applyTags();
-      // 公允价值/重心/趋势阶段/情绪结构不落盘（随机游走的中间量），重新锚到现价
+      // 公允价值/重心/趋势阶段/情绪结构不落盘（随机游走的中间量），重新锚到现价。
+      // 周期层同样不落盘：fund 锚到 lastPrice 时已经隐含了过往周期的累计涨幅
+      //（价格本身就是周期走出来的结果），所以 cycleLog 无需恢复——保险丝极弱（2e-5），
+      // 不会把重启后的价格拉回发行价；方向/推力下个 tick 由 updateCycle 重新抽
       npc.fairValue = market.lastPrice;
       npc.fund = market.lastPrice;
       npc.regime = 0;
       npc.regimeIn = 0;
       npc.trendDrift = 0;
+      npc.cycleDir = 0;
+      npc.cycleDrift = 0;
+      npc.cycleLeft = 0;
+      // 周期成分从现价接续：过往周期走出的涨幅已经体现在现价里，把它记成
+      // cycleLog 的起点，重启不会把价格往发行价拉回去（纹理从 0 开始重新积累）
+      npc.cycleLog = Math.log(market.lastPrice / stock.initPrice);
+      npc._cycInit = false;
       npc.instMood = 0;
       npc.polar = 0.2;
       npc.polarTarget = 0.2;

@@ -84,6 +84,13 @@ class NpcManager {
     this.regime = 0; // 1 牛 / 0 震荡 / -1 熊
     this.regimeIn = 0; // 当前阶段剩余 tick
     this.trendDrift = 0; // 当前阶段每 tick 相对推力（带符号）
+    // 行情周期层（config.npc.cycle）：牛/熊/震荡三态马尔可夫机，周月级慢变量，
+    // 与 trend 相位的分钟级纹理正交。cycleDir 与 fund/regime 同级内幕，不下发客户端
+    this.cycleDir = 0; // 1 牛 / 0 震荡 / -1 熊
+    this.cycleDrift = 0; // 周期层每 tick 对数推力（带符号，已按隔夜倍数折算）
+    this.cycleLeft = 0; // 当前周期状态已持续 tick（诊断用；换挡靠无记忆概率，不靠倒计时）
+    this.cycleLog = 0; // 周期成分累计对数涨幅（重心里的周月级分量，随机游走）
+    this._cycInit = false; // 周期层派生量（一日 tick 当量 / 隔夜折算 / 纹理衰减率）惰性缓存
     this.priceTrail = []; // 最近若干 tick 的最新价，供滚动动量计算
     // 机构情绪结构：共享情绪波 + 分歧度（0=全体一致跟情绪走，1=多空阵营贴身对打）
     this.instMood = 0; // 共享慢波（一致时的集体多/空）
@@ -404,6 +411,7 @@ class NpcManager {
     const last = this.market.lastPrice;
 
     this.updateTrend();
+    this.updateCycle();
 
     // 夜间（40 秒休市代表现实的一整夜）推力按 overnightDriftMul 放大。
     // **重心与短端公允一起放大**——只推短端的话，机构的定价锚（fundWeight 0.7）一夜不动，
@@ -413,19 +421,42 @@ class NpcManager {
     const trendMul = overnight ? cfg.overnightDriftMul || 1 : 1;
     const fundMul = overnight && cfg.fundOvernightFollow ? trendMul : 1;
 
-    // 重心跟随趋势慢一拍迁移（大级别的底），再以约 15 分钟时间常数回归发行价。
+    // 重心跟随趋势慢一拍迁移（大级别的底），再以超长期保险丝回归发行价。
     // 回归用对数空间（乘性距离对称）：涨十倍和跌到十分之一受同等强度的拉回，
-    // 不会像线性回归那样把深跌底部额外托住
+    // 不会像线性回归那样把深跌底部额外托住。
+    // 2026-10-18：fundAnchor 从 0.0008（半衰期 1 个游戏日，牛熊杀手）降到 2e-5 的
+    // 超长期保险丝，周月级方向改由 cycle 层承载（见下面的周期成分记账）
     this.fund *= 1 + this.trendDrift * fundMul * cfg.fundTrendFollow;
     this.fund *= 1 + Math.log(init / this.fund) * cfg.fundAnchor;
     this.fund *= 1 + gauss() * cfg.fundNoiseRel;
+    const cyc = config.npc.cycle;
+    if (cyc && cyc.enabled && this._cycInit) {
+      // 周期成分单独记账（随机游走），重心以纹理衰减率回归它：
+      // - 周期推力不直接乘在 fund 上，而是进 cycleLog → fundCycle，fund 以
+      //   ~10 个游戏日半衰期跟上（价格本身通过 fv 的直接推力立即感知周期）
+      // - **保险丝必须作用在 cycleLog 上**：fund 每 tick 被重建成
+      //   fundCycle × exp(tex)，作用在 fund 上的回归会被重建覆盖掉。
+      //   cycleLog *= (1−fundAnchor) 与旧版 fund 锚同数学：给周期游走一个
+      //   与漂移速度相关的软边界（牛顶 ≈ e^(日漂移/0.0177) ≈ 2~4×，熊底 ≈ 0.5×），
+      //   蒙特卡洛标定时的行为与此一致
+      // - **没有纹理衰减重心也会随机游走**：3 分钟相位漂移在重心上无衰减累积，
+      //   day-probe 实测把日收益 std 从 4.38% 抬到 7.25%。衰减 + textureCap
+      //   把相位纹理的偏离限制在 ±cap 内
+      this.cycleLog += this.cycleDrift * fundMul;
+      this.cycleLog *= 1 - cfg.fundAnchor;
+      const fundCycle = init * Math.exp(this.cycleLog);
+      let tex = Math.log(this.fund / fundCycle);
+      const cap = cyc.textureCap || 0.2;
+      tex = Math.max(-cap, Math.min(cap, tex));
+      this.fund = fundCycle * Math.exp(tex * (1 - this._texDecay));
+    }
 
     let fv = this.fairValue;
     // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）。
     // **只有夜间**按 overnightDriftMul 放大——游戏里的 40 秒夜间代表现实一整夜，
     // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
     // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
-    fv *= 1 + this.trendDrift * trendMul;
+    fv *= 1 + (this.trendDrift + this.cycleDrift) * trendMul;
     // 消息推力（乘性，只算本股 + 大盘消息）。viewer = 全池最早知道的那一级：
     // 公允价值是池级共享量，机构（L1）在公开前 4s 就把它推起来 → 「股价先动、消息后到」
     fv *= 1 + this.news.fvDrift(now, this.stock.id, this.poolViewer);
@@ -473,6 +504,60 @@ class NpcManager {
       }
     }
     this.regimeIn -= 1;
+  }
+
+  /**
+   * 行情周期层（config.npc.cycle）：牛 / 熊 / 震荡三态马尔可夫机，周月级慢变量。
+   * 与 trend 相位（分钟级纹理）正交，补上真实市场「盈利/流动性周期」那一层慢变量。
+   * 宪法与 trend 相位一致（见 config.npc.cycle 注释）：
+   * - 换挡无记忆：每 tick 恒定小概率换挡（几何分布），已走多久推不出还要走多久，
+   *   顶底无法倒计时——刻意不做「抽一次时长跑完」的日程表，那会留下可倒计时的破绽
+   * - 幅度不做目标：整段周期对数涨/跌幅抽签后摊成每 tick 恒定慢推力；
+   *   段内仍有 trend 纹理与噪声，K 线扭动、无法直线外推
+   * - 隔夜折算：夜间推力按 overnightDriftMul 放大，一日有效推力当量 ≈
+   *   一天 tick 数 × boost（boost ≈ 1.77），目标涨幅先除以它再摊，否则幅度凭空翻倍
+   */
+  updateCycle() {
+    const cyc = config.npc.cycle;
+    if (!cyc || !cyc.enabled) {
+      this.cycleDrift = 0;
+      return;
+    }
+    if (!this._cycInit) {
+      const tickMs = config.tickIntervalMs || 700;
+      const phases = config.day && config.day.enabled ? config.day.phases : null;
+      const dayMs = phases ? phases.reduce((s, p) => s + p.ms, 0) : 620000;
+      const nightMs = phases
+        ? (phases.find((p) => p.key === 'night') || { ms: 0 }).ms
+        : 0;
+      this._dayTicks = dayMs / tickMs;
+      const mul = config.npc.overnightDriftMul || 1;
+      this._nightBoost =
+        1 + ((nightMs / tickMs) * (mul - 1)) / this._dayTicks;
+      // 每 tick 换挡概率 = 1 /（期望持续天数 × 一天 tick 数）——几何分布无记忆
+      this._cycHazard =
+        1 / (((cyc.minDays + cyc.maxDays) / 2) * this._dayTicks);
+      // 纹理衰减率：相位漂移给重心注入的偏离按此半衰期回归周期成分
+      this._texDecay =
+        Math.log(2) / ((cyc.textureHalfLifeDays || 10) * this._dayTicks);
+      this._cycInit = true;
+    }
+    if (this.cycleLeft <= 0 || Math.random() < this._cycHazard) {
+      const r = Math.random();
+      const dir =
+        r < cyc.bearWeight ? -1 : r < cyc.bearWeight + cyc.bullWeight ? 1 : 0;
+      this.cycleDir = dir;
+      const target =
+        dir === 0
+          ? rand(cyc.flatTarget[0], cyc.flatTarget[1])
+          : dir > 0
+            ? rand(cyc.bullTarget[0], cyc.bullTarget[1])
+            : rand(cyc.bearTarget[0], cyc.bearTarget[1]);
+      // 摊到每 tick：除以（期望持续 tick × 隔夜放大当量），整段期望幅度 ≈ target
+      this.cycleDrift = target / (((cyc.minDays + cyc.maxDays) / 2) * this._dayTicks * this._nightBoost);
+      this.cycleLeft = 1; // 已进入一个新状态；下次换挡由 hazard 概率决定
+    }
+    this.cycleLeft += 1;
   }
 
   /**

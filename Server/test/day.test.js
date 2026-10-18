@@ -541,6 +541,10 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     npc0.trendDrift = 0.001;
     npc0.regime = 1;
     npc0.regimeIn = 1000;
+    // 隔离周期层（2026-10-18 新增）：本用例检验的是「只有夜间放大」的定价路径不变量，
+    // 周期推力是另一条通道——固定 cycleDrift=0 且不换挡，才能保住严格倍数关系
+    npc0.cycleDrift = 0;
+    npc0.cycleLeft = 1e9;
     const real = Math.random;
     Math.random = () => 0.5;
     try {
@@ -565,10 +569,14 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     priceCoupling: config.npc.priceCoupling,
     fvAnchor: config.npc.fvAnchor,
     fundAnchor: config.npc.fundAnchor,
+    cycleEnabled: config.npc.cycle && config.npc.cycle.enabled,
   };
   config.npc.priceCoupling = 0;
   config.npc.fvAnchor = 0;
   config.npc.fundAnchor = 0;
+  // 周期层的纹理回归 fundCycle*exp(tex·(1−d)) 是指数式记账，会破坏严格倍数关系
+  //（与 fundAnchor 同理），本用例一并关闭
+  if (config.npc.cycle) config.npc.cycle.enabled = false;
   let m1, l1, n1;
   try {
     m1 = at(P.morning + 1000);
