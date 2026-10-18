@@ -13,6 +13,25 @@ cd Server
 重启指令 python server.py restart
 以上三种操作都通过上面的指令进行
 
+# 开放平台 API Key（玩家量化策略）
+玩家自助路径（常规，不需要你操作）：登录游戏 → 主页「开放接口」→ /portal.html 生成 / 查看 / 撤销。
+页面走 /api/open/keys（会话令牌鉴权，只能操作自己的 Key），明文只在浏览器弹层出现一次。
+
+运维代管（仅在需要锁 IP、帮查、账号被盗时用）：
+cd Server
+签发：python openkey.py issue <账号> [--label 备注] [--scopes read,trade] [--ip 127.0.0.1] [--base 对外地址] [--handout]
+列表：python openkey.py list [账号] [--all]
+撤销：python openkey.py revoke <KeyID>
+- 需要服务正在运行；账号必须已在游戏里开完户（有昵称 + 券商）。
+- **明文 Key 只在签发时打印一次**（库里只存 sha256），丢了只能撤销重发，谁都无法找回。
+- `--handout --base http://<对外地址>:3000` 会打印一段可直接私聊转发的发货文案（含自检命令）；
+  不要发群、不要截图。代发前核对：账号名（不是昵称）、已开户、现有 Key 未满 8 把。
+- 网页生成不绑 IP；玩家要锁来源时用上面 `--ip` 代发。
+- 接口文档 Doc/开放平台API.md（完全手册，含逐字段说明与可直接给 AI 的施工说明），
+  玩家入门 Doc/玩家申请APIKey.md（玩家版，网页自助，不含运维命令），
+  示例策略 Server/examples/quant_ma.py（双均线演示）、Server/examples/quant_template.py（长期运行骨架）。
+- 会话令牌与 API Key 是两套凭据，不能互相顶替。
+
 # 依赖
 Server 需要 npm 依赖（log4js 日志 + better-sqlite3 存档）。新环境首次运行前先在 Server 目录执行 npm install，
 否则 node index.js 会直接报模块找不到、服务起不来。

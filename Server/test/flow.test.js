@@ -235,7 +235,7 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
 
 console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列与彩蛋列可原地升级');
 {
-  assert(SCHEMA_VERSION === 6, `存档表结构版本为 6（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 7, `存档表结构版本为 7（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -286,7 +286,11 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   assert(!upMsg && !!db4, `版本 3 的旧档被原地升级而不是拒绝：${upMsg}`);
   if (db4) {
     const v = db4.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert(Number(v.value) === 6, `升级后版本号写成 6（实际 ${v.value}）`);
+    assert(Number(v.value) === SCHEMA_VERSION, `升级后版本号写成 ${SCHEMA_VERSION}（实际 ${v.value}）`);
+    const keyTable = db4
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
+      .get();
+    assert(!!keyTable, '版本 6 → 7 补出了 api_keys 表');
     const row = db4.prepare('SELECT * FROM accounts WHERE name = ?').get('老玩家');
     assert(row && row.cash === 123456, '升级保留了原有账户数据');
     assert(row.broker === null, '老账号的 broker 为 NULL（表示还没选过券商）');

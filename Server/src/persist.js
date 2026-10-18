@@ -566,6 +566,12 @@ class Persister {
     );
   }
 
+  /** 存档里已有的最大成交序号：重启时用它把全局计数器抬到旧值之上（`/fills` 游标不回退） */
+  maxTradeSeq() {
+    const row = this.db.prepare('SELECT MAX(trade_seq) AS n FROM trades').get();
+    return row && row.n ? Number(row.n) : 0;
+  }
+
   /** 玩家成交记录，字段与 market.execute 里生成的流水一致 */
   tradeHistory(account, limit = ORDER_HISTORY_KEEP) {
     return this.st.tradeHistory.all(account.name, limit).map((r) => ({
@@ -577,6 +583,9 @@ class Persister {
       price: r.price,
       qty: r.qty,
       t: r.t,
+      // 成交序号也要恢复：`/open/v1/fills` 的增量游标靠它。库里存的是写入时的
+      // 全服序号，重启时 Game 会从这个最大值继续往上发号，游标不会回退
+      seq: r.trade_seq,
     }));
   }
 

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>开放平台 · 我是股神</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body class="portal-page">
+  <header class="portal-head">
+    <div class="portal-brand">
+      <div class="portal-title">开放平台</div>
+      <div class="portal-sub" id="whoami">读取登录状态…</div>
+    </div>
+    <nav class="portal-nav">
+      <a class="portal-link" href="/">返回主页</a>
+    </nav>
+  </header>
+
+  <main class="portal-main">
+    <section class="portal-card portal-intro">
+      <h1>用你自己的策略，自动交易</h1>
+      <p class="portal-lead">
+        策略跑在<strong>你自己的电脑</strong>上（Python / Node 都行），通过 HTTP 读写这个模拟盘。
+        规则和你手动点鼠标完全一样：同样的下单冷却、费率、锁仓、涨跌停——接口只是替你点了鼠标。
+      </p>
+      <ul class="portal-points">
+        <li><b>一把 Key 一个策略</b>：出问题只撤销那一把，不影响其他。</li>
+        <li><b>明文只显示一次</b>：服务器只存哈希，连管理员也看不到，丢了只能重发。</li>
+        <li><b>限流</b>：读 240 次/分钟、交易 60 次/分钟；撮合 700ms 一个 tick，轮询更密没用。</li>
+      </ul>
+      <p class="portal-docs">
+        <a class="portal-btn ghost small" href="/docs.html?doc=player">玩家入门文档</a>
+        <a class="portal-btn ghost small" href="/docs.html?doc=api">API 完全手册</a>
+        <a class="portal-btn ghost small" href="/docs/player-apikey.md?download=1">下载入门 .md</a>
+        <a class="portal-btn ghost small" href="/docs/openapi.md?download=1">下载 API .md</a>
+      </p>
+    </section>
+
+    <section class="portal-card" id="loginHint" hidden>
+      <h2>先登录</h2>
+      <p>这个页面要用你的游戏登录状态，才能把 Key 绑到你自己的账号上。</p>
+      <p><a class="portal-btn primary" href="/">回主页登录</a></p>
+    </section>
+
+    <section class="portal-card" id="createCard" hidden>
+      <div class="portal-card-head">
+        <h2>申请一把 Key</h2>
+        <span class="portal-quota" id="quotaNote"></span>
+      </div>
+      <form id="createForm" class="portal-form" autocomplete="off">
+        <label class="portal-field">
+          <span>备注（用在哪台机器 / 哪个策略）</span>
+          <input id="labelInput" maxlength="40" placeholder="例如：家用电脑-双均线" autocomplete="off">
+        </label>
+        <label class="portal-field">
+          <span>权限</span>
+          <select id="scopesSelect">
+            <option value="read,trade">read,trade — 可以下单、撤单</option>
+            <option value="read">read — 只看行情和账户</option>
+          </select>
+        </label>
+        <div class="portal-form-actions">
+          <button class="portal-btn primary" type="submit" id="createBtn">生成 Key</button>
+          <span class="portal-msg" id="createMsg"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="portal-card" id="keysCard" hidden>
+      <div class="portal-card-head">
+        <h2>我的 Key</h2>
+        <button class="portal-btn ghost small" id="refreshBtn" type="button">刷新</button>
+      </div>
+      <p class="portal-empty" id="keysEmpty" hidden>还没有有效的 Key，上面生成一把。</p>
+      <div class="portal-table-wrap" id="keysWrap" hidden>
+        <table class="portal-table">
+          <thead>
+            <tr>
+              <th>KeyID</th>
+              <th>备注</th>
+              <th>权限</th>
+              <th>创建</th>
+              <th>最近使用</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="keysBody"></tbody>
+        </table>
+      </div>
+      <p class="portal-note">Key 明文不保存在服务器，页面也不会再显示。换机器、丢了、怀疑泄露，撤销后重新生成即可，立即生效。</p>
+    </section>
+
+    <section class="portal-card" id="quickCard" hidden>
+      <h2>拿到 Key 之后</h2>
+      <p>先把 Key 存进环境变量，再探活。看到 <code>"ok": true</code> 就说明通了。</p>
+      <pre class="portal-code" id="quickCode"></pre>
+      <p class="portal-note">
+        完整接口手册与策略骨架在群文件《开放平台API.md》《玩家申请APIKey.md》；
+        不知道怎么写，可以把手册和你的想法一起丢给 AI，让它照着写。
+      </p>
+    </section>
+  </main>
+
+  <div class="portal-modal" id="secretModal" hidden>
+    <div class="portal-modal-card">
+      <h2>这把 Key 只显示这一次</h2>
+      <p class="portal-warn">复制走并保存好。关掉这个窗口后就再也看不到明文了，只能撤销重发。</p>
+      <div class="portal-secret" id="secretValue"></div>
+      <div class="portal-form-actions">
+        <button class="portal-btn primary" id="copyBtn" type="button">复制 Key</button>
+        <button class="portal-btn ghost" id="closeModalBtn" type="button">我已保存</button>
+      </div>
+      <p class="portal-msg" id="copyMsg"></p>
+    </div>
+  </div>
+
+  <script src="/portal.js"></script>
+</body>
+</html>

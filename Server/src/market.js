@@ -20,6 +20,24 @@ const ACTIONS = {
 const BUY_ACTIONS = new Set([ACTIONS.BUY_OPEN, ACTIONS.BUY_CLOSE]);
 const VALID_ACTIONS = new Set(Object.values(ACTIONS));
 
+/**
+ * 全服成交序号（`/open/v1/fills` 的增量游标）。
+ *
+ * 早先用的是**每只股票各自的逐笔序号**（`trades[0].seq`），账户同时交易两只股票时
+ * 会出事：A 股序号到 100、B 股才 50，客户端拿 100 当游标，B 股之后所有成交都被永久漏掉。
+ * 所以游标必须是跨股票单调的。
+ *
+ * 起点由存档里 `trades.trade_seq` 的最大值 +1 决定（`Game` 构造时注入），重启后接着往上走：
+ * 客户端存下的旧游标不会漏单，也不会把重启前收到的成交重新推一遍。
+ */
+let TRADE_SEQ = 0;
+const nextTradeSeq = () => (TRADE_SEQ += 1);
+/** 启动时把计数器抬到「存档里已有序号之上」，只升不降 */
+function setTradeSeqBase(n) {
+  const v = Number(n);
+  if (Number.isFinite(v) && v > TRADE_SEQ) TRADE_SEQ = Math.trunc(v);
+}
+
 class Market {
   constructor(stock) {
     this.stock = stock;
@@ -1227,7 +1245,9 @@ class Market {
     // 记录双方成交：内存流水用于客户端展示，落库明细用于重启后恢复成交记录
     this.notifyChange(taker.account, taker);
     this.notifyChange(maker.account, maker);
-    const tradeSeq = this.trades[0] ? this.trades[0].seq : 0;
+    // 成交序号：**跨股票全局单调**（见文件头的 TRADE_SEQ）。`/open/v1/fills` 拿它做
+    // 增量游标；同一 tick 可能连出好几笔，用时间戳会把同毫秒的成交整批漏掉。
+    const tradeSeq = nextTradeSeq();
     for (const o of [taker, maker]) {
       const rec = {
         id: 'T' + tradeSeq + '-' + o.id + '-' + qty,
@@ -1238,6 +1258,9 @@ class Market {
         qty,
         t: now,
         side: aggressorSide,
+        // 成交序号：开放接口的 /fills 用它做增量游标（同一 tick 可能连出好几笔，
+        // 用时间戳做游标会把同毫秒的成交整批漏掉）
+        seq: tradeSeq,
       };
       // 与 orderHistory 同规矩：普通 NPC 不留内存成交史（AI whale 与玩家照记）
       if (!o.account.isNPC || o.account.ai) {
@@ -1970,4 +1993,4 @@ class Market {
 const SYSTEM_ACCOUNT = new (require('./store').Account)('SYSTEM', true);
 SYSTEM_ACCOUNT.cash = Infinity;
 
-module.exports = { Market, ACTIONS };
+module.exports = { Market, ACTIONS, setTradeSeqBase };

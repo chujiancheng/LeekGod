@@ -443,9 +443,9 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
 }
 
 // ============================================================
-console.log('\n[14] 存档版本 4 → 6：逐级原地升级补出 milestones 与 nick 列');
+console.log('\n[14] 存档版本 4 → 7：逐级原地升级补出 milestones 与 nick 列（以及 7 的 api_keys 表）');
 {
-  assert(SCHEMA_VERSION === 6, `当前版本是 6（${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 7, `当前版本是 7（${SCHEMA_VERSION}）`);
   const FILE = tmpFile('v4');
   rmDb(FILE);
   const db = new Database(FILE);
@@ -473,7 +473,7 @@ console.log('\n[14] 存档版本 4 → 6：逐级原地升级补出 milestones �
   assert(!err && !!up, `版本 4 的档被原地升级而不是拒绝：${err}`);
   if (up) {
     const v = up.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    assert(Number(v.value) === 6, `版本号写成 6（${v.value}）`);
+    assert(Number(v.value) === SCHEMA_VERSION, `版本号写成 ${SCHEMA_VERSION}（${v.value}）`);
     const row = up.prepare('SELECT cash, milestones, nick FROM accounts WHERE name = ?').get('老玩家');
     assert(row.cash === 888, '原数据无损');
     assert(row.milestones === null, '新增的 milestones 列为 NULL');

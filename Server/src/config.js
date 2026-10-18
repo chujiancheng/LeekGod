@@ -165,6 +165,34 @@ const config = {
     },
   },
 
+  // 开放交易接口（/open/v1）：玩家自带量化模型，在自己机器上跑策略，调这里读写。
+  //
+  // 与 H5 走的 /api/* 是**两套鉴权**：/api 认免密登录签发的会话令牌，/open 认 API Key
+  // （随机 secret、哈希存库、可撤销）。免密登录只适合"自己点着玩"，任何能连到端口的人
+  // 只要知道账号名就能拿到会话令牌，绝不能拿它当程序化接口的凭据。
+  //
+  // 规则完全一致：open 接口的下单最终都走 game.placeOrderFor → market.place，
+  // 冷却、锁仓、费率、保证金、同股多空互斥、涨跌停一条都不放宽。差异化只在
+  // 「请求配额」——程序化轮询天然比手点频繁，配额给得比 H5 宽，但下单冷却不变。
+  open: {
+    enabled: true,
+    rateLimit: {
+      enabled: true,
+      // 按 Key 计（不按 IP）：同一台机器可能同时跑好几个策略
+      read: { limit: 240, windowMs: 60000 }, // 行情/账户/委托/成交查询
+      trade: { limit: 60, windowMs: 60000 }, // 下单/撤单（与 H5 的 order 档同量级）
+      // 按 IP 的兜底：防止一个脚本疯狂新建 Key 或刷不存在的 Key 把 CPU 打满
+      ip: { limit: 1200, windowMs: 60000 },
+    },
+    // 下单幂等：同一个 clientOrderId 在窗口内重复提交只成交一次
+    idempotency: { ttlMs: 10 * 60 * 1000, max: 2000 },
+    maxKeysPerAccount: 8, // 单账户最多同时有效的 Key
+    maxStreamsPerKey: 2, // 单个 Key 的 SSE 连接数
+    maxStreams: 100, // 全服 SSE 连接数
+    maxTrades: 30, // 行情里带的逐笔条数上限（H5 是 30）
+    maxDepth: 5, // 五档档位上限
+  },
+
   // 做空保证金
   margin: {
     ratio: 0.5, // 开空冻结 = 卖出市值 * 50%；开空预检同样按此比例卡权益 → 敞口上限 2 倍

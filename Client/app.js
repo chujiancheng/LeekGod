@@ -1155,6 +1155,8 @@
     // 首页「AI 主力」：跳观测台（会话 token 由 whales.html 自己从 localStorage 读）
     const whalesBtn = $('whalesBtn');
     if (whalesBtn) whalesBtn.addEventListener('click', () => { location.href = '/whales.html'; });
+    const portalBtn = $('portalBtn');
+    if (portalBtn) portalBtn.addEventListener('click', () => { location.href = '/portal.html'; });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       const overlay = $('comicOverlay');

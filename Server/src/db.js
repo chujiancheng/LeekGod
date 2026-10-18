@@ -10,12 +10,13 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 7：开放平台 API Key（api_keys 表；只加表，没有改既有列）
 // 6：账号与昵称分家（accounts 加 nick 列，name 从此只作登录账号）
 // 5：彩蛋里程碑（accounts 加 milestones 列，仅玩家写）
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -210,6 +211,27 @@ CREATE TABLE IF NOT EXISTS auto_strategies (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auto_account ON auto_strategies(account);
+
+-- 开放平台 API Key（/open/v1 的唯一凭据）。
+--
+-- 为什么不能复用 sessions：H5 的登录是**免密**的（只认账号名），令牌等于"知道账号就能拿"。
+-- 开放接口必须有一份**独立于账号名**的秘密，且能单独撤销、单独限额。
+--
+-- 表里**只存 secret 的 sha256**：明文只在签发那一刻返回一次，之后任何地方都读不回来
+-- （包括运维自己）。id 是 8 位公开标识，日志与撤销都按它走，日志里绝不出现 secret。
+-- scopes 用逗号分隔（read / trade）；ip_allow 为 NULL = 不限来源（默认，局域网自用）。
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           TEXT PRIMARY KEY,
+  account      TEXT NOT NULL,
+  secret_hash  TEXT NOT NULL,
+  label        TEXT,
+  scopes       TEXT NOT NULL DEFAULT 'read,trade',
+  ip_allow     TEXT,
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account);
 `;
 
 /**
@@ -256,9 +278,31 @@ const MIGRATION_6 = `
 ALTER TABLE accounts ADD COLUMN nick TEXT;
 `;
 
+/**
+ * 版本 6 → 7 的**原地升级**：开放平台的 API Key 表。
+ *
+ * 纯新增表，没动任何既有列，所以老档原地升上来即可（DDL 里也有一份同样的
+ * `CREATE TABLE IF NOT EXISTS`，新建库直接就有；这里保留一份是为了让「版本 6 的老档」
+ * 走迁移时也把表和索引补齐，两条路径的结果严格一致）。
+ */
+const MIGRATION_7 = `
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           TEXT PRIMARY KEY,
+  account      TEXT NOT NULL,
+  secret_hash  TEXT NOT NULL,
+  label        TEXT,
+  scopes       TEXT NOT NULL DEFAULT 'read,trade',
+  ip_allow     TEXT,
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account);
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;

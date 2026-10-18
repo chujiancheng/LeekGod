@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const admin = require('./admin');
+const openapi = require('./openapi');
 const milestones = require('./milestones');
 const { logger } = require('./logger');
 
@@ -23,6 +24,32 @@ const STATIC_FILES = {
   '/whales.html': { file: 'whales.html', type: 'text/html; charset=utf-8' },
   '/whales.js': { file: 'whales.js', type: 'application/javascript; charset=utf-8' },
   '/whales.css': { file: 'whales.css', type: 'text/css; charset=utf-8' },
+  // 开放平台：玩家自助签发 / 查看 / 撤销 API Key（/api/open/keys 需要会话令牌）
+  '/portal.html': { file: 'portal.html', type: 'text/html; charset=utf-8' },
+  '/portal.js': { file: 'portal.js', type: 'application/javascript; charset=utf-8' },
+  '/portal.css': { file: 'portal.css', type: 'text/css; charset=utf-8' },
+  // 开放平台文档阅读页（?doc=player|api 在 docs.js 里取对应 .md）
+  '/docs.html': { file: 'docs.html', type: 'text/html; charset=utf-8' },
+  '/docs.js': { file: 'docs.js', type: 'application/javascript; charset=utf-8' },
+  '/docs.css': { file: 'docs.css', type: 'text/css; charset=utf-8' },
+};
+
+/**
+ * 文档白名单：只放玩家会用到的两份，从仓库根 Doc/ 直接读。
+ * `?download=1` 走 Content-Disposition 附件下载；不带则以 text/markdown 直出
+ * （浏览器里能看，阅读页 /docs.html 会 fetch 后再渲染）。
+ * 路径与文件名都写死，不接受用户输入拼路径。
+ */
+const DOC_DIR = path.join(__dirname, '..', '..', 'Doc');
+const DOC_FILES = {
+  '/docs/player-apikey.md': {
+    src: path.join(DOC_DIR, '玩家申请APIKey.md'),
+    downloadName: 'gushen-apikey-guide.md',
+  },
+  '/docs/openapi.md': {
+    src: path.join(DOC_DIR, '开放平台API.md'),
+    downloadName: 'gushen-openapi-v1.md',
+  },
 };
 
 /**
@@ -253,6 +280,13 @@ class SseHub {
 
 function createServer(game) {
   const hub = new SseHub(game);
+  // 开放交易接口（/open/v1）：独立鉴权（API Key）、独立限流、独立 SSE。
+  // 与下面的 /api/* 完全平行——两条链路不共享凭据，也不共享限流计数。
+  const open = openapi.createOpenApi(game);
+  if (config.open && config.open.enabled) {
+    const n = open.keys.reload();
+    logger.info(`[我是股神] 开放接口已启用：${openapi.PREFIX}（有效 Key ${n} 把）`);
+  }
   const rl = config.http.rateLimit;
   const limiters = {
     login: new RateLimiter(rl.login),
@@ -293,6 +327,13 @@ function createServer(game) {
     const ip = clientIp(req);
 
     try {
+      // ---- 开放交易接口：整段前缀交给 openapi.js，不走下面的同源/会话校验 ----
+      // 它有自己的鉴权（API Key）与限流（按 Key），这里只负责把前缀切过去。
+      // 顺序必须在静态资源与 404 之前，否则 /open/v1/* 会掉进静态白名单的兜底分支。
+      if (p === openapi.PREFIX || p.startsWith(`${openapi.PREFIX}/`)) {
+        return await open.handle(req, res, url, p);
+      }
+
       // ---- API ----
       if (p === '/api/login' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.login)) return;
@@ -317,6 +358,63 @@ function createServer(game) {
         if (!guardWrite(req, res, ip, limiters.write)) return;
         const body = await readBody(req);
         const r = game.setNickFor(bearerToken(req), body.nick);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 开放接口自助管理：网页上签发 / 查看 / 撤销自己的 API Key ----
+      // 鉴权走**会话令牌**（这是"管理凭据"的入口），/open/v1 走 Key（"用凭据干活"）。
+      // 明文只在 POST 的响应里出现一次，之后任何接口都读不到（库里只存 sha256）。
+      if (p === '/api/open/keys' && (req.method === 'GET' || req.method === 'POST')) {
+        const acc = game.accountFor(bearerToken(req));
+        if (!acc) return json(res, 401, { ok: false, error: '请先登录' });
+        if (!config.open || !config.open.enabled) {
+          return json(res, 503, { ok: false, error: '开放接口已关闭' });
+        }
+        if (req.method === 'GET') {
+          if (rl.enabled && !limiters.write.allow(ip)) {
+            return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+          }
+          return json(res, 200, {
+            ok: true,
+            account: acc.name,
+            cap: config.open.maxKeysPerAccount,
+            limits: {
+              read: config.open.rateLimit.read.limit,
+              trade: config.open.rateLimit.trade.limit,
+              windowMs: config.open.rateLimit.read.windowMs,
+            },
+            keys: open.keys.list(acc.name),
+          });
+        }
+        if (!guardWrite(req, res, ip, limiters.write)) return;
+        if (!game.isOnboarded(acc)) {
+          return json(res, 400, { ok: false, error: '还没走完开户（缺昵称或券商），先回主页补完再来' });
+        }
+        const cap = config.open.maxKeysPerAccount;
+        if (open.keys.countFor(acc.name) >= cap) {
+          return json(res, 400, { ok: false, error: `最多 ${cap} 把有效 Key，先撤销不用的再申请` });
+        }
+        const body = await readBody(req);
+        const r = open.keys.issue(acc.name, { label: body.label, scopes: body.scopes });
+        if (!r.ok) return json(res, 400, r);
+        logger.info(
+          `[我是股神][open] 自助签发 ${r.id} → ${acc.name}（${r.scopes}，${r.label || '无备注'}）`
+        );
+        return json(res, 200, { ...r, cap, createdAt: Date.now() });
+      }
+
+      if (p.startsWith('/api/open/keys/') && req.method === 'DELETE') {
+        const acc = game.accountFor(bearerToken(req));
+        if (!acc) return json(res, 401, { ok: false, error: '请先登录' });
+        if (!guardWrite(req, res, ip, limiters.write)) return;
+        const id = p.slice('/api/open/keys/'.length);
+        const rec = open.keys.byId.get(id);
+        // 别人的 Key 一律按"不存在"回：否则这个路由就成了 KeyID 探测器
+        if (!rec || rec.account !== acc.name) {
+          return json(res, 404, { ok: false, error: 'Key 不存在或已撤销' });
+        }
+        const r = open.keys.revoke(id);
+        if (r.ok) logger.info(`[我是股神][open] 自助撤销 ${id}（${acc.name}）`);
         return json(res, r.ok ? 200 : 400, r);
       }
 
@@ -486,6 +584,60 @@ function createServer(game) {
         return json(res, 200, game.whalePortfolio());
       }
 
+      // ---- 运维：开放平台 API Key 管理（签发 / 列表 / 撤销，口令同停牌）----
+      //
+      // 刻意不做「玩家自助申领」：这一版是给熟人圈用的，Key 由运维发。少一套注册/邮箱/
+      // 验证码，就少一整片攻击面。将来真要公开，加的是这一层的自助入口，Key 体系不用动。
+      //
+      // 明文 Key **只在签发响应里出现一次**（库里只有 sha256），运维必须当场交给玩家；
+      // 丢了只能撤销重发——这是设计上故意的，能读回来的秘密就不算秘密。
+      if (p === '/api/admin/keys' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.admin)) return;
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[我是股神] API Key 签发口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        const body = await readBody(req);
+        const account = String(body.account || '').trim();
+        const acc = game.store.get(account);
+        if (!acc || acc.isNPC) return json(res, 400, { ok: false, error: '账户不存在（先用游戏登录一次建号）' });
+        if (!game.isOnboarded(acc)) {
+          return json(res, 400, { ok: false, error: '该账号还没走完开户（缺昵称或券商），先进游戏开完户' });
+        }
+        const cap = config.open.maxKeysPerAccount;
+        if (open.keys.countFor(account) >= cap) {
+          return json(res, 400, { ok: false, error: `单账户最多 ${cap} 把有效 Key，请先撤销不用的` });
+        }
+        const r = open.keys.issue(account, body);
+        if (r.ok) {
+          logger.info(`[我是股神] 签发 API Key ${r.id} → ${account}（${r.scopes}，${r.label || '无备注'}）`);
+        }
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      if (p === '/api/admin/keys' && req.method === 'GET') {
+        if (rl.enabled && !limiters.admin.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        return json(res, 200, { ok: true, keys: open.keys.list(url.searchParams.get('account') || '') });
+      }
+
+      if (p.startsWith('/api/admin/keys/') && req.method === 'DELETE') {
+        if (rl.enabled && !limiters.admin.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        const id = p.slice('/api/admin/keys/'.length);
+        const r = open.keys.revoke(id);
+        if (r.ok) logger.info(`[我是股神] 撤销 API Key ${r.id}（${r.account}）`);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
       // ---- 运维：停牌 / 复牌（口令见 config.admin.tokenFile）----
       if (p === '/api/admin/halt' || p === '/api/admin/resume') {
         if (req.method !== 'POST') return json(res, 405, { ok: false, error: '仅支持 POST' });
@@ -547,6 +699,30 @@ function createServer(game) {
         return;
       }
 
+      // ---- 开放平台文档：白名单 markdown，在线阅读 / 下载（无需登录）----
+      if (req.method === 'GET' && DOC_FILES[p]) {
+        const spec = DOC_FILES[p];
+        const wantDownload = url.searchParams.get('download') === '1';
+        return fs.readFile(spec.src, (err, buf) => {
+          if (err) {
+            res.writeHead(404, withSecurity({ 'Content-Type': 'text/plain; charset=utf-8' }));
+            res.end('Not Found');
+            return;
+          }
+          const headers = {
+            'Content-Type': 'text/markdown; charset=utf-8',
+            'Cache-Control': 'no-cache',
+          };
+          if (wantDownload) {
+            // 非 ASCII 文件名走 RFC 5987，老浏览器回落 filename=
+            headers['Content-Disposition'] =
+              `attachment; filename="${spec.downloadName}"; filename*=UTF-8''${encodeURIComponent(path.basename(spec.src))}`;
+          }
+          res.writeHead(200, withSecurity(headers));
+          res.end(buf);
+        });
+      }
+
       // ---- 静态资源 ----
       if (req.method === 'GET' && STATIC_FILES[p]) {
         const spec = STATIC_FILES[p];
@@ -581,6 +757,8 @@ function createServer(game) {
   // 限制慢速请求占用连接的时间
   server.headersTimeout = 20000;
   server.requestTimeout = 30000;
+  // 暴露给测试（签发 Key / 断言限流用）。运行期没有别的地方读它。
+  server.openApi = open;
 
   return server;
 }

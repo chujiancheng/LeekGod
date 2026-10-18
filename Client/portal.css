@@ -1,0 +1,370 @@
+/* 开放平台页（/portal.html）
+   与交易端共用 style.css 的主题 token；这里只写本页布局，不覆盖全局配色，
+   所以在四套主题下都会跟着变。 */
+
+.portal-page {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 文档入口按钮行 */
+.portal-docs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 0;
+}
+
+/* ---------- 顶栏 ---------- */
+.portal-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+.portal-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: .5px;
+}
+
+.portal-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.portal-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  transition: color .15s, border-color .15s;
+}
+
+.portal-link:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+/* ---------- 主体 ---------- */
+.portal-main {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 20px 20px 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.portal-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+
+.portal-card h1 {
+  margin: 0 0 10px;
+  font-size: 22px;
+  line-height: 1.3;
+}
+
+.portal-card h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.portal-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.portal-card-head h2 { margin: 0; }
+
+.portal-lead {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.portal-lead strong { color: var(--gold); font-weight: 600; }
+
+.portal-points {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+.portal-points b { color: var(--ink); font-weight: 600; }
+
+.portal-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.portal-quota {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.portal-empty {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* ---------- 表单 ---------- */
+.portal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.portal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.portal-field input,
+.portal-field select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.portal-field input:focus,
+.portal-field select:focus {
+  border-color: var(--blue);
+}
+
+.portal-field input::placeholder { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+
+.portal-form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ---------- 按钮 ---------- */
+.portal-btn {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ink);
+  font-size: 13px;
+  text-decoration: none;
+  transition: filter .15s, border-color .15s;
+}
+
+.portal-btn:hover { filter: brightness(1.15); }
+
+.portal-btn.primary {
+  border: none;
+  background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+  color: #fff;
+  font-weight: 600;
+}
+
+.portal-btn.ghost { background: transparent; color: var(--muted); }
+.portal-btn.ghost:hover { color: var(--ink); border-color: var(--muted); }
+
+.portal-btn.small { padding: 5px 10px; font-size: 12px; }
+
+.portal-btn.danger {
+  background: transparent;
+  border-color: var(--red-dim);
+  color: var(--red);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.portal-btn.danger:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
+
+.portal-btn:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+
+.portal-msg {
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+.portal-msg.error { color: var(--red); }
+.portal-msg.ok { color: var(--green); }
+
+/* ---------- Key 表格 ---------- */
+.portal-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.portal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.portal-table th,
+.portal-table td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.portal-table th {
+  color: var(--muted);
+  font-weight: 500;
+  background: var(--panel-2);
+}
+
+.portal-table tbody tr:last-child td { border-bottom: none; }
+
+.portal-table td.mono {
+  font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.portal-table .tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.portal-table .tag.trade {
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 45%, transparent);
+}
+
+.portal-table .tag.read {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+}
+
+/* ---------- 代码块 ---------- */
+.portal-code {
+  margin: 12px 0 0;
+  padding: 14px 16px;
+  background: #05070b;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: #b9c6da;
+  font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.75;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.portal-card code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+  font-size: 12px;
+  color: var(--gold);
+}
+
+/* ---------- 一次性 Key 弹层 ---------- */
+.portal-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .68);
+  backdrop-filter: blur(3px);
+}
+
+.portal-modal-card {
+  width: min(560px, 100%);
+  background: var(--float-bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+}
+
+.portal-modal-card h2 { margin-top: 0; }
+
+.portal-warn {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--red);
+  line-height: 1.6;
+}
+
+.portal-secret {
+  padding: 13px 14px;
+  background: #05070b;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--gold);
+  font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+  user-select: all;
+}
+
+/* 复制兜底用的隐藏文本域（http 局域网下 navigator.clipboard 不可用） */
+.portal-copy-helper {
+  position: fixed;
+  top: 0;
+  left: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---------- 移动端 ---------- */
+@media (max-width: 620px) {
+  .portal-head { padding: 12px 14px; }
+  .portal-title { font-size: 16px; }
+  .portal-main { padding: 14px 12px 40px; }
+  .portal-card { padding: 15px 14px; border-radius: 10px; }
+  .portal-card h1 { font-size: 19px; }
+  .portal-points { padding-left: 16px; }
+  .portal-table th,
+  .portal-table td { padding: 8px 10px; }
+}

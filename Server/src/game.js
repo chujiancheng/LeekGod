@@ -7,7 +7,7 @@ const v8 = require('v8');
 const config = require('./config');
 const { logger } = require('./logger');
 const { Store, Account, r2 } = require('./store');
-const { Market, ACTIONS } = require('./market');
+const { Market, ACTIONS, setTradeSeqBase } = require('./market');
 const { NewsSystem } = require('./news');
 const { NpcManager, normalizeNpcType } = require('./npc');
 const { AutoManager } = require('./auto');
@@ -92,6 +92,9 @@ class Game {
     // 大模型主力脑（config.npc.llm.enabled 时才真正调 API；默认关闭）
     this.whales = new WhaleManager(this);
     this.persist = opts.persist || null;
+    // 成交序号跨重启接续：把全局计数器抬到存档里最大序号之上，`/open/v1/fills` 的
+    // 增量游标才不会在重启后回退（回退会让客户端漏掉重启后的一部分成交）
+    if (this.persist) setTradeSeqBase(this.persist.maxTradeSeq());
     this.auto.journal = this.persist;
     this.timer = null;
     this.tickCount = 0;
@@ -1115,11 +1118,29 @@ class Game {
   }
 
   /**
-   * 下单。stockId 必填；指数不可交易；下单按股票路由到各自的市场。
+   * 下单（H5 入口）。身份从会话令牌解析，实际逻辑在 placeOrderFor。
    * 账户冷却跨股票共享：2 秒内不管下哪只都算同一笔冷却，防止刷单。
    */
   placeOrder(token, body) {
     const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    return this.placeOrderFor(acc, body);
+  }
+
+  /**
+   * 下单内核：**H5 与开放接口共用这一个入口**。
+   *
+   * 两条鉴权链路（会话令牌 / API Key）只负责"你是谁"，到这里之后一律走
+   * `market.place` —— 冷却、锁仓、费率、保证金、同股多空互斥、价格笼子、
+   * 涨跌停、阶段门控全在下游，这里不复制任何一条规则。
+   *
+   * 开放接口传进来的 acc 已经过 Key 校验，**不需要再验一次 token**；这也是为什么
+   * 要把它抽出来而不是让开放接口自己造一个假 token —— 假 token 会进 sessions 表，
+   * 玩家在 H5 的"登录设备"里会看到一条来路不明的会话。
+   *
+   * stockId 必填；指数不可交易；下单按股票路由到各自的市场。
+   */
+  placeOrderFor(acc, body) {
     if (!acc) return { ok: false, error: '请先登录' };
     const raw = body && body.stockId;
     if (raw && raw === this.index.stockId) return { ok: false, error: '指数不可交易，仅供观察大盘' };
@@ -1146,9 +1167,15 @@ class Game {
       : res;
   }
 
-  /** 撤单：按委托自身所属股票路由（交易所有各自的簿，撤单必须找对市场） */
+  /** 撤单（H5 入口） */
   cancelOrder(token, orderId) {
     const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    return this.cancelOrderFor(acc, orderId);
+  }
+
+  /** 撤单内核：按委托自身所属股票路由（交易所有各自的簿，撤单必须找对市场） */
+  cancelOrderFor(acc, orderId) {
     if (!acc) return { ok: false, error: '请先登录' };
     const order = acc.orders.get(orderId);
     if (!order) return { ok: false, error: '委托不存在或已完结' };
