@@ -20,6 +20,25 @@
     return Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
   }
 
+  // 窄屏（≤640px）表格会折成卡片，每个值前面要靠 td[data-label] 显出列名，
+  // 所以这两组列名必须和下面 <thead> 里的顺序一一对应
+  const POS_COLS = ['股票', '现价', '多头', '成本', '多头盈亏', '空头', '空头盈亏'];
+  const DEC_COLS = ['状态', 'bias', '意图', '点名', '下单', '备注'];
+
+  function tagCells(row, labels) {
+    Array.prototype.forEach.call(row.children, (td, i) => {
+      if (labels[i]) td.dataset.label = labels[i];
+    });
+  }
+
+  /** 表格外面套一层横向滚动壳：桌面看不出区别，窄屏时不会把列裁掉 */
+  function withScroll(table) {
+    const box = document.createElement('div');
+    box.className = 'table-scroll';
+    box.appendChild(table);
+    return box;
+  }
+
   function pct(n) {
     return ((Number(n) || 0) * 100).toFixed(2) + '%';
   }
@@ -108,10 +127,11 @@
         <td class="note-cell">${esc(ordersHtml(d))}</td>
         <td class="note-cell">${esc(d.note || d.error || '')}</td>
       `;
+      tagCells(tr, DEC_COLS);
       tb.appendChild(tr);
     }
     table.appendChild(tb);
-    decCard.appendChild(table);
+    decCard.appendChild(withScroll(table));
     return decCard;
   }
 
@@ -154,10 +174,11 @@
             <td>${p.shortQty || 0}</td>
             <td>${money(p.shortPnl)}</td>
           `;
+          tagCells(tr, POS_COLS);
           tb.appendChild(tr);
         }
         t.appendChild(tb);
-        card.appendChild(t);
+        card.appendChild(withScroll(t));
       }
       if (w.orders && w.orders.length) {
         const tip = el('div', 'empty', `在途委托 ${w.orders.length} 笔：` +

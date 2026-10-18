@@ -11,11 +11,14 @@ body.whales-page {
 .whales-page {
   margin: 0;
   min-height: 100vh;
+  /* 手机浏览器地址栏收起时 100vh 会留一截空白，有 dvh 就用 dvh */
+  min-height: 100dvh;
   background: var(--bg, #0b0f14);
   color: var(--ink, #e8eef5);
   font-family: var(--font, system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif);
   padding: 20px 16px 40px;
   box-sizing: border-box;
+  -webkit-text-size-adjust: 100%;
 }
 
 .whales-head {
@@ -189,3 +192,134 @@ table.whale-table th {
   font-size: 14px;
   line-height: 1.6;
 }
+
+/* 表格外壳：JS 给每张表都包一层。桌面无感，窄屏先兜横向滚动，
+   保证任何一列都不会被 body 的 overflow-x:hidden 裁掉 */
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+/* ==================================================================
+   窄屏适配
+   本页是独立页（/whales.html），只引了 style.css 的 token，吃不到 index
+   那套移动端媒体查询；原样式是纯桌面布局：表格 6~7 列 nowrap 直接顶出
+   视口，标题/按钮也没有触控尺寸。
+   - ≤860px：缩小留白与字号，表格走横向滚动兜底
+   - ≤640px：表格折成卡片（每行一张小卡，左标签右数值），头部按钮铺满
+   ================================================================== */
+@media (max-width: 860px) {
+  .whales-page { padding: 16px 12px 36px; }
+  .whales-head { align-items: flex-start; }
+  .whales-title { font-size: 18px; }
+  table.whale-table th,
+  table.whale-table td { padding: 7px 8px; }
+}
+
+@media (max-width: 640px) {
+  .whales-page { padding: 14px 12px 32px; }
+
+  /* 头部：标题一块、按钮一块，按钮铺满一行，拇指好点 */
+  .whales-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .whales-title { font-size: 17px; letter-spacing: .5px; }
+  .whales-sub { font-size: 11.5px; }
+  .whales-actions { width: 100%; gap: 8px; }
+  .whales-actions button,
+  .whales-actions .ghost-link {
+    flex: 1 1 0;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    border-radius: 9px;
+    touch-action: manipulation;
+  }
+  .whales-actions .ghost-link { border: 1px solid var(--line, #2a3540); }
+
+  .whales-list { gap: 10px; }
+  .whale-card { padding: 12px; border-radius: 11px; }
+
+  /* 卡头：名字独占一行，剩下的 kv 自然回流成两三列，不再挤成一团 */
+  .whale-top { gap: 6px 14px; }
+  .whale-name { flex: 1 0 100%; font-size: 15px; overflow-wrap: anywhere; }
+  .whale-kv { font-size: 11.5px; }
+
+  .decision-line { font-size: 12px; overflow-wrap: anywhere; }
+
+  /* 表格 → 卡片：手机屏宽塞 6~7 列只能左右拖，备注列还特别长，
+     直接每行折成一张小卡；列名走 td[data-label]（whales.js 里的 tagCells 写入） */
+  table.whale-table,
+  table.whale-table tbody,
+  table.whale-table tr,
+  table.whale-table td { display: block; width: 100%; }
+  table.whale-table thead { display: none; }
+
+  table.whale-table tr {
+    border: 1px solid color-mix(in srgb, var(--line, #2a3540) 85%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--panel-2, #171d2b) 55%, transparent);
+    padding: 8px 10px;
+    margin: 0 0 8px;
+  }
+  table.whale-table tr:last-child { margin-bottom: 0; }
+
+  table.whale-table td {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 0;
+    white-space: normal;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  table.whale-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--muted, #8a96a3);
+    font-size: 11px;
+  }
+  table.whale-table td:first-child {
+    font-weight: 700;
+    padding-bottom: 4px;
+  }
+  /* 长文本（下单 / 备注）：标签单独一行，值整行左对齐铺开 */
+  table.whale-table td.note-cell {
+    display: block;
+    max-width: none;
+    margin-top: 6px;
+    padding-top: 6px;
+    text-align: left;
+    border-top: 1px dashed color-mix(in srgb, var(--line, #2a3540) 70%, transparent);
+    color: var(--muted, #8a96a3);
+  }
+  table.whale-table td.note-cell::before {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 10.5px;
+  }
+
+  /* 决策历史：整页本来就要滚，内层再套一个 70vh 滚动框，手机上滑到手指打结 */
+  .decision-history { max-height: none; overflow: visible; }
+  .decision-history > .history-title {
+    position: static;
+    margin: 0 0 10px;
+    padding: 0;
+    background: transparent;
+  }
+  .decision-history .decision-card {
+    margin-bottom: 10px;
+    padding: 12px 12px 10px;
+  }
+}
+
