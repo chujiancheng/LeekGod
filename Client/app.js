@@ -1583,6 +1583,16 @@
         const merged = (res.priceHistory || []).slice();
         const lastT = merged.length ? merged[merged.length - 1].t : 0;
         for (const p of local) if (p.t > lastT) merged.push(p);
+        // 定格期（竞价/午休/夜间）：服务端序列里带着这一段的平线，落地前先塌成一个锚点，
+        // 否则刷新/切股票后会先看到一条爬到"现在"的水平线，等下一帧才收回去
+        const freezeAt = frozenPhaseStart();
+        if (freezeAt != null) {
+          const tail = merged.length ? merged[merged.length - 1] : null;
+          cutAfter(merged, freezeAt);
+          if (tail && merged.length && merged[merged.length - 1].t < freezeAt) {
+            merged.push({ t: freezeAt, price: tail.price, vol: tail.vol });
+          }
+        }
         histories.set(stockId, merged);
         if (stockId === activeStockId && activeView === 'trade') drawChart();
       })
@@ -1669,12 +1679,15 @@
     ensureStock();
 
     // 每只股票按帧追加一个分时点（同时间戳去重）。SSE 帧本身不带分时，
-    // 客户端自己往后累积；切股票时再用 /api/history 拉一次全量补历史
+    // 客户端自己往后累积；切股票时再用 /api/history 拉一次全量补历史。
+    // 集合竞价与休市期价格是冻住的（竞价只入簿、不撮合），这时不逐帧打点，
+    // 整段塌成一个锚点——见 addFramePoint
+    const freezeAt = frozenPhaseStart();
     for (const m of marketList()) {
-      appendPoint(histories, m.stockId, s.serverTime, m.last, m.volume);
-      appendPoint(sparks, m.stockId, s.serverTime, m.last, m.volume);
+      addFramePoint(histories, m.stockId, s.serverTime, m.last, m.volume, freezeAt);
+      addFramePoint(sparks, m.stockId, s.serverTime, m.last, m.volume, freezeAt);
     }
-    if (s.index) appendPoint(histories, s.index.stockId, s.serverTime, s.index.last, 0);
+    if (s.index) addFramePoint(histories, s.index.stockId, s.serverTime, s.index.last, 0, freezeAt);
 
     // 日线缓存作废的时机有两个：**跨天**（图里要多一根）与**进入夜间**（当日那根刚刚收盘定格）。
     // 少作废一次，夜间就会拿已经归零的实时行情（成交量额清零、开高低都等于收盘价）
@@ -1747,6 +1760,52 @@
     if (!last || t > last.t) arr.push({ t, price, vol });
     else if (t === last.t) arr[arr.length - 1] = { t, price, vol };
     if (arr.length > 10300) arr.splice(0, arr.length - 10300);
+  }
+
+  // ---------- 分时定格（集合竞价 / 午休 / 夜间） ----------
+  //
+  // 服务端每 tick 都往分时序列补一个点，可它并不区分阶段：集合竞价只入簿不撮合、
+  // 午休与夜间直接冻结行情，这几段里价格一动不动。客户端要是照抄，线就会被拉成一条
+  // 越来越长的水平直线——价没动、线在动，x 轴跟着最新点一路右移，整张图都在"走"，
+  // 看起来像还在连续交易。
+  //
+  // 这里的口径是：**只有连续竞价（trading 且非 auction）才让分时往后生长**。
+  // 定格期整段只留阶段起点一个锚点，画面完全静止；夜间结算把收盘价定死时，
+  // 这个锚点原地换价（线只跳一下，不拖尾巴），恢复交易后才重新生长。
+  // 阶段与否一律吃服务端下发的 state.day，客户端不自己算阶段。
+
+  /** 定格期返回本阶段的**起点时刻**（分时锚点）；连续竞价/没有交易日时钟返回 null */
+  function frozenPhaseStart() {
+    const d = dayInfo();
+    if (!d) return null;
+    if (d.trading && !d.auction) return null;
+    // phaseStartAt 没有直接下发：用「阶段末尾 − 阶段时长」反推，与 gameClockNow 同一套算法
+    const end = Number(d.phaseEndsAt);
+    const ms = Number(d.phaseMs);
+    if (!Number.isFinite(end) || !Number.isFinite(ms) || ms <= 0) return null;
+    return end - ms;
+  }
+
+  /** 丢掉尾部所有落在 t 之后的点（定格里塌掉整段，阶段起点之前的历史保留） */
+  function cutAfter(arr, t) {
+    let n = arr.length;
+    while (n > 0 && arr[n - 1].t >= t) n -= 1;
+    if (n !== arr.length) arr.length = n;
+  }
+
+  /** 按帧记一个分时点：连续竞价正常追加，定格期只维护阶段起点那一个锚点 */
+  function addFramePoint(map, stockId, t, price, vol, freezeAt) {
+    if (freezeAt == null) {
+      appendPoint(map, stockId, t, price, vol);
+      return;
+    }
+    let arr = map.get(stockId);
+    if (!arr) {
+      arr = [];
+      map.set(stockId, arr);
+    }
+    cutAfter(arr, freezeAt);
+    appendPoint(map, stockId, Math.min(freezeAt, t), price, vol);
   }
 
   // ---------- 顶栏 ----------
@@ -1937,9 +1996,12 @@
       return;
     }
     const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
+    // 定格期在副标题里说明白，否则玩家会以为分时卡住了（数据是对的：竞价/休市价不动）
+    const d = dayInfo();
+    const frozen = d && frozenPhaseStart() != null ? ` · ${d.label || '休市'}，分时定格` : '';
     sub.textContent = m.isIndex
-      ? `大盘指数分时 · ${scope} · 成分股按流通市值加权`
-      : `${scope}分时 · 均价与价格 · 成交量 · MACD(12,26,9)`;
+      ? `大盘指数分时 · ${scope}${frozen} · 成分股按流通市值加权`
+      : `${scope}分时${frozen} · 均价与价格 · 成交量 · MACD(12,26,9)`;
   }
 
   /** 分时取数窗口：当日（默认）/ 连续 5 日。选择记在本地，刷新后保持 */

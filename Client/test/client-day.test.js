@@ -195,6 +195,8 @@ src = src.replace(
     setHistory: (id, arr) => { histories.set(id, arr); },
     histOf, minutePts, minuteFrom, macdOf, setMinuteRange,
     minuteRangeOf: () => minuteRange,
+    // 分时定格：竞价/休市不往后生长
+    loadHistory, resetHistLoaded: () => histLoaded.clear(),
     // K 线（日/周/月）：注入日线缓存、聚合、布局与 MACD
     setDayBars: (id, arr) => { dayBars.set(id, arr); },
     dayLoadedOf: (id) => dayLoaded.get(id),
@@ -1707,6 +1709,109 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     api.setState(st);
     api.renderPositions();
     assert(/colspan="9"/.test(api.el('posBody').innerHTML), '没有持仓时空状态同样占满 9 列');
+  }
+
+  console.log('\n[21] 分时定格：集合竞价 / 午休 / 夜间线不往后生长');
+  {
+    const base = 1700000000000;
+    const DAY_MS = 620000; // 一天 = 竞价 30s + 上午 230s + 午休 40s + 下午 260s + 收盘竞价 20s + 夜间 40s
+    const mkDay = (day, over) => ({
+      enabled: true, day, phase: 'morning', label: '上午连续竞价',
+      trading: true, auction: null, locked: false, unlockLeftMs: null,
+      phaseMs: 230000, phaseElapsedMs: 0, phaseLeftMs: 230000,
+      phaseEndsAt: base + (day - 1) * DAY_MS + 260000,
+      dayStartAt: base + (day - 1) * DAY_MS,
+      dayEndsAt: base + day * DAY_MS,
+      gameClockMs: 0, phaseGameMs: 7200000,
+      ...over,
+    });
+    const mkFrame = (d, t, px, vol) => {
+      const st = mkState(d, d.auction ? { kind: d.auction, price: px, volume: 0, locked: false } : null);
+      st.serverTime = t;
+      st.markets[0].last = px;
+      st.markets[0].volume = vol;
+      return st;
+    };
+    api.setChartMode('minute');
+    api.setActiveView('trade');
+
+    // ---- 连续竞价：每帧一个点，线正常往后生长 ----
+    api.setHistory(STOCK, [{ t: base + 35000, price: 20, vol: 100 }]);
+    api.onState(mkFrame(mkDay(1), base + 36000, 20.1, 200));
+    api.onState(mkFrame(mkDay(1), base + 36700, 20.2, 300));
+    let pts = api.histOf(STOCK);
+    assert(pts.length === 3, `连续竞价逐帧生长（${pts.length} 点）`);
+    assert(pts[2].t === base + 36700, '末点 = 最新一帧的时刻');
+
+    // ---- 开盘集合竞价：整段只留阶段起点一个锚点 ----
+    const auction = mkDay(1, {
+      phase: 'auction', label: '开盘集合竞价', auction: 'open',
+      phaseMs: 30000, phaseEndsAt: base + 30000, phaseLeftMs: 29000,
+    });
+    api.setHistory(STOCK, [{ t: base - 1000, price: 20, vol: 0 }]);
+    api.onState(mkFrame(auction, base + 1000, 20, 0));
+    api.onState(mkFrame(auction, base + 1700, 20, 0));
+    api.onState(mkFrame(auction, base + 2400, 20, 0));
+    pts = api.histOf(STOCK);
+    assert(pts.length === 2, `竞价期不生长，整段塌成一个锚点（${pts.length} 点）`);
+    assert(pts[1].t === base, `锚点落在竞价起点（+${pts[1].t - base}ms）`);
+
+    // ---- 午休：同样定格，副标题说明白 ----
+    const lunch = mkDay(1, {
+      phase: 'lunch', label: '午间休市', trading: false, auction: null,
+      phaseMs: 40000, phaseEndsAt: base + 300000, phaseLeftMs: 39000,
+    });
+    api.setHistory(STOCK, [{ t: base + 259000, price: 21, vol: 500 }]);
+    api.onState(mkFrame(lunch, base + 261000, 21, 500));
+    api.onState(mkFrame(lunch, base + 280000, 21, 500));
+    pts = api.histOf(STOCK);
+    assert(pts.length === 2 && pts[1].t === base + 260000, `午休定格在阶段起点（${pts.length} 点，末点 +${pts[1].t - base}ms）`);
+    assert(/分时定格/.test(api.el('chartSub').textContent), `副标题点明定格「${api.el('chartSub').textContent}」`);
+
+    // ---- 夜间：锚点原地换成收盘价，不拖尾巴 ----
+    const night = mkDay(1, {
+      phase: 'night', label: '休市结算', trading: false, auction: null,
+      phaseMs: 40000, phaseEndsAt: base + DAY_MS, phaseLeftMs: 39000,
+    });
+    api.setHistory(STOCK, [{ t: base + 570000, price: 21, vol: 500 }]);
+    api.onState(mkFrame(night, base + 581000, 21.6, 0));
+    pts = api.histOf(STOCK);
+    assert(pts.length === 2 && pts[1].t === base + 580000, `夜间锚点 = 15:00（+${pts[1].t - base}ms）`);
+    assert(pts[1].price === 21.6, `锚点价换成收盘价（${pts[1].price}）`);
+    api.onState(mkFrame(night, base + 600000, 21.6, 0));
+    assert(api.histOf(STOCK).length === 2, '夜间继续推帧也不生长');
+
+    // ---- 次日恢复连续竞价：从锚点接着长 ----
+    api.onState(mkFrame(mkDay(2), base + DAY_MS + 1000, 21.7, 100));
+    pts = api.histOf(STOCK);
+    assert(pts.length === 3 && pts[2].price === 21.7, `恢复交易后继续生长（${pts.length} 点）`);
+    assert(!/分时定格/.test(api.el('chartSub').textContent), '连续竞价副标题不挂定格');
+
+    // ---- 刷新 / 切股票：/api/history 带回来的平线落地前就塌成锚点 ----
+    api.onState(mkFrame(lunch, base + 261000, 21, 500));
+    api.setHistory(STOCK, []);
+    api.resetHistLoaded();
+    scriptFetch((url) =>
+      String(url).includes('/api/history')
+        ? {
+            ok: true,
+            priceHistory: [
+              { t: base + 200000, price: 20.5, vol: 400 },
+              { t: base + 259000, price: 21, vol: 500 },
+              { t: base + 265000, price: 21, vol: 500 },
+              { t: base + 280000, price: 21, vol: 500 },
+            ],
+          }
+        : { ok: false }
+    );
+    api.loadHistory(STOCK);
+    await flush();
+    await flush();
+    pts = api.histOf(STOCK);
+    assert(pts.length === 3, `服务端平线只留到午休起点（${pts.length} 点）`);
+    assert(pts[1].t === base + 259000 && pts[2].t === base + 260000, '末点被夹到午休起点');
+    assert(pts.every((p) => p.t <= base + 260000), '午休期间的点一条都没留下');
+    resetFetch();
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
