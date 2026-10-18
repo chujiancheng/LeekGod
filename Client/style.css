@@ -1334,8 +1334,14 @@ input { font: inherit; color: inherit; }
   .home-view { overflow: visible; }
   .hero-panel { flex-direction: column; align-items: stretch; gap: 16px; padding: 18px; }
   .hero-greet { font-size: 22px; }
-  .hero-actions { flex-wrap: wrap; }
-  .primary-btn, .ghost-btn.big { height: 44px; flex: 1; padding: 0 16px; letter-spacing: 1px; }
+  /* flex: 1（basis 0%）会把 5 个按钮全挤进同一行、每个只剩 ~60px，
+     没有 nowrap 的话中文被压成一字一行竖排（顶栏右区踩过同一个坑）。
+     改 basis auto：按文字内容占宽，放不下整行再换行，行内仍均分 */
+  .hero-actions { flex-wrap: wrap; row-gap: 10px; }
+  .primary-btn, .ghost-btn.big {
+    height: 44px; flex: 1 1 auto; padding: 0 16px; letter-spacing: 1px;
+    white-space: nowrap;
+  }
 
   /* 市场概览：两列小格 */
   .hero-market { width: 100%; }
