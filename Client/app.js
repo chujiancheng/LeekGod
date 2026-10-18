@@ -5148,7 +5148,7 @@
     const PAD_L = 8;
     const PAD_T = 10;
     const PAD_B = 20;
-    const VOL_H = Math.min(40, H * 0.13);
+    const VOL_H = Math.max(40, Math.min(80, H * 0.14));
     const MACD_H = Math.max(56, Math.min(96, H * 0.26));
     const priceH = H - PAD_T - PAD_B - VOL_H - MACD_H - 12;
     const volTop = PAD_T + priceH + 6;
@@ -5267,7 +5267,7 @@
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // 成交量柱
+    // 成交量柱（按该分钟涨跌着色：价升红 / 价跌绿 / 平盘灰蓝）
     let maxVol = 1;
     const deltas = [];
     for (let i = 0; i < pts.length; i++) {
@@ -5281,12 +5281,22 @@
       if (d > maxVol) maxVol = d;
     }
     const bw = Math.max(1, ((W - PAD_L - PAD_R) / Math.max(pts.length, 1)) * 0.7);
-    ctx.fillStyle = withA(themeC.blue, .55);
     for (let i = 1; i < pts.length; i++) {
       const h = (deltas[i] / maxVol) * VOL_H;
       if (h < 0.5) continue;
+      const dp = pts[i].price - pts[i - 1].price;
+      ctx.fillStyle = withA(dp > 0 ? themeC.red : dp < 0 ? themeC.green : themeC.blue, .6);
       ctx.fillRect(x(pts[i].t) - bw / 2, volTop + (VOL_H - h), bw, h);
     }
+    // 量带标注：左上「成交量」+ 右侧满仓刻度，让柱子有可读的量纲
+    ctx.textAlign = 'left';
+    ctx.fillStyle = themeC.muted;
+    ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText('成交量', PAD_L + 4, volTop + 7);
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtVol(maxVol), W - PAD_R - 4, volTop + 7);
+    ctx.textAlign = 'left';
+    ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
 
     // MACD(12,26,9)：柱 = 2×(DIF−DEA)，红柱 DIF>DEA / 绿柱 DIF<DEA（与涨跌配色一致）
     const macd = macdOf();
@@ -5399,11 +5409,15 @@
       }
       const prev = m.prevClose;
       const pct = ((best.price - prev) / prev) * 100;
+      // 成交量与柱子同口径：这一分钟的增量（日切回落时取当日累计），括号里补总量
+      const pv = bestI === 0 ? 0 : pts[bestI - 1].vol || 0;
+      const bv = best.vol || 0;
+      const mv = bestI === 0 ? 0 : bv < pv ? bv : Math.max(0, bv - pv);
       const md = macdOf();
       const difV = md.dif[bestI] || 0;
       const deaV = md.dea[bestI] || 0;
       tip.innerHTML =
-        `<span class="t">${fmtTime(best.t)}</span><br>价格 <b class="${cls(best.price - prev)}">${fmtP(best.price)}</b> <span class="${cls(best.price - prev)}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br><span class="t">成交量</span> ${fmtQty(best.vol || 0)}<br>` +
+        `<span class="t">${fmtTime(best.t)}</span><br>价格 <b class="${cls(best.price - prev)}">${fmtP(best.price)}</b> <span class="${cls(best.price - prev)}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br><span class="t">成交量</span> ${fmtVol(mv)} <span class="t">（累计 ${fmtVol(bv)}）</span><br>` +
         `<span class="t">MACD</span> DIF <b class="${cls(difV)}">${difV.toFixed(3)}</b> DEA <b class="${cls(deaV)}">${deaV.toFixed(3)}</b>`;
       tip.hidden = false;
       const tw = tip.offsetWidth;
