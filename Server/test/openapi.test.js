@@ -6,7 +6,7 @@
  *   ② 两条鉴权链路互不认对方凭据（会话令牌打不开 /open，Key 打不开 /api）
  *   ③ 下单与手动下单同一条路径（冷却、整手、同股多空互斥照罚）
  *   ④ 幂等：同 clientOrderId 只成交一次；**失败不缓存**（冷却过去后重试能成功）；同 cid 换参 → 409
- *   ⑤ 内幕字段不出圈（fairValue / force / intent / regime / llmPlan 一律不在响应里）
+ *   ⑤ 内幕字段不出圈（fairValue / force / intent / regime / llmPlan / cycleDir 一律不在响应里）
  *   ⑥ 成交游标是序号不是时间戳
  *   ⑦ 存档版本 7（api_keys 表）
  *   ⑧ 撤销 Key 会掐掉已建立的 SSE
@@ -126,7 +126,7 @@ const api = async (method, p, { key, body, headers } = {}) => {
   r = await api('GET', '/open/v1/markets', { key: KEY });
   assert(r.status === 200 && r.data.markets.length === config.stocks.length, '返回全部 10 只股票');
   const raw = JSON.stringify(r.data);
-  for (const secret of ['fairValue', 'fair', 'force', 'regime', 'intent', 'llmPlan', 'fund', 'sentiment']) {
+  for (const secret of ['fairValue', 'fair', 'force', 'regime', 'intent', 'llmPlan', 'fund', 'sentiment', 'cycleDir', 'cycleLog', 'cycleDrift']) {
     assert(!raw.includes(`"${secret}"`), `不含内幕字段 ${secret}`);
   }
   assert(r.data.markets[0].depth.bids.length <= config.open.maxDepth, '五档按 maxDepth 裁剪');

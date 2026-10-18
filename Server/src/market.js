@@ -1737,7 +1737,9 @@ class Market {
         price = bid.price;
         take = Math.min(need, remain);
       } else {
-        price = this.clampPrice(this.lastPrice * (1 - config.margin.liquidationSlippage));
+        // 恐慌深时 fbPanicSlip>1，系统兜底滑点加大 → 强平踩踏自我强化（feedback 层）
+        const slip = config.margin.liquidationSlippage * (this.fbPanicSlip || 1);
+        price = this.clampPrice(this.lastPrice * (1 - slip));
       }
       const order = this.makeForceOrder(account, ACTIONS.SELL_CLOSE, price, take);
       this.execute(order, bid || this.makeGhost(order), price, take, now, 'sell');
@@ -1777,6 +1779,7 @@ class Market {
           continue;
         }
       } else {
+        // 强平买入平空的兜底滑点（向上）；恐慌时主要放大卖侧，买侧保持基准
         price = this.clampPrice(this.lastPrice * (1 + config.margin.liquidationSlippage));
         if (!allowDebt) {
           const afford = Math.floor((account.cash + account.shortMargin) / (price * (1 + this.brokerFor(account, now).feeRate)));

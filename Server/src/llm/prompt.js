@@ -31,7 +31,10 @@ function stockLine(ctx) {
   const level =
     stock.initPrice > 0 && npc && npc.fund > 0 ? r((npc.fund / stock.initPrice - 1) * 100, 1) : 0;
   const force = npc && Number.isFinite(npc.force) ? r(npc.force, 2) : 0;
+  // regime = 分钟级趋势纹理（3 分钟相位，翻得快）；cycle = 周月级牛熊（周期层慢变量）。
+  // 模型要分清两层：cycle 是故事主线，regime 只是日内的扭动。
   const regime = npc && npc.regime > 0 ? 'bull' : npc && npc.regime < 0 ? 'bear' : 'range';
+  const cycle = npc && npc.cycleDir > 0 ? 'bull' : npc && npc.cycleDir < 0 ? 'bear' : 'range';
   const shortQty = Number(market.shortInterest) || 0;
   const floatShares = Number(stock.floatShares) || 0;
   return {
@@ -42,6 +45,7 @@ function stockLine(ctx) {
     chgPct: chg,
     force,
     regime,
+    cycle,
     fundLevelPct: level,
     shortInterest: shortQty,
     // 空头占流通盘的比例：只给绝对股数时模型读不出「空头是轻是重」
@@ -67,6 +71,7 @@ function systemPrompt(whale) {
     '游戏规则要点：可对多只股票做多/做空；存在涨跌停（' +
       limitPct +
       '%）与集合竞价；空头有券源上限；同股多空互斥（要翻向必须先平掉另一侧）。',
+    '行情有两层牛熊：`cycle` 是周月级主线（bull/bear/range，决定大方向），`regime` 只是分钟级趋势纹理（翻得快，别当成主趋势）。牛市周期里偏持有/加仓，熊市周期里偏减仓/做空，震荡则高抛低吸。',
     '你只输出严格 JSON，不要 markdown 解释、不要额外文字。',
     '输出 schema（全部字段尽量给全）：',
     '{"bias": -1~1, "intent": "none|accumulate|distribute|squeeze", "intentChance": 0~1, "aggressiveness": 0.5~1.5, "note": "一句话", "stocks": {"股票代码": {"stance": "bullish|bearish|neutral", "intent": "none|accumulate|distribute|squeeze", "weight": 0~1}}}',

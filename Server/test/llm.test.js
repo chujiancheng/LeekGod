@@ -329,7 +329,28 @@ const CLAMP = () => Object.assign({}, config.npc.llm.clamp, { maxStocksPerDecisi
   assert.strictEqual(acc.cash, 1000, '补过之后不再注资（重启≠回血）');
 }
 
-// [16] 慢轮不丢决策：busy 期间的触发顺延，当前轮结束后补跑
+// [16] stockLine 的两层牛熊：cycle（周月）与 regime（分钟）分开下发
+{
+  const { stockLine } = require('../src/llm/prompt');
+  const stock = { id: '600001', name: '大米集团', initPrice: 20, floatShares: 1e8, lotSize: 100 };
+  const market = { lastPrice: 22, prevClose: 21, shortInterest: 1e6, book: { bids: [], asks: [] } };
+  const mk = (regime, cycleDir) => ({
+    fund: 22,
+    force: 0.1,
+    regime,
+    cycleDir,
+    intent: { mode: 'none' },
+  });
+  assert.strictEqual(stockLine({ stock, market, npc: mk(1, 1) }).cycle, 'bull', 'cycleDir>0 → cycle=bull');
+  assert.strictEqual(stockLine({ stock, market, npc: mk(1, -1) }).cycle, 'bear', 'cycleDir<0 → cycle=bear');
+  assert.strictEqual(stockLine({ stock, market, npc: mk(1, 0) }).cycle, 'range', 'cycleDir=0 → cycle=range');
+  // 两层正交：分钟级 regime 翻空时，周月级 cycle 仍是牛
+  const both = stockLine({ stock, market, npc: mk(-1, 1) });
+  assert.strictEqual(both.regime, 'bear', 'regime 仍是分钟级纹理');
+  assert.strictEqual(both.cycle, 'bull', 'cycle 不跟着 regime 翻');
+}
+
+// [17] 慢轮不丢决策：busy 期间的触发顺延，当前轮结束后补跑
 (async () => {
   const g = new Game();
   const w = g.whales;

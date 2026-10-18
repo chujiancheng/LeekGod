@@ -522,6 +522,11 @@ console.log('\n[16] 竞价收尾：自成交残单走撤单，不产生幽灵单
 // ============================================================
 console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空');
 {
+  // 本节整段关掉反馈层（mood 会在 stepFairValue 里被 updateFeedback 重算，
+  // 非 0 时会不对称放大推力，破坏严格倍数）
+  const fbKeep = config.npc.feedback && config.npc.feedback.enabled;
+  if (config.npc.feedback) config.npc.feedback.enabled = false;
+  try {
   const g = new Game();
   for (const s of config.stocks) {
     g.npcs.get(s.id).init(g.startedAt);
@@ -545,6 +550,9 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     // 周期推力是另一条通道——固定 cycleDrift=0 且不换挡，才能保住严格倍数关系
     npc0.cycleDrift = 0;
     npc0.cycleLeft = 1e9;
+    // 反馈层（恐慌/贪婪）同理隔离：mood 非 0 时会不对称放大推力、并改噪声
+    npc0.mood = 0;
+    npc0._grind = false;
     const real = Math.random;
     Math.random = () => 0.5;
     try {
@@ -570,13 +578,15 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     fvAnchor: config.npc.fvAnchor,
     fundAnchor: config.npc.fundAnchor,
     cycleEnabled: config.npc.cycle && config.npc.cycle.enabled,
+    feedbackEnabled: config.npc.feedback && config.npc.feedback.enabled,
   };
   config.npc.priceCoupling = 0;
   config.npc.fvAnchor = 0;
   config.npc.fundAnchor = 0;
   // 周期层的纹理回归 fundCycle*exp(tex·(1−d)) 是指数式记账，会破坏严格倍数关系
-  //（与 fundAnchor 同理），本用例一并关闭
+  //（与 fundAnchor 同理），本用例一并关闭；反馈层（feedback）同理
   if (config.npc.cycle) config.npc.cycle.enabled = false;
+  if (config.npc.feedback) config.npc.feedback.enabled = false;
   let m1, l1, n1;
   try {
     m1 = at(P.morning + 1000);
@@ -584,6 +594,9 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
     n1 = at(P.night + 1000);
   } finally {
     Object.assign(config.npc, keep);
+    // cycleEnabled/feedbackEnabled 是嵌套对象上的开关，Object.assign 救不回来
+    if (config.npc.cycle) config.npc.cycle.enabled = !!keep.cycleEnabled;
+    if (config.npc.feedback) config.npc.feedback.enabled = !!keep.feedbackEnabled;
   }
   assert(m1.closed === false && m1.night === false, '上午：可交易、非夜间');
   assert(l1.closed === true && l1.night === false, '午休：休市但不是夜间');
@@ -593,6 +606,9 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
   assert(Math.abs(n1.delta - m1.delta * mul) < 1e-9, `夜间公允步进是上午的 ${mul} 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * mul).toFixed(6)}）`);
   assert(config.npc.fundOvernightFollow === true, '夜间基本面重心同步放大（否则机构的定价锚一夜不动，跳空被稀释一半）');
   assert(Math.abs(n1.fundDelta - m1.fundDelta * mul) < 1e-9, `夜间重心步进同倍数放大（${n1.fundDelta.toPrecision(14)} vs ${(m1.fundDelta * mul).toPrecision(14)}）`);
+  } finally {
+    if (config.npc.feedback) config.npc.feedback.enabled = !!fbKeep;
+  }
 }
 
 // ============================================================
@@ -746,6 +762,81 @@ console.log('\n[19] 竞价簿里没有「无主委托」：主动吃单的残单
   );
   eng2.setSession({ key: 'afternoon', pct: 0, auction: null, converging: false });
   assert(eng2._quotedOnce === false, '阶段切换重新武装闸（新阶段第一 tick 也不算症状）');
+}
+
+// ============================================================
+console.log('\n[20] 反馈层：恐慌放大下跌、收力反弹（左肥尾的来源）');
+{
+  if (!config.npc.feedback) {
+    assert(false, 'config.npc.feedback 应存在');
+  } else {
+    const fbKeep = Object.assign({}, config.npc.feedback);
+    config.npc.feedback.enabled = true;
+    try {
+      const g = new Game();
+      for (const s of config.stocks) g.npcs.get(s.id).init(g.startedAt);
+      const npc0 = g.npcs.get(ID);
+      const run = (mood, drift) => {
+        npc0.fairValue = 20;
+        npc0.fund = 20;
+        npc0.trendDrift = drift;
+        npc0.cycleDrift = 0;
+        npc0.cycleLeft = 1e9;
+        npc0.regime = 0;
+        npc0.regimeIn = 1e9;
+        npc0.mood = mood;
+        npc0._grind = false;
+        // 压掉回归项，只看推力方向敏感放大
+        const keep = {
+          priceCoupling: config.npc.priceCoupling,
+          fvAnchor: config.npc.fvAnchor,
+          fundAnchor: config.npc.fundAnchor,
+          noiseRel: config.npc.noiseRel,
+          cyc: config.npc.cycle && config.npc.cycle.enabled,
+        };
+        config.npc.priceCoupling = 0;
+        config.npc.fvAnchor = 0;
+        config.npc.fundAnchor = 0;
+        config.npc.noiseRel = 0;
+        if (config.npc.cycle) config.npc.cycle.enabled = false;
+        const real = Math.random;
+        Math.random = () => 0.5;
+        // 锁住 trend/cycle/feedback 的随机重算，只测 updateFairValue 的方向敏感放大
+        const origTrend = npc0.updateTrend.bind(npc0);
+        const origCyc = npc0.updateCycle.bind(npc0);
+        const origFb = npc0.updateFeedback.bind(npc0);
+        npc0.updateTrend = () => {};
+        npc0.updateCycle = () => {};
+        npc0.updateFeedback = () => {};
+        try {
+          npc0.updateFairValue(Date.now());
+        } finally {
+          npc0.updateTrend = origTrend;
+          npc0.updateCycle = origCyc;
+          npc0.updateFeedback = origFb;
+          Math.random = real;
+          Object.assign(config.npc, keep);
+          if (config.npc.cycle) config.npc.cycle.enabled = !!keep.cyc;
+        }
+        return npc0.fairValue - 20;
+      };
+      // 漂移取 0.01 而不是 0.001：clampPrice→roundPrice 精度是 0.01，
+      // 太小的收力（0.8×0.25×0.001=0.2bp）会被四舍五入抹平，测不出方向敏感
+      const calmDown = run(0, -0.01);
+      const panicDown = run(-0.8, -0.01);
+      const calmUp = run(0, 0.01);
+      const panicUp = run(-0.8, 0.01);
+      assert(panicDown < calmDown - 1e-9, `恐慌放大下跌（${panicDown} vs ${calmDown}）`);
+      assert(panicUp < calmUp + 1e-9, `恐慌收力反弹（${panicUp} vs ${calmUp}）`);
+      assert(Math.abs(calmUp + calmDown) < 1e-9, `mood=0 时对称（${calmUp} / ${calmDown}）`);
+      const greedUp = run(0.8, 0.01);
+      assert(greedUp > calmUp + 1e-9, `贪婪放大上涨（${greedUp} vs ${calmUp}）`);
+      const greedDown = run(0.8, -0.01);
+      assert(greedDown > calmDown + 1e-9, `贪婪收力回调（${greedDown} vs ${calmDown}）`);
+    } finally {
+      Object.assign(config.npc.feedback, fbKeep);
+    }
+  }
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

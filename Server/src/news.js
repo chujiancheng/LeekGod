@@ -821,8 +821,9 @@ class NewsSystem {
    *
    * @param {number} now
    * @param {number} [dirBias] 概率偏移：p(利好) = 0.5 + dirBias。
-   *   调用方传 regime × regimeBias（如 0.2 → 牛市 70% 利好）
-   * @param {{phaseKey?: string|null, untilFloor?: number}} [opts] 当前交易日阶段与作用期下限
+   *   调用方传 regime × regimeBias + cycleDir × cycleBias（如 0.2 → 牛市 70% 利好）
+   * @param {{phaseKey?: string|null, untilFloor?: number, stockBias?: Map<string,number>}} [opts]
+   *   当前交易日阶段、作用期下限、以及**个股方向偏置**（个股消息用该股自己的牛熊故事）
    */
   maybeEmit(now, dirBias = 0, opts = {}) {
     const phaseKey = opts.phaseKey || null;
@@ -834,13 +835,19 @@ class NewsSystem {
     if (now < this.nextAt) return null;
     this.nextAt = now + this.randInterval(phaseKey);
 
-    const pPositive = Math.max(0, Math.min(1, 0.5 + dirBias));
-    const dir = Math.random() < pPositive ? 1 : -1;
+    // 方向偏置：大盘消息用市场均值（dirBias），个股消息用该股自己的 cycleDir/regime
+    //（stockBias）——牛股的利好、熊股的利空，故事才跟得上那只股票的走势。
+    // 没传 stockBias 时行为与旧版完全一致。
     const scope = this.pickScope(phaseKey);
+    const stock = scope === '全体' || !this.stocks.length ? null : pick(this.stocks);
+    const dirBiasUse =
+      stock && opts.stockBias && opts.stockBias.has(stock.id)
+        ? opts.stockBias.get(stock.id)
+        : dirBias;
+    const pPositive = Math.max(0, Math.min(1, 0.5 + dirBiasUse));
+    const dir = Math.random() < pPositive ? 1 : -1;
     const power = 0.3 + Math.random() * 0.5;
     const session = phaseKey ? SESSION_OF_PHASE[phaseKey] || null : null;
-    // 全体 = 大盘消息（不带股票）；机构/散户 = 个股消息，随机挂一只
-    const stock = scope === '全体' || !this.stocks.length ? null : pick(this.stocks);
     const text = stock
       ? `【${stock.alias}】${this.pickText(scope, dir, stock, session)}`
       : this.pickText(scope, dir, null, session);

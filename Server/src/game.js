@@ -437,6 +437,11 @@ class Game {
       // cycleLog 的起点，重启不会把价格往发行价拉回去（纹理从 0 开始重新积累）
       npc.cycleLog = Math.log(market.lastPrice / stock.initPrice);
       npc._cycInit = false;
+      // 反馈层（恐慌/贪婪）同样不落盘：重启后从平静重新观察，峰值锚到现价
+      npc.mood = 0;
+      npc.peakPx = market.lastPrice;
+      npc._grind = false;
+      npc._fbMul = { aggro: 1, qty: 1, spread: 1 };
       npc.instMood = 0;
       npc.polar = 0.2;
       npc.polarTarget = 0.2;
@@ -516,8 +521,20 @@ class Game {
       // **休市也照发**：盘后公告正是隔夜跳空的燃料，停掉它"天"就没有夜了。
       // 产出节奏与 scope 分布按阶段走（config.news.phaseRules）：盘前/盘后密集、
       // 午休保底一条、收盘竞价不发；盘后个股消息改走公告文案池。
+      // 消息方向偏置（2026-10-18 周期层第二步）：
+      // - **大盘消息**（全体 scope）取全市场均值：十只股票各自的牛熊互相抵消，
+      //   均值才是「整个市场」的方向；分钟级 regime + 周月级 cycleDir 两层叠加。
+      // - **个股消息**用该股自己的 cycleDir/regime（stockBias），牛股出利好、
+      //   熊股出利空，故事才跟得上那只股票的走势；只用市场均值会把个股故事抹平。
       let bias = 0;
-      for (const npc of this.npcs.values()) bias += npc.regime * config.news.regimeBias;
+      const stockBias = new Map();
+      for (const npc of this.npcs.values()) {
+        const b =
+          npc.regime * config.news.regimeBias + npc.cycleDir * config.news.cycleBias;
+        const clamped = Math.max(-0.35, Math.min(0.35, b));
+        stockBias.set(npc.stock.id, clamped);
+        bias += clamped;
+      }
       bias /= this.npcs.size;
       const phaseKey = dayState ? dayState.phase.key : null;
       // 盘后消息把作用期抬到**次日开盘竞价结束**：60s 墙钟会在夜间（40s）结束前
@@ -528,7 +545,7 @@ class Game {
         const openAuction = this.day.phases.find((p) => p.auction === 'open');
         if (openAuction) untilFloor = dayState.dayEndsAt + openAuction.ms;
       }
-      const news = this.news.maybeEmit(now, bias, { phaseKey, untilFloor });
+      const news = this.news.maybeEmit(now, bias, { phaseKey, untilFloor, stockBias });
       if (news) this.lastNews = news;
     }
     // 泄露期漂移的可观测性：进入泄露期时记价格、公开时算一次漂移并落日志（不落盘）。

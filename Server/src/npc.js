@@ -91,6 +91,11 @@ class NpcManager {
     this.cycleLeft = 0; // 当前周期状态已持续 tick（诊断用；换挡靠无记忆概率，不靠倒计时）
     this.cycleLog = 0; // 周期成分累计对数涨幅（重心里的周月级分量，随机游走）
     this._cycInit = false; // 周期层派生量（一日 tick 当量 / 隔夜折算 / 纹理衰减率）惰性缓存
+    // 内生正反馈（config.npc.feedback）：恐慌/贪婪慢变量与磨底状态
+    this.mood = 0; // ∈ [-1,1]：−1 恐慌/磨底，+1 贪婪/赶顶；0 时整层无操作
+    this.peakPx = this.market.stock.initPrice; // 近期峰值价（算回撤，给 mood 和磨底用）
+    this._grind = false; // 磨底：深度超卖且跌不动了，活跃度收手
+    this._fbMul = { aggro: 1, qty: 1, spread: 1 }; // 反馈层行为乘数（与 rhythm 的 _mul 相乘）
     this.priceTrail = []; // 最近若干 tick 的最新价，供滚动动量计算
     // 机构情绪结构：共享情绪波 + 分歧度（0=全体一致跟情绪走，1=多空阵营贴身对打）
     this.instMood = 0; // 共享慢波（一致时的集体多/空）
@@ -361,6 +366,10 @@ class NpcManager {
     }
     this.updateActivityMuls();
     this.updateFairValue(now);
+    // 反馈层行为乘数叠在节奏乘数上（rhythm 管时段，feedback 管恐慌/贪婪/磨底）
+    this._mul.aggro *= this._fbMul.aggro;
+    this._mul.qty *= this._fbMul.qty;
+    this._mul.spread *= this._fbMul.spread;
     this.recycleLiquidity(now);
     this.updateForce(now);
     this.updateMoodPolar();
@@ -412,6 +421,7 @@ class NpcManager {
 
     this.updateTrend();
     this.updateCycle();
+    this.updateFeedback(); // 恐慌/贪婪慢变量（step 与 stepFairValue 两条路径共用）
 
     // 夜间（40 秒休市代表现实的一整夜）推力按 overnightDriftMul 放大。
     // **重心与短端公允一起放大**——只推短端的话，机构的定价锚（fundWeight 0.7）一夜不动，
@@ -456,11 +466,46 @@ class NpcManager {
     // **只有夜间**按 overnightDriftMul 放大——游戏里的 40 秒夜间代表现实一整夜，
     // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
     // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
-    fv *= 1 + (this.trendDrift + this.cycleDrift) * trendMul;
+    let push = (this.trendDrift + this.cycleDrift) * trendMul;
+    // 内生正反馈：**跌比涨快，反弹比下跌弱**（config.npc.feedback）。
+    // 方向敏感：只放大「符合 mood 的那一侧」，反侧反而收力——
+    // 这样总波动不必抬高，却能压出左肥尾（恐慌极端、赶顶加速）。
+    // mood=0 时逐位退回旧式 push。
+    const fb = config.npc.feedback;
+    const mood = fb && fb.enabled ? this.mood : 0;
+    if (mood < 0) {
+      const panic = -mood;
+      if (push < 0) push *= 1 + panic * (fb.panicAsym || 0); // 恐慌：跌更狠
+      else push *= 1 - panic * (fb.panicReboundDamp || 0.35); // 恐慌：反弹收力
+    } else if (mood > 0) {
+      if (push > 0) push *= 1 + mood * (fb.greedAsym || 0); // 贪婪：涨更顺
+      else push *= 1 - mood * (fb.greedDipDamp || 0.2); // 贪婪：回调收力（惜售）
+    }
+    fv *= 1 + push;
+    // 赶顶：贪婪 × 近期已涨 → 额外上推（顶部加速段）。夹紧防失控。
+    if (mood > 0 && fb && fb.enabled) {
+      let ret12 = 0;
+      const W = 12;
+      if (this.priceTrail.length > W) {
+        const ref = this.priceTrail[this.priceTrail.length - 1 - W];
+        if (ref > 0) ret12 = (last - ref) / ref;
+      }
+      if (ret12 > 0) {
+        const kick = Math.min(fb.blowoffCap || 0.012, mood * ret12 * (fb.blowoffGain || 0));
+        fv *= 1 + kick * trendMul;
+      }
+    }
     // 消息推力（乘性，只算本股 + 大盘消息）。viewer = 全池最早知道的那一级：
     // 公允价值是池级共享量，机构（L1）在公开前 4s 就把它推起来 → 「股价先动、消息后到」
     fv *= 1 + this.news.fvDrift(now, this.stock.id, this.poolViewer);
-    fv *= 1 + gauss() * cfg.noiseRel; // 短期噪声（毛刺）
+    // 噪声：恐慌时波动聚集（跌得急、反弹毛刺多）；mood=0 时倍数为 1
+    let volMul = 1;
+    if (mood !== 0 && fb && fb.enabled) {
+      volMul =
+        1 +
+        Math.abs(mood) * (fb.volGain || 0) * (mood < 0 ? fb.panicVolAsym || 1 : 1);
+    }
+    fv *= 1 + gauss() * cfg.noiseRel * volMul; // 短期噪声（毛刺）
     fv += (last - fv) * cfg.priceCoupling; // 向最新价回归（盘面跟随）
     fv += (this.fund - fv) * cfg.fvAnchor; // 向重心回归
 
@@ -558,6 +603,74 @@ class NpcManager {
       this.cycleLeft = 1; // 已进入一个新状态；下次换挡由 hazard 概率决定
     }
     this.cycleLeft += 1;
+  }
+
+  /**
+   * 内生正反馈（config.npc.feedback）：维护 mood（恐慌/贪婪）与磨底标志。
+   * - mood 目标由近期收益（**跌比涨冲击大**）、距峰值回撤、周期方向先验合成
+   * - 磨底 = 回撤够深 + 近期跌不动了 → 活跃度收手，反弹无力
+   * - mood=0 且非磨底时，本层不改任何定价/行为（可被单测安全隔离）
+   */
+  updateFeedback() {
+    const fb = config.npc.feedback;
+    if (!fb || !fb.enabled) {
+      this.mood = 0;
+      this._grind = false;
+      this._fbMul.aggro = 1;
+      this._fbMul.qty = 1;
+      this._fbMul.spread = 1;
+      return;
+    }
+    const last = this.market.lastPrice;
+    if (last > this.peakPx) this.peakPx = last;
+    const dd = this.peakPx > 0 ? last / this.peakPx - 1 : 0; // ≤ 0
+
+    // 近期收益（短窗，与 momentum 错开用更短的 12 tick，抓「恐慌速度」）
+    let ret = 0;
+    const W = 12;
+    if (this.priceTrail.length > W) {
+      const ref = this.priceTrail[this.priceTrail.length - 1 - W];
+      if (ref > 0) ret = (last - ref) / ref;
+    }
+
+    // 目标 mood：不对称——跌的冲击大于涨
+    let target = 0;
+    if (ret < 0) target += ret * fb.panicGain;
+    else target += ret * fb.greedGain;
+    target += dd * fb.ddGain;
+    target += this.cycleDir * (fb.cyclePrior || 0);
+    target = Math.max(-1, Math.min(1, target));
+
+    const hl = Math.max(1, fb.halfLifeTicks || 320);
+    const alpha = 1 - Math.pow(0.5, 1 / hl);
+    this.mood += (target - this.mood) * alpha;
+    this.mood = Math.max(-1, Math.min(1, this.mood));
+
+    // 磨底：够痛 + 跌不动了
+    this._grind =
+      dd <= (fb.grindDrawdown ?? -0.22) &&
+      Math.abs(ret) < (fb.grindQuietRet ?? 0.02) &&
+      this.mood <= 0;
+
+    // 行为乘数：贪婪加力、恐慌更凶；磨底整体收手
+    const greed = Math.max(0, this.mood);
+    const panic = Math.max(0, -this.mood);
+    let aggro = 1 + greed * (fb.greedAggro || 0) + panic * (fb.panicAggro || 0);
+    let qty = 1 + greed * (fb.greedAggro || 0) * 0.7 + panic * (fb.panicAggro || 0) * 0.5;
+    let spread = 1 + panic * 0.25; // 恐慌时点差略放宽（流动性变贵）
+    if (this._grind) {
+      aggro *= fb.grindAggroMul ?? 0.55;
+      qty *= fb.grindQtyMul ?? 0.65;
+      spread *= fb.grindSpreadMul ?? 1.55;
+    }
+    this._fbMul.aggro = aggro;
+    this._fbMul.qty = qty;
+    this._fbMul.spread = spread;
+
+    // 恐慌深时强平兜底滑点加大（踩踏自我强化）；由 market 消费
+    if (this.market) {
+      this.market.fbPanicSlip = 1 + panic * (fb.panicSlipMul || 0);
+    }
   }
 
   /**
