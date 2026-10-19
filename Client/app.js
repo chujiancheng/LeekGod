@@ -1464,6 +1464,15 @@
     $('companyOverlay').addEventListener('click', (e) => {
       if (e.target === $('companyOverlay')) $('companyOverlay').classList.add('hidden');
     });
+    // 全员合照：从档案底部进入（关档案开合照，同一时刻只留一层弹窗）
+    $('companyPosterBtn').addEventListener('click', () => {
+      $('companyOverlay').classList.add('hidden');
+      $('posterOverlay').classList.remove('hidden');
+    });
+    $('posterCloseBtn').addEventListener('click', () => $('posterOverlay').classList.add('hidden'));
+    $('posterOverlay').addEventListener('click', (e) => {
+      if (e.target === $('posterOverlay')) $('posterOverlay').classList.add('hidden');
+    });
   }
 
   // 上市公司档案入口的一次性指引：只弹一次（localStorage 记账），

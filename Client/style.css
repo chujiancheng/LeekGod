@@ -1689,6 +1689,34 @@ input { font: inherit; color: inherit; }
 .cs-item b { font-size: 14px; font-variant-numeric: tabular-nums; }
 .company-card .deposit-cancel { margin: 12px 22px 18px; }
 
+/* 全员合照：档案底部入口按钮（金色弱化，别盖过主操作「关闭」）
+   + 合照弹层（竖版海报完整展示，高度封顶，宽屏不放大） */
+.company-actions { display: flex; gap: 10px; margin: 12px 22px 18px; }
+.company-actions .deposit-cancel { flex: 1; margin: 0; }
+.company-actions .company-photo-btn {
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 45%, transparent);
+}
+.company-actions .company-photo-btn:hover { color: var(--gold); border-color: var(--gold); filter: none; }
+.poster-overlay { background: rgba(5, 8, 14, .82); }
+.poster-card {
+  display: flex; flex-direction: column; gap: 12px; align-items: center;
+  width: min(92vw, 620px);
+}
+.poster-img {
+  display: block; width: 100%; max-height: calc(92vh - 62px); object-fit: contain;
+  border-radius: 14px; border: 1px solid var(--line);
+  box-shadow: var(--shadow); background: var(--panel);
+}
+/* 关闭按钮不在 .deposit-card 里，吃不到那条作用域规则，这里显式给全 */
+.poster-close {
+  width: 200px; margin: 0; height: 38px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: transparent; color: var(--muted);
+  font-size: 13px; letter-spacing: 1px; cursor: pointer;
+}
+.poster-close:hover { color: var(--ink); border-color: var(--muted); filter: none; }
+
 @media (max-width: 640px) {
   .company-body { flex-direction: column; padding: 16px 16px 6px; }
   .company-portrait { width: 100%; min-height: 0; height: 300px; }

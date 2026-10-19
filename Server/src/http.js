@@ -95,6 +95,8 @@ for (const setKey of ['a', 'b', 'c', 'd']) {
 // 上市公司档案立绘（股娘图鉴）：key 与 config.stocks 的股票 id 对齐，
 // 前端档案数据在 Client/lore.js（COMPANY_LORE），弹层立绘 640px 一档
 for (const s of config.stocks) registerImg(`company-${s.id}.png`, 'lg');
+// 股娘全员合照海报：档案弹层底部「看全员合照」入口的竖版大图（1240×1754，492KB，单场景单文件）
+registerImg('waifu-group-poster.png', 'lg');
 // 公司徽记 logo：手绘 SVG（矢量、单文件 <2KB），档案卡 40px / 顶栏 24px / 切换栏 14px 三档复用
 for (const s of config.stocks) registerImg(`company-logo-${s.id}.svg`, 'md', 'image/svg+xml');
 

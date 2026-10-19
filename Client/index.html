@@ -643,7 +643,19 @@
           <div class="company-stats" id="companyStats"></div>
         </div>
       </div>
-      <button class="deposit-cancel" id="companyCloseBtn">关闭</button>
+      <!-- 底部双按钮：次要看「全员合照」，主按钮关闭 -->
+      <div class="company-actions">
+        <button class="deposit-cancel company-photo-btn" id="companyPosterBtn">看全员合照</button>
+        <button class="deposit-cancel" id="companyCloseBtn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 股娘全员合照：公司档案底部入口打开，竖版海报完整展示（点遮罩或按钮关闭） -->
+  <div id="posterOverlay" class="overlay deposit-overlay poster-overlay hidden" role="dialog" aria-modal="true" aria-label="股娘全员合照">
+    <div class="poster-card">
+      <img class="poster-img" src="/img/waifu-group-poster.png" alt="股娘全员合照海报：十家上市公司拟人齐聚行情大屏前" />
+      <button class="deposit-cancel poster-close" id="posterCloseBtn">关闭合照</button>
     </div>
   </div>
 
