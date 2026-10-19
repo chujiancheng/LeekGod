@@ -235,7 +235,7 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
 
 console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列与彩蛋列可原地升级');
 {
-  assert(SCHEMA_VERSION === 7, `存档表结构版本为 7（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 8, `存档表结构版本为 8（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -251,9 +251,11 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   assert(/表结构版本为 2/.test(msg), `版本 2 的旧档被明确拒绝：${msg.slice(0, 40)}…`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
 
-  // 版本 3 → 6 走的是**逐级原地 ALTER 升级**（券商那批列、彩蛋的 milestones 列、昵称的
-  // nick 列全是可空/带默认值，不用清库）。这条分支存在的意义是：引入券商 / 彩蛋 / 昵称
-  // 都不必强制清掉正在跑的那一局
+  // 版本 3 → 8 走的是**逐级原地 ALTER 升级**（券商那批列、彩蛋的 milestones 列、昵称的
+  // nick 列、做空利息的 lend_interest_accrued 列全是可空/带默认值，不用清库）。这条分支
+  // 存在的意义是：引入券商 / 彩蛋 / 昵称 / 按日结做空利息都不必强制清掉正在跑的那一局。
+  // 老档要照原样给出 stock_ledger（版本 2 起就有，但那时没有 lend_interest_accrued 列），
+  // 否则 DDL 会先按**新**结构把它建出来，随后的 ALTER 就撞 duplicate column
   const FILE3 = path.join(os.tmpdir(), `gushen-flow-v3-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });
   const db3 = new Database(FILE3);
@@ -269,6 +271,15 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
       id INTEGER PRIMARY KEY, account TEXT NOT NULL, role TEXT NOT NULL, order_id TEXT NOT NULL,
       stock_id TEXT NOT NULL, action TEXT NOT NULL, side TEXT NOT NULL, price REAL NOT NULL,
       qty INTEGER NOT NULL, fee REAL NOT NULL DEFAULT 0, trade_seq INTEGER NOT NULL, t INTEGER NOT NULL
+    );
+    CREATE TABLE stock_ledger (
+      account TEXT NOT NULL, stock_id TEXT NOT NULL,
+      lend_offered INTEGER NOT NULL DEFAULT 0,
+      lend_interest_earned REAL NOT NULL DEFAULT 0,
+      lend_interest_debt REAL NOT NULL DEFAULT 0,
+      lend_interest_paid REAL NOT NULL DEFAULT 0,
+      finance_interest_accrued REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (account, stock_id)
     );
   `);
   db3.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '3')").run();
@@ -291,6 +302,9 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
       .get();
     assert(!!keyTable, '版本 6 → 7 补出了 api_keys 表');
+    // 版本 7 → 8：做空利息「当日已累计、还没结算」那一列要补出来（默认 0）
+    const ledCols = db4.prepare('PRAGMA table_info(stock_ledger)').all().map((c) => c.name);
+    assert(ledCols.includes('lend_interest_accrued'), '版本 7 → 8 补出了 lend_interest_accrued 列');
     const row = db4.prepare('SELECT * FROM accounts WHERE name = ?').get('老玩家');
     assert(row && row.cash === 123456, '升级保留了原有账户数据');
     assert(row.broker === null, '老账号的 broker 为 NULL（表示还没选过券商）');

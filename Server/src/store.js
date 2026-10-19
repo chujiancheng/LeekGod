@@ -65,6 +65,8 @@ class Account {
         lendInterestDebt: 0,
         lendInterestPaid: 0,
         financeInterestAccrued: 0,
+        // 当日已累计、还没到收盘结算的做空利息（逐 tick 累加，日终一次性扣）
+        lendInterestAccrued: 0,
       };
       this.ledger.set(stockId, l);
     }

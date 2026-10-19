@@ -9,6 +9,17 @@
   // myNick = 昵称（展示名，随时可改，所以不能拿它当身份）。
   // 旧键 gushen_name 是"账号与昵称还没分家"时留下的，读一次兜底，免得老浏览器卡在登录页
   let me = localStorage.getItem('gushen_account') || localStorage.getItem('gushen_name') || '';
+  /**
+   * 一个游戏日有多少**真实**分钟（620 秒 ≈ 10.3 分钟，取服务端下发的 `rules.day.totalMs`）。
+   *
+   * 做空利息按游戏日结算，界面上凡是把日息折算成「每分钟」的地方都必须用这个数：
+   * 融资那边的分钟息是**真实分钟**（服务端逐 tick 摊），两边混在一行里相加时
+   * 单位必须一致。用 A 股的 240 交易分钟折算会让做空成本少算约 23 倍。
+   */
+  function minutesPerGameDay() {
+    const ms = state && state.rules && state.rules.day && Number(state.rules.day.totalMs);
+    return ms > 0 ? ms / 60000 : 620000 / 60000;
+  }
   let myNick = localStorage.getItem('gushen_nick') || '';
   let token = localStorage.getItem('gushen_token') || '';
   let state = null;
@@ -2040,16 +2051,20 @@
   }
 
   // ---------- 资产 ----------
-  /** 分钟息（百分数）→ 小数费率 */
+  /** 分钟息（百分数）→ 小数费率。做空利息按**游戏日**结算，融券这边是「日息 ÷ 一天的真实分钟数」 */
   function minuteRateOf(kind) {
     const r = state.rules || {};
     if (kind === 'finance') {
       return r.finance && r.finance.enabled ? (Number(r.finance.minuteRate) || 0) / 100 : 0;
     }
-    // 裸空不计息，与 accrueLendingInterest 的计息口径一致
+    // 裸空不计息，与 accrueLendingInterest / settleLendingInterest 的计息口径一致
     const m = curMarket();
     const L = m && m.lending;
-    return L && L.enabled && !r.allowNakedShort ? (Number(L.minuteRate) || 0) / 100 : 0;
+    if (!L || !L.enabled || r.allowNakedShort) return 0;
+    const perDay = (Number(L.dailyRate) || 0) / 100;
+    // 除数必须是**一个游戏日的真实分钟数**（≈10.3），不是 A 股的 240 交易分钟：
+    // 融资那边是真实分钟口径，两个数字要能加在同一行里
+    return perDay / minutesPerGameDay();
   }
 
   function renderAssets() {
@@ -2083,12 +2098,13 @@
       lendPaid > 0
         ? `<div class="item"><label title="做空累计已付的融券利息（欠息部分见「做空欠息」）">做空已付息</label><span class="down">${fmtMoney(lendPaid)}</span></div>`
         : '';
-    // 持仓利息：融资按负债基数、融券按空头市值，与服务端每 tick 的摊息口径一致
+    // 持仓利息：融资按负债基数（逐 tick 摊）、融券按空头市值（**按持仓时长累计、收盘一次性扣**，
+    // 这里摊到每分钟显示），两边都是「真实每分钟」口径，才能加在同一行里
     const perMin =
       a.financeDebt * minuteRateOf('finance') + (a.shortValue || 0) * minuteRateOf('lend');
     const perMinItem =
       perMin > 0
-        ? `<div class="item"><label title="当前持仓每分钟要付的利息：融资负债 × 融资分钟息 + 空头市值 × 融券分钟息">持仓利息</label><span class="down">${fmtMoney(perMin)}/分</span></div>`
+        ? `<div class="item"><label title="当前持仓每分钟要付的利息：融资负债 × 融资分钟息 + 空头市值 × 融券日息 ÷ ${minutesPerGameDay().toFixed(1)}（一个游戏日的真实分钟数）。融券利息按持仓时长累计、每个交易日收盘结算时一次性从现金扣，不逐分钟扣">持仓利息</label><span class="down">${fmtMoney(perMin)}/分</span></div>`
         : '';
     $('assetsRow').innerHTML = `
       <div class="item"><label>总权益</label><span class="hl ${cls(a.equity - state.rules.initialCash)}">${fmtMoney(a.equity)}</span></div>
@@ -2597,8 +2613,9 @@
       <div class="item"><label>总挂借</label><span>${fmtQty(L.total)} 股</span></div>
       <div class="item"><label>已借出</label><span>${fmtQty(L.borrowed)} 股</span></div>
       <div class="item"><label>空头总持仓</label><span>${fmtQty(L.shortInterest)} 股（${shortPct}%）</span></div>
-      <div class="item"><label>当前分钟息</label><span class="${L.minuteRate > 0.03 ? 'down' : L.minuteRate > 0.015 ? '' : 'up'}">${L.minuteRate.toFixed(2)}%</span></div>
+      <div class="item"><label>当前日息</label><span class="${L.dailyRate > 0.3 ? 'down' : L.dailyRate > 0.15 ? '' : 'up'}">${Number(L.dailyRate || 0).toFixed(2)}%/日</span></div>
       <div class="item"><label>池子紧张度</label><span>${L.utilization.toFixed(1)}%</span></div>
+      <div class="item"><label>计息方式</label><span>收盘结算（按持仓时长累计）</span></div>
       <div class="item"><label>做空模式</label><span>${L.allowNakedShort ? '裸空（不借券）' : '融券（必须借券）'}</span></div>
     `;
 
@@ -2606,13 +2623,14 @@
     const pos = curPosition();
     const mine = (pos && pos.lending) || null;
     if (mine) {
-      $('myLendSub').textContent = `可挂借 ${fmtQty(mine.freeToLend)} 股 · 分钟息 ${L.minuteRate.toFixed(2)}%（≈日息 ${(L.minuteRate * 1440).toFixed(1)}%）`;
+      $('myLendSub').textContent = `可挂借 ${fmtQty(mine.freeToLend)} 股 · 日息 ${Number(L.dailyRate || 0).toFixed(2)}%（每个交易日收盘结算一次）`;
       $('lendingMine').innerHTML = `
         <div class="item"><label>已挂借</label><span>${fmtQty(mine.offered)} 股</span></div>
         <div class="item"><label>被借走</label><span>${fmtQty(mine.lentOut)} 股</span></div>
         <div class="item"><label>可撤回</label><span>${fmtQty(mine.removable)} 股</span></div>
         <div class="item"><label>累计利息收入</label><span class="up">+${fmtMoney(mine.interestEarned)}</span></div>
         ${mine.interestPaid > 0 ? `<div class="item"><label>（做空已付息）</label><span class="down">${fmtMoney(mine.interestPaid)}</span></div>` : ''}
+        ${mine.interestPending > 0 ? `<div class="item"><label title="今天已经累计、还没到收盘结算的做空利息。利息按持仓时长累计，收盘那一刻一次性从现金扣（不够扣保证金，再不够挂成欠息）">（今日待结息）</label><span class="down">${fmtMoney(mine.interestPending)}</span></div>` : ''}
         ${mine.interestDebt > 0 ? `<div class="item"><label>（做空欠息）</label><span class="down">${fmtMoney(mine.interestDebt)}</span></div>` : ''}
       `;
       $('lendLotHint').textContent = '可挂 ' + fmtQty(mine.freeToLend);
@@ -3343,7 +3361,7 @@
         '<div class="rule-cell"><b>一份本金，十个盘口</b><span>现金全股票共用、持仓按股票分账。重仓一只，别的股票就没子弹了。</span></div>' +
         '<div class="rule-cell"><b>同股只能一个方向</b><span>同一只股票要么做多要么做空（含在途开仓单），不能自己跟自己对着干。</span></div>' +
         '<div class="rule-cell"><b>一天只有 ' + fmtDur((r.day && r.day.totalMs) || 620000) + '</b><span>开盘竞价 → 上午 → 午休 → 下午 → 收盘竞价 → 夜间结算。</span></div>' +
-        '<div class="rule-cell"><b>赚差价，也付利息</b><span>融资融券都按分钟计息，扛得越久，成本越高。</span></div>' +
+        '<div class="rule-cell"><b>赚差价，也付利息</b><span>融资逐分钟计息；融券按持仓时长累计、每个游戏日收盘结算一次。扛得越久，成本越高。</span></div>' +
         '<div class="rule-cell"><b>指数看得见，摸不着</b><span>大盘指数由十只股票加权合成，只做参照，不能下单。</span></div>' +
       '</div>' +
       '<div class="rule-tip"><b>涨红跌绿</b>：红色 = 涨，绿色 = 跌（A 股口径，和美股正好相反）。</div>'
@@ -3399,8 +3417,8 @@
     const finNow = Number(fin.minuteRate);
     const finBase = Number(fin.baseMinuteRate);
     const finMax = Number(fin.maxMinuteRate);
-    const lendBase = Number(lend.baseMinuteRate);
-    const lendMax = Number(lend.maxMinuteRate);
+    const lendBase = Number(lend.baseDailyRate);
+    const lendMax = Number(lend.maxDailyRate);
     return (
       '<div class="rule-lead">钱不够可以<b>融资</b>，看跌没股票可以<b>融券</b>。两样都是借来的，都要付利息，也都可能被强平。</div>' +
       '<div class="rule-h">融资（加杠杆做多）</div>' +
@@ -3409,21 +3427,24 @@
         Number.isFinite(finBase)
           ? '约 ' + fmtRatePct(finBase * 1440, 1) + '/日 · 现金越紧张越贵，封顶 ' + fmtRatePct(finMax) + '/分'
           : '') +
-      (Number.isFinite(finNow) ? ruleKv('当前利率', trimNum(finNow, 2) + '%/分', '按全市场资金紧张度实时浮动') : '') +
+      (Number.isFinite(finNow) ? ruleKv('当前利率', trimNum(finNow, 2) + '%/分', '按全市场资金紧张度实时浮动，逐分钟摊入负债') : '') +
       ruleKv('爆仓线', '权益 < ' + fmtRatio(maint) + ' × 多头市值', '跌破即强平，卖股还债') +
       '<div class="rule-h">融券（做空）</div>' +
       ruleKv('保证金', '卖出市值 × ' + fmtRatio(margin), '开空先冻结这笔钱，平仓后释放') +
       ruleKv('维持保证金率', fmtRatio(maint), '权益扛不住这个比率就爆仓') +
       ruleKv('券源', '每只股票一口独立的池子', '只能借到别人挂出来的券，借不到就开不了空') +
-      ruleKv('融券利息', fmtRatePct(lendBase) + '/分 起',
-        '池子越紧张越贵，封顶 ' + fmtRatePct(lendMax) + '/分') +
-      ruleKv('挂借收息', '可卖持仓挂出去借给空头', '按分钟计息，在「融券」标签页挂借 / 撤借') +
+      ruleKv('融券利息', fmtRatePct(lendBase) + '/日 起',
+        '池子越紧张越贵，封顶 ' + fmtRatePct(lendMax) + '/日') +
+      ruleKv('计息方式', '<b>每个游戏日收盘结算一次</b>',
+        '盘中按持仓时长一秒一秒累计，收盘那一刻一次性扣；持仓期间现金不掉，但平仓早也不能免') +
+      ruleKv('挂借收息', '可卖持仓挂出去借给空头', '按日计息，在「融券」标签页挂借 / 撤借') +
       ruleKv('裸空', r.allowNakedShort ? '本服开启（无券也能空）' : '本服关闭（必须借到券）', '') +
       '<div class="rule-warn"><b>强平不讲价。</b>系统在爆仓时直接挂单平掉你的仓位，' +
         '如果盘口没有足够的对手盘，会按 ' + fmtRatio(slip, 1) + ' 的滑点兜底成交——实际成交价可能比你看到的最差价还差。' +
         '跌破维持线但还没到强平线时，会先弹一条「追保预警」。</div>' +
-      '<div class="rule-tip">利息按分钟滚，两个方向都是。小仓位扛一天，利息可能比你想的贵——' +
-        '下单面板的「杠杆利息」会把这一笔的真实成本算给你。</div>'
+      '<div class="rule-tip">做空的利息按日结算：扛多久算多久，收盘那一刻从现金里一次性扣；' +
+        '现金不够就扣保证金，都不够会记成「做空欠息」，等你账上有钱再补缴。' +
+        '融资利息则是逐分钟摊进负债的，两者节奏不同，别混着算。</div>'
     );
   }
 
@@ -4443,9 +4464,20 @@
     };
   }
 
+  /** 日息（百分数，0.1 表示 0.1%/日）→ 主文与折算到「真实每分钟」（做空利息按游戏日结算） */
+  function fmtDailyRate(pct) {
+    const r = Number(pct) || 0;
+    const mins = minutesPerGameDay();
+    return {
+      rate: `${Number(r.toFixed(3))}%/日`,
+      min: r > 0 ? `收盘结算 · ≈${Number((r / mins).toFixed(4))}%/分` : '',
+    };
+  }
+
   /**
    * 杠杆利息常显：做多（融资）与做空（融券）各一行，选中方向且这笔真会借钱/借券时高亮。
    * 融资买入不勾选只是一笔全款买单，不计息，所以高亮跟着勾选状态走。
+   * 融资逐分钟摊息、做空按游戏日结算，两行的单位因此不同（/分 vs /日）。
    */
   function renderLeverRates() {
     const fin = state.rules.finance;
@@ -4471,8 +4503,8 @@
       $('leverValShort').textContent = '裸空不计息';
       shortRow.className = 'lever-row short off';
     } else {
-      const s = fmtMinuteRate(L.minuteRate);
-      $('leverValShort').innerHTML = `${s.rate}<i>${s.day}</i>`;
+      const s = fmtDailyRate(L.dailyRate);
+      $('leverValShort').innerHTML = `${s.rate}<i>${s.min}</i>`;
       shortRow.className = 'lever-row short' + (selectedAction === 'sell_open' ? ' on' : '');
     }
   }
@@ -4511,7 +4543,7 @@
     }
 
     // 本次开杠杆的利息成本：融资按借入口径（含开仓手续费）计息，融券按借券市值计息，
-    // 都乘以当前分钟息——与服务端逐 tick 摊息的基数同一口径
+    // 都换算成「真实每分钟」——与服务端计息的基数同一口径（做空那半是日息 ÷ 一个游戏日的真实分钟数）
     const estInterestRow = $('estInterestRow');
     let perMin = 0;
     if (finOn) {
@@ -4522,7 +4554,11 @@
     }
     estInterestRow.hidden = perMin <= 0;
     if (perMin > 0) {
-      $('estInterest').innerHTML = `${fmtMoney(perMin)}/分<i>≈${fmtMoney(perMin * 1440)}/日</i>`;
+      const isShort = selectedAction === 'sell_open';
+      // 做空利息按游戏日结算：文案给日成本，别让人以为每分钟都在扣
+      $('estInterest').innerHTML = isShort
+        ? `${fmtMoney(perMin * minutesPerGameDay())}/日<i>≈${fmtMoney(perMin)}/分 · 收盘结算</i>`
+        : `${fmtMoney(perMin)}/分<i>≈${fmtMoney(perMin * 1440)}/日</i>`;
     }
 
     if (state.account) {

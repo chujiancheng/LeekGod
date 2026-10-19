@@ -61,8 +61,9 @@ class Persister {
       delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
       insLedger: db.prepare(`
         INSERT INTO stock_ledger
-          (account, stock_id, lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid, finance_interest_accrued)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (account, stock_id, lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid,
+           lend_interest_accrued, finance_interest_accrued)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `),
       delLots: db.prepare('DELETE FROM lots WHERE account = ?'),
       insLot: db.prepare(`
@@ -445,6 +446,7 @@ class Persister {
         !led.lendInterestEarned &&
         !led.lendInterestDebt &&
         !led.lendInterestPaid &&
+        !led.lendInterestAccrued &&
         !led.financeInterestAccrued
       ) {
         continue;
@@ -453,7 +455,7 @@ class Persister {
         acc.name, stockId,
         led.lendOffered || 0,
         led.lendInterestEarned || 0, led.lendInterestDebt || 0,
-        led.lendInterestPaid || 0, led.financeInterestAccrued || 0
+        led.lendInterestPaid || 0, led.lendInterestAccrued || 0, led.financeInterestAccrued || 0
       );
     }
 
@@ -488,6 +490,8 @@ class Persister {
   loadAll(stockIds) {
     const startedRow = this.st.getMeta.get('round_started_at');
     const daySettledRow = this.st.getMeta.get('day_settled');
+    // 做空利息按游戏日结算：已收到第几个交易日，续跑时不许重复收同一天
+    const lendSettledRow = this.st.getMeta.get('lend_settled');
     const halt = this.readHalt();
     const accounts = this.st.allAccounts.all();
     const ledger = this.st.allLedger.all();
@@ -519,6 +523,10 @@ class Persister {
       startedAt: startedRow ? Number(startedRow.value) : null,
       // 已结算到第几个交易日：续跑时据此补做停机期间错过的日终结算
       daySettled: daySettledRow ? Number(daySettledRow.value) || 0 : 0,
+      // 做空利息已结算到第几个交易日：续跑时不许重复收同一天。
+      // **-1 = 老档没有这条记录**（还没按日结过），不能写 0——0 是第 1 个交易日的合法水位线，
+      // 写成 0 会让续跑后的第一个收盘以为「day 0 已经收过」而跳过
+      lendSettled: lendSettledRow ? Number(lendSettledRow.value) : -1,
       halt,
       accounts,
       ledger,

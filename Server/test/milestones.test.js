@@ -443,9 +443,9 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
 }
 
 // ============================================================
-console.log('\n[14] 存档版本 4 → 7：逐级原地升级补出 milestones 与 nick 列（以及 7 的 api_keys 表）');
+console.log('\n[14] 存档版本 4 → 8：逐级原地升级补出 milestones / nick / lend_interest_accrued 列（以及 7 的 api_keys 表）');
 {
-  assert(SCHEMA_VERSION === 7, `当前版本是 7（${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 8, `当前版本是 8（${SCHEMA_VERSION}）`);
   const FILE = tmpFile('v4');
   rmDb(FILE);
   const db = new Database(FILE);
@@ -458,6 +458,16 @@ console.log('\n[14] 存档版本 4 → 7：逐级原地升级补出 milestones �
       last_order_at INTEGER, created_at INTEGER NOT NULL, deposited REAL NOT NULL DEFAULT 0,
       broker TEXT, broker_changed_at INTEGER, broker_since_day INTEGER, broker_stats TEXT,
       free_reselect_used INTEGER NOT NULL DEFAULT 0, coupon_used_day INTEGER, free_interest_day INTEGER
+    );
+    -- 版本 4 的 stock_ledger 还没有 lend_interest_accrued 列（那条要在 7 → 8 时 ALTER 补）
+    CREATE TABLE stock_ledger (
+      account TEXT NOT NULL, stock_id TEXT NOT NULL,
+      lend_offered INTEGER NOT NULL DEFAULT 0,
+      lend_interest_earned REAL NOT NULL DEFAULT 0,
+      lend_interest_debt REAL NOT NULL DEFAULT 0,
+      lend_interest_paid REAL NOT NULL DEFAULT 0,
+      finance_interest_accrued REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (account, stock_id)
     );
   `);
   db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '4')").run();
@@ -478,6 +488,8 @@ console.log('\n[14] 存档版本 4 → 7：逐级原地升级补出 milestones �
     assert(row.cash === 888, '原数据无损');
     assert(row.milestones === null, '新增的 milestones 列为 NULL');
     assert(row.nick === null, '新增的 nick 列为 NULL（登录时补昵称）');
+    const ledCols = up.prepare('PRAGMA table_info(stock_ledger)').all().map((c) => c.name);
+    assert(ledCols.includes('lend_interest_accrued'), '7 → 8 补出了 lend_interest_accrued 列');
     up.close();
   }
   rmDb(FILE);

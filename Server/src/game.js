@@ -57,6 +57,11 @@ class Game {
     this._dayState = null;
     // 最近一次已结算的交易日序号（落 meta），用于续跑时补做停机期间错过的日终结算
     this._daySettled = 0;
+    // 做空利息已结算到第几个交易日（落 meta）：做空利息按游戏日结算，重启后不能重复收。
+    // **-1 = 还没结过任何一天**。收盘结算时 completedDay 恒 ≥ 1（首次收盘就是第 1 天，
+    // 见 settleDay），0 只会出现在第 1 个交易日的盘中且被 ensureDaySettled 的闸门挡掉；
+    // 用 -1 而不是 0 当哨兵，是为了让「没结过」与「结过第 0 天」这两种状态不会撞在一起
+    this._lendSettled = -1;
     // 每只股票一套完全独立的市场与做市引擎：各自盘口、融券池、做市资金、趋势与情绪。
     // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
     this.markets = new Map();
@@ -197,6 +202,10 @@ class Game {
     this.startedAt = snap.startedAt || Date.now();
     this.day.reanchor(this.startedAt);
     this._daySettled = snap.daySettled || 0;
+    // 做空利息已结算到第几个交易日（-1 = 旧档没结过 / 还没结过任何一天）
+    this._lendSettled = snap.lendSettled == null || Number.isNaN(Number(snap.lendSettled))
+      ? -1
+      : Number(snap.lendSettled);
 
     const byName = new Map();
     for (const row of snap.accounts) {
@@ -245,6 +254,9 @@ class Game {
         lendInterestDebt: row.lend_interest_debt || 0,
         lendInterestPaid: row.lend_interest_paid || 0,
         financeInterestAccrued: row.finance_interest_accrued || 0,
+        // 当日已累计、尚未到收盘结算的做空利息：不落盘的话每次重启都会把当天
+        // 已经攒下的那部分抹掉（收盘只扣重启之后累计的，等于给空头打折）
+        lendInterestAccrued: row.lend_interest_accrued || 0,
       });
     }
 
@@ -572,12 +584,14 @@ class Game {
           // 次日开盘竞价的跳空就是这么攒出来的
           this.npcs.get(stock.id).stepFairValue(now);
         }
-        // 融券利息：空头按 tick 付给出借方，券源越少利率越高
-        market.accrueLendingInterest(now);
-        // 做空欠息追缴：现金/保证金恢复后优先补缴历史欠息
-        market.collectLendingDebt();
-        // 融资利息：摊入批次负债并计入已实现盈亏，现金越紧利率越高
+        // 融资利息：摊入批次负债并计入已实现盈亏，现金越紧利率越高。
         market.accrueFinanceInterest(now);
+        // 做空利息：逐 tick 按「空头市值 × 日利率 × tick/一天」**累计**（不动现金），
+        // 收盘日终结算时一次性实扣（见 settleDay）。每天一结，但基数按持仓时长积分——
+        // 收盘前平空不再能免掉一整天的息（见 Market.accrueLendingInterest）
+        market.accrueLendingInterest(now);
+        // 做空欠息追缴：现金/保证金一恢复就补缴给出借方（不能等下一个收盘）
+        market.collectLendingDebt();
       }
       // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
       market.sampleShortInterest(now);
@@ -658,10 +672,14 @@ class Game {
 
   /**
    * 日终结算：每只标的（含指数）当日定格成一根日线，收盘价定格为新昨收，
-   * 今开/最高/最低/成交量额归零，活动委托全部作废。
+   * 今开/最高/最低/成交量额归零，活动委托全部作废；同日一并结算做空利息。
    * `_daySettled` 记的是**哪一天的收盘已经滚进昨收**：
    * 夜间结算时是今天；次日盘中补结时是昨天（今天还没收盘，不能记成今天，
    * 否则今晚的日终结算会被跳过）。
+   *
+   * `completedDay` = 刚刚收盘的那个交易日的序号。**收盘时它恒 ≥ 1**（第 1 个交易日
+   * 收盘就是 1，不是 0）：夜间段 `locate().day` 已经是当天，白天段才是「今天 − 1」。
+   * `st` 为空（时钟未启用）时落成 0，此时既不记日线也不判彩蛋。
    */
   settleDay(now = Date.now(), opts = {}) {
     const st = this.day.ok ? this.day.locate(now) : null;
@@ -669,6 +687,33 @@ class Game {
     // 指数的量额与内外盘是**成分股合计**，必须在成分股被清零之前重算一遍：
     // 否则指数那根日线的量额会落成 0，收盘竞价那批成交更会整个丢掉
     this.index.recompute(this.markets);
+    let lendSettled = 0;
+    let lendCharged = 0;
+    for (const stock of this.stocks) {
+      const m = this.markets.get(stock.id);
+      // 把「已收到哪一天」推给市场：重启后的补结算、收盘与夜间两次 settleDay
+      // 都靠这个水位线去重，同一天的息只会收一次。**不能夹 0**——-1 是「还没结过」的
+      // 唯一哨兵，`|| 0` 会让哨兵退化成「结过第 0 天」
+      m.lendSettledDay = this._lendSettled == null
+        ? m.lendSettledDay
+        : Math.max(m.lendSettledDay ?? -1, this._lendSettled);
+      // 返回值是「已结算的交易日号」，-1 才是没结（同一天已收过 / 裸空模式 / 融券未开）。
+      // 用 `!== -1` 判断而不是真假值——0 也是合法交易日号
+      if (m.settleLendingInterest(now, { day: completedDay }) !== -1) {
+        lendSettled += 1;
+        if (m.lastLendCharge > 0) lendCharged += 1;
+      }
+      // 做空欠息追缴：日结算收完立刻再补缴一轮（现金/保证金这一刻刚回到账上的账户当场销账）
+      m.collectLendingDebt();
+    }
+    if (lendSettled > 0) {
+      // 落 meta：重启后补结算不能把同一天再收一遍（收盘与夜间两段都会走去重判据）
+      this._lendSettled = completedDay;
+      if (opts.meta) this.persist?.setMeta('lend_settled', String(completedDay));
+      logger.info(
+        `[我是股神] 第 ${completedDay} 个交易日做空利息已结算（${lendCharged}/${lendSettled} 只标的实际扣息）`
+      );
+    }
     let canceled = 0;
     for (const stock of this.stocks) {
       canceled += this.markets
@@ -1233,6 +1278,9 @@ class Game {
         ? 0
         : Math.min(market.shortInterest, total);
       market.lendReserved = 0; // 活动委托回填时单独累计
+      // 做空利息已结到哪一天：Game 从 meta 恢复的水位线要落到市场上，
+      // 否则重启后到下一个收盘前下发的 `lending.settledDay` 会退回 -1，与 meta 对不上
+      market.lendSettledDay = this._lendSettled == null ? -1 : this._lendSettled;
     }
   }
 
@@ -1432,8 +1480,9 @@ class Game {
         allowNakedShort: !!config.margin.allowNakedShort,
         lending: {
           enabled: !!(config.margin.lending && config.margin.lending.enabled),
-          baseMinuteRate: config.margin.lending ? config.margin.lending.baseMinuteRate : 0,
-          maxMinuteRate: config.margin.lending ? config.margin.lending.maxMinuteRate : 0,
+          // 做空利息按**游戏日**结算（收盘日终结算收一次），所以下发的是日息
+          baseDailyRate: config.margin.lending ? config.margin.lending.baseDailyRate : 0,
+          maxDailyRate: config.margin.lending ? config.margin.lending.maxDailyRate : 0,
         },
         finance: {
           enabled: !!(config.margin.finance && config.margin.finance.enabled),
@@ -1841,6 +1890,8 @@ class Game {
       interestEarned: r2(led ? led.lendInterestEarned || 0 : 0),
       interestDebt: r2(led ? led.lendInterestDebt || 0 : 0),
       interestPaid: r2(led ? led.lendInterestPaid || 0 : 0),
+      // 今日已累计、还没到收盘结算的做空利息（收盘那一刻一次性从现金扣）
+      interestPending: r2(led ? led.lendInterestAccrued || 0 : 0),
     };
   }
 

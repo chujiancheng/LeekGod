@@ -61,6 +61,15 @@ class Market {
     this.lendTotal = 0;
     this.lendBorrowed = 0;
     this.lendReserved = 0; // SELL_OPEN 已下单未成交占用的券源
+    // 做空利息已结算到第几个交易日（**-1 = 还没结过**）。做空利息按游戏日结算，
+    // 每天收盘日终结算时收一次；重启后由 Game 从 meta 恢复，避免补结算时重复收息
+    this.lendSettledDay = -1;
+    // 一个游戏日的真实毫秒数（config.day 各阶段之和）：做空日息按它摊到每个 tick
+    this.dayMs = Array.isArray(config.day && config.day.phases)
+      ? config.day.phases.reduce((sum, p) => sum + (p.ms || 0), 0)
+      : 0;
+    // 最近一次日终结算实际收到的做空利息（0 = 这一天没有空头付息）
+    this.lastLendCharge = 0;
     this.shortHistory = []; // 空头仓位采样 [{t, qty}]，每 5 分钟一点，约 24h
     this._lastShortSample = 0;
     this.haltUntil = 0; // 停牌截止时间戳（0 = 正常交易），手动运营开关
@@ -593,20 +602,20 @@ class Market {
     return this.lendTotal > 0 ? Math.min(1, this.lendBorrowed / this.lendTotal) : 0;
   }
 
-  /** 当前分钟利率（小数）：券源越少利率越高，base × (1 + s × k)，封顶 maxMinuteRate */
-  lendMinuteRate() {
+  /** 当前融券利率（小数**每天**）：券源越少利率越高，base × (1 + s × k)，封顶 maxDailyRate */
+  lendDailyRate() {
     const cfg = config.margin.lending;
     if (!cfg || !cfg.enabled) return 0;
-    const raw = cfg.baseMinuteRate * (1 + this.lendUtilization() * cfg.stressK);
-    return Math.min(raw, cfg.maxMinuteRate);
+    const raw = cfg.baseDailyRate * (1 + this.lendUtilization() * cfg.stressK);
+    return Math.min(raw, cfg.maxDailyRate);
   }
 
   /**
-   * 某账户实际承担的分钟利率 = 市场利率 × 本券商券息倍率（招伤「券息上浮」1.4×）。
-   * 上浮出来的那一部分是**券商的利差**，与融资利息一样从权益里蒸发（见 accrueLendingInterest）。
+   * 某账户实际承担的日利率 = 市场利率 × 本券商券息倍率（招伤「券息上浮」1.4×）。
+   * 上浮出来的那一部分是**券商的利差**，与融资利息一样从权益里蒸发（见 settleLendingInterest）。
    */
-  lendMinuteRateFor(account) {
-    const base = this.lendMinuteRate();
+  lendDailyRateFor(account) {
+    const base = this.lendDailyRate();
     if (base <= 0 || !account) return base;
     return base * (this.brokerFor(account).lendRateMul || 1);
   }
@@ -662,34 +671,67 @@ class Market {
   }
 
   /**
-   * 每 tick 融券利息：空头付、出借方收。
-   * 按分钟利率折算到 tick：interest = 借出市值 × 分钟息 × (tickMs / 60000)。
-   * 只对「借券开仓」的部分计息（裸空不计）；空头先扣现金再扣保证金，
-   * 都不够则记欠息（计入权益的负债，等现金/保证金恢复后由 collectLendingDebt 追缴）；
-   * 出借方按池子份额分摊实收。
+   * 每个 tick 累计做空利息——**只累计，不扣钱**。
+   *
+   * 利息按「持仓时长」积分：每 tick 记 `空头市值 × 日利率 × tickMs/一天`，攒在
+   * `ledger.lendInterestAccrued` 上，收盘日终结算时一次性实扣（见 settleLendingInterest）。
+   *
+   * **为什么不在收盘那一刻按仓位一次性收**：那样计息基数只取决于「收盘瞬间有没有空头」，
+   * 玩家在收盘竞价里平掉就整天空免、收盘前 1 秒开空却要付满一天，两头都能套利
+   * （往返手续费 0.02% ≪ 日息 0.1%~0.4%，等于永不计息）。按 tick 积分后，
+   * 「扛多久付多少」才真的成立，而玩家看到的仍是「收盘一次扣」。
+   *
+   * 只对借券开仓的部分计息：裸空模式（allowNakedShort）整段跳过，与「裸空不计息」一致。
+   * day 时钟未启用时没有「日终结算」这个时点，退化为逐 tick 实扣（旧分钟息行为）。
    */
   accrueLendingInterest(now = Date.now()) {
     const cfg = config.margin.lending;
-    if (!cfg || !cfg.enabled || this.lendBorrowed <= 0 || this.lendTotal <= 0) return;
-    const tickRate = this.lendMinuteRate() * (config.tickIntervalMs / 60000);
-    if (tickRate <= 0) return;
+    if (!cfg || !cfg.enabled) return;
+    if (config.margin.allowNakedShort) return;
+    if (this.shortInterest <= 0 || this.dayMs <= 0) return;
+    const rate = this.lendDailyRate();
+    if (rate <= 0) return;
+    const tickRate = rate * (config.tickIntervalMs / this.dayMs);
     const last = this.lastPrice;
-    // 总利息池 = 已借出市值 × tick 利率（**基准利率**，不含券商上浮）
-    const totalInterest = this.lendBorrowed * last * tickRate;
-    if (totalInterest <= 0) return;
-    const day = this.dayNumber(now);
-
-    // 1) 向空头收取：按各账户空头市值占比分摊（借券部分 = min(shortQty, lendBorrowed 口径下全算借券）
-    //    allowNakedShort=false 时全部空头都来自池；=true 时不调用本函数的借券计息路径外的裸空不收息）
-    //    费率按**各账户自己的券商**取：招伤券息上浮 1.4×；每日免息券生效的账户这一档直接免收
-    let collected = 0;
-    const payers = [];
     for (const acc of this._allAccountsForInterest()) {
-      const shortQty = acc.shortQty(this.stockId);
-      if (shortQty <= 0) continue;
+      const qty = acc.shortQty(this.stockId);
+      if (qty <= 0) continue;
+      const led = acc.ledgerOf(this.stockId);
+      // **这里绝不能 r2**：单 tick 的额对小仓位可能不到 0.005（100 股 @20、0.1%/日
+      // 每 tick 只有 0.0002 元），逐次四舍五入会把尾数抹成 0，累计下来等于免息。
+      // 尾数一路留着，只在 chargeLendingAccrued 真正扣款那一刻取整
+      led.lendInterestAccrued = (led.lendInterestAccrued || 0) + qty * last * tickRate;
+      // 玩家账户要逐 tick 落盘（NPC 在 notifyInterest 里被跳过，靠轮转扫描兜底）：
+      // 不落盘的话重启只丢最后一次写库之后的那点累计，收盘扣的就不是完整一天的量
+      this.notifyInterest(acc);
+    }
+    if (!this.dayCycle || !this.dayCycle.ok) this.chargeLendingAccrued(now, this.dayNumber(now));
+  }
+
+  /**
+   * 把当日已累计的做空利息实扣下来：日终结算与「day 未启用」的逐 tick 扣款都走这里。
+   *
+   * 空头先扣现金再扣保证金，都不够则记欠息（计入权益的负债，等现金/保证金恢复后由
+   * collectLendingDebt 追缴）；出借方按挂借份额分摊实收，只分「基准利率那一份」——
+   * 券商上浮收上来的利差与融资利息一样直接从权益里蒸发，不能凭空转给出借人。
+   *
+   * @param {number} now 扣款时刻
+   * @param {number} day 这一天是第几个交易日（免息券按它判；无时钟时为 0）
+   * @returns {number} 本次实收总额（含券商上浮那一份）
+   */
+  chargeLendingAccrued(now = Date.now(), day = 0) {
+    let collected = 0;
+    let base = 0;
+    for (const acc of this._allAccountsForInterest()) {
+      // 用 ledger.get 而不是 ledgerOf：没有明细的账户本来就没有累计，不必给它建一条
+      const led = acc.ledger.get(this.stockId);
+      const accrued = led ? led.lendInterestAccrued || 0 : 0;
+      if (accrued <= 0) continue;
+      led.lendInterestAccrued = 0;
+      // 免息券：这一档当天全免（券是用掉的那一天生效的）
       if (broker.interestWaived(acc, day)) continue;
-      const share = shortQty / this.lendBorrowed;
-      const owed = totalInterest * share * (this.brokerFor(acc, now).lendRateMul || 1);
+      base += accrued;
+      const owed = r2(accrued * (this.brokerFor(acc, now).lendRateMul || 1));
       if (owed <= 0) continue;
       let pay = 0;
       const fromCash = Math.min(owed, Math.max(0, acc.cash));
@@ -704,23 +746,42 @@ class Market {
         pay += fromMargin;
         rest -= fromMargin;
       }
-      if (rest > 0.005) {
-        const l = acc.ledgerOf(this.stockId);
-        l.lendInterestDebt = r2((l.lendInterestDebt || 0) + rest);
-      }
+      if (rest > 0.005) led.lendInterestDebt = r2((led.lendInterestDebt || 0) + rest);
       if (pay > 0) {
-        const l = acc.ledgerOf(this.stockId);
-        l.lendInterestPaid = r2((l.lendInterestPaid || 0) + pay);
+        led.lendInterestPaid = r2((led.lendInterestPaid || 0) + pay);
         collected += pay;
-        payers.push({ acc, pay });
       }
       if (pay > 0 || rest > 0) this.notifyInterest(acc);
     }
+    this.lastLendCharge = r2(collected);
+    // 出借方只分基准利率那一份：券商上浮的利差直接蒸发（与融资利息同口径）
+    if (collected > 0) this.payLenders(Math.min(r2(collected), r2(base)));
+    return this.lastLendCharge;
+  }
 
-    // 2) 向出借方分配：按挂借量占总挂借的比例（被借走的才真正参与计息分配）。
-    //    只分「基准利率那一份」：券商上浮收上来的利差与融资利息一样直接从权益里蒸发，
-    //    不能凭空转给出借人（那会无中生有地造钱）
-    if (collected > 0) this.payLenders(Math.min(collected, totalInterest));
+  /**
+   * 做空利息的**日终结算**：每个游戏日收盘收一次（由 Game.settleDay 调用）。
+   *
+   * 结算日 = 刚刚收盘的那个交易日（`opts.day` 由 Game.settleDay 传入，与日线同一天）。
+   * `lendSettledDay` 记「已收到哪一天」，同一个交易日绝不会收两次；Game 把它落进 meta，
+   * 重启后由 Game.ensureDaySettled 补结算时恢复，不会重复收。
+   * 真正的扣款见 chargeLendingAccrued（基数来自逐 tick 累计，不是收盘那一刻的仓位）。
+   *
+   * @param {number} now 结算时刻
+   * @param {{day?:number}} [opts] 结算对应的交易日号（缺省时从交易日时钟推）
+   * @returns {number} 已结算的交易日号；`-1` 表示这次没结（融券未开放 / 裸空模式 /
+   *   这一天已结过、或回退到更早的日子）。**0 是合法交易日号**，调用方要用
+   *   `!== -1` 判断，不能拿真假值判
+   */
+  settleLendingInterest(now = Date.now(), opts = {}) {
+    const cfg = config.margin.lending;
+    if (!cfg || !cfg.enabled || config.margin.allowNakedShort) return -1;
+    const day = opts.day == null ? this.dayNumber(now) : Number(opts.day);
+    // 记着的日子 ≥ 今天 = 这一天已经收过（重启补结算时可能重复问同一个 day）
+    if (day <= (this.lendSettledDay ?? -1)) return -1;
+    this.lendSettledDay = day;
+    this.chargeLendingAccrued(now, day);
+    return day;
   }
 
   /**
@@ -731,8 +792,9 @@ class Market {
     if (!(amount > 0) || this.lendTotal <= 0) return 0;
     let assigned = 0;
     for (const acc of this._allAccountsForInterest()) {
-      const led = acc.ledgerOf(this.stockId);
-      const offered = led.lendOffered || 0;
+      // ledger.get：没挂借的账户分不到钱，也不该在结算路径上给它建一条明细
+      const led = acc.ledger.get(this.stockId);
+      const offered = led ? led.lendOffered || 0 : 0;
       if (offered <= 0) continue;
       const income = amount * (offered / this.lendTotal);
       if (income <= 0) continue;
@@ -754,8 +816,9 @@ class Market {
     if (this.lendTotal <= 0) return 0;
     let collected = 0;
     for (const acc of this._allAccountsForInterest()) {
-      const led = acc.ledgerOf(this.stockId);
-      const owed = led.lendInterestDebt || 0;
+      // ledger.get：没有明细的账户不可能有欠息，别在当前这个每 tick 都会跑的函数里给它建
+      const led = acc.ledger.get(this.stockId);
+      const owed = led ? led.lendInterestDebt || 0 : 0;
       if (owed <= 0) continue;
       let pay = 0;
       const fromCash = Math.min(owed, Math.max(0, acc.cash));
@@ -1984,7 +2047,9 @@ class Market {
       reserved: this.lendReserved,
       available: this.lendAvailable(),
       utilization: r2(this.lendUtilization() * 100), // 紧张度 %
-      minuteRate: r2(this.lendMinuteRate() * 10000) / 100, // 分钟息 %（保留两位小数，0.01 表示 0.01%）
+      dailyRate: r2(this.lendDailyRate() * 10000) / 100, // 日息 %（保留两位小数，0.05 表示 0.05%/日）
+      settle: 'daily', // 计息口径：每个游戏日结算一次（收盘日终结算）
+      settledDay: this.lendSettledDay, // -1 = 还没结过任何一天
       allowNakedShort: !!config.margin.allowNakedShort,
       shortInterest: this.shortInterest,
       history: this.shortHistory,

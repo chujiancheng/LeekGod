@@ -11,6 +11,7 @@ const STOCK = config.stocks[0];
 config.margin.allowNakedShort = true;
 
 const { Market, ACTIONS } = require('../src/market');
+const { DayCycle } = require('../src/daycycle');
 const { Account } = require('../src/store');
 const broker = require('../src/broker');
 
@@ -521,9 +522,77 @@ console.log('\n[20] 撤借闸门计入 lendReserved（在途开空占用）');
   const hit = m.place(N2, { action: ACTIONS.BUY_OPEN, qty: 800, price: 20, now: 2000, noCooldown: true });
   assert(hit.order.filled === 800, '开空挂单被吃掉成交');
   assert(m.lendBorrowed === 800 && m.lendTotal === 800, `池子账实相符 (borrowed=${m.lendBorrowed}, total=${m.lendTotal})`);
+  // 做空利息：盘中逐 tick 按持仓时长**累计**（不动现金），收盘日终结算时一次性实扣
+  // 时钟在成交之后再挂：带着时钟在集合竞价段下单不会连续撮合（本用例要的是立即成交）
+  m.dayCycle = new DayCycle({ enabled: true, phases: config.day.phases }, 0);
+  const tickMs = config.tickIntervalMs;
+  const ticks = Math.round(m.dayMs / tickMs); // 一个游戏日容得下多少 tick
   const cashBefore = A.cash;
-  m.accrueLendingInterest(3000);
-  assert(A.cash < cashBefore, `借券方正常计息扣款 (cash ${cashBefore.toFixed(2)} -> ${A.cash.toFixed(2)})`);
+  for (let i = 1; i <= ticks; i += 1) m.accrueLendingInterest(3000 + i * tickMs);
+  assert(A.cash === cashBefore, `盘中只累计、不扣现金 (cash=${A.cash.toFixed(2)})`);
+  const pending = A.ledgerOf(STOCK.id).lendInterestAccrued;
+  const oneDay = A.shortQty('600001') * m.lastPrice * m.lendDailyRate();
+  assert(
+    Math.abs(pending - oneDay) / oneDay < 0.01,
+    `持满一天的累计额 ≈ 空头市值 × 日利率: ${pending.toFixed(2)} ≈ ${oneDay.toFixed(2)}`
+  );
+  m.settleLendingInterest(0, { day: 1 });
+  assert(
+    Math.abs(cashBefore - A.cash - pending) < 0.01,
+    `收盘实扣 = 当日累计 (扣 ${(cashBefore - A.cash).toFixed(2)} / 累计 ${pending.toFixed(2)})`
+  );
+  assert(A.ledgerOf(STOCK.id).lendInterestAccrued === 0, '结算后当日累计清零');
+  const cashAfter1 = A.cash;
+  m.settleLendingInterest(0, { day: 1 });
+  assert(A.cash === cashAfter1, '同一个交易日不会重复收息');
+  for (let i = 1; i <= ticks; i += 1) m.accrueLendingInterest(1e6 + i * tickMs);
+  const cashAfter2 = A.cash;
+  assert(m.settleLendingInterest(0, { day: 2 }) === 2, '下一个交易日收盘再结一次（累计 → 实扣）');
+  assert(A.cash < cashAfter2, '第二天的利息照收');
+  assert(m.settleLendingInterest(0, { day: 1 }) === -1, '回退到已结算的日子不收（重启补结算安全）');
+
+  // 回归：计息基数按**持仓时长**积分，不再只看收盘那一刻的仓位。
+  // 这两个用例在「收盘采样」的旧实现下会双向失败：① 收 0 元、② 收满一天。
+  const plant = (tag) => {
+    const mm = new Market(stock);
+    const LL = new Account('回归出借' + tag);
+    const AA = new Account('回归空头' + tag);
+    const NN = new Account('回归NPC' + tag, true);
+    NN.cash = 1e8;
+    mm.accountsProvider = () => [LL, AA, NN];
+    LL.longPos('600001').lots.push({ qty: 1000, price: 20, ts: -1e9, reserved: 0 });
+    mm.lendShares(LL, 1000, 0);
+    mm.place(AA, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
+    mm.place(NN, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 2000, noCooldown: true });
+    // 成交之后再挂时钟：没有时钟就没有「日终结算」这个时点（会退化成逐 tick 实扣），
+    // 而带着时钟在集合竞价段下单又不会连续撮合
+    mm.dayCycle = new DayCycle({ enabled: true, phases: config.day.phases }, 0);
+    return { mm, AA };
+  };
+  {
+    // ① 全天持有、收盘前把空头平掉 → 已经累计的息照样要付
+    const { mm, AA } = plant('A');
+    const full = AA.shortQty('600001') * mm.lastPrice * mm.lendDailyRate();
+    const c0 = AA.cash;
+    for (let i = 1; i <= ticks; i += 1) mm.accrueLendingInterest(3000 + i * tickMs);
+    AA.shorts.clear(); // 收盘前平光：收盘那一刻仓位为 0
+    mm.settleLendingInterest(0, { day: 1 });
+    assert(
+      Math.abs(c0 - AA.cash - full) < oneDay * 0.01,
+      `收盘前平空也要付已持仓那段的息 (扣 ${(c0 - AA.cash).toFixed(2)} ≈ ${full.toFixed(2)})`
+    );
+
+    // ② 收盘前 1 秒才开空 → 只付 1 个 tick，不是收满一天
+    const { mm: mm2, AA: AA2 } = plant('B');
+    const c1 = AA2.cash;
+    mm2.accrueLendingInterest(3000 + tickMs); // 只跑一个 tick
+    mm2.settleLendingInterest(0, { day: 1 });
+    const charged = c1 - AA2.cash;
+    assert(
+      charged > 0 && charged < full * 0.01,
+      `收盘前才开空只付已持仓那一小段 (扣 ${charged.toFixed(4)} ≪ 一天 ${full.toFixed(2)})`
+    );
+  }
   config.margin.allowNakedShort = true; // 还原本文件默认
 }
 
@@ -822,11 +891,26 @@ console.log('\n[31] 做空欠息计入权益并追缴');
   m.accountsProvider = () => [L, A];
 
   // 现金与保证金都扣不动 → 利息只能挂账（没有任何实付，累计已付保持 0）
+  // 累一整天再收盘：日利率按池子紧张度取（这里只借走 1000/20000 → 轻微上浮）
+  // 挂真实交易日时钟：没有时钟就没有「日终结算」这个时点（会退化成逐 tick 实扣）
+  m.dayCycle = new DayCycle({ enabled: true, phases: config.day.phases }, 0);
+  const rate = m.lendDailyRate();
+  const tickMs = config.tickIntervalMs;
+  const ticks = Math.round(m.dayMs / tickMs);
+  const tickRate = rate * (tickMs / m.dayMs);
+  for (let i = 1; i <= ticks; i += 1) m.accrueLendingInterest(t0 + i * tickMs);
+  const accrual = A.ledgerOf(STOCK.id).lendInterestAccrued;
+  assert(accrual > 0, `盘中累计了 ${accrual.toFixed(2)} 元待结算利息`);
   A.cash = 0;
   A.shortMargin = 0;
-  for (let i = 0; i < 200; i++) m.accrueLendingInterest(t0 + 1000 + i * config.tickIntervalMs);
+  const settled = m.settleLendingInterest(t0 + 1000, { day: 1 });
+  assert(settled === 1, '收盘日终结算做空利息（按天，一天一次）');
   const owed = A.ledgerOf(STOCK.id).lendInterestDebt;
   assert(owed > 0, `欠息挂账 ${owed.toFixed(2)} 元`);
+  // 累计 = Σ(空头市值 × 日利率 × tick/一天) ≈ 空头市值 × 日利率（一整天的量）
+  const expectOwed = A.shortQty('600001') * 20 * tickRate * ticks;
+  assert(Math.abs(owed - expectOwed) < Math.max(1, expectOwed * 0.01),
+    `欠息 = 按持仓时长累计的一整天的量: ${owed.toFixed(2)} ≈ ${expectOwed.toFixed(2)}`);
   assert(A.ledgerOf(STOCK.id).lendInterestPaid === 0, '扣不动时累计已付利息为 0（只挂账）');
   const mv = A.shortMV('600001', 20);
   assert(Math.abs(A.equity(() => 20) - (-mv - owed)) < 0.01,

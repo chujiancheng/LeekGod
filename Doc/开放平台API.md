@@ -331,7 +331,7 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" $GUSHEN_BASE/open/v1/meta
     "financeRatio": 0.5,
     "allowNakedShort": false,
     "finance": { "enabled": true, "baseMinuteRate": 0.0001, "maxMinuteRate": 0.0004 },
-    "lending": { "enabled": true, "baseMinuteRate": 0.0001, "maxMinuteRate": 0.0004 },
+    "lending": { "enabled": true, "baseDailyRate": 0.001, "maxDailyRate": 0.004 },
     "priceLimit": { "enabled": true, "pct": 30 },
     "actions": ["buy_open", "sell_close", "sell_open", "buy_close"],
     "orderTypes": ["limit"]
@@ -379,7 +379,8 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" \
       },
       "lending": {
         "enabled": true, "total": 800000, "borrowed": 120000, "reserved": 0,
-        "available": 680000, "utilization": 15, "minuteRate": 0.01,
+        "available": 680000, "utilization": 15,
+        "dailyRate": 0.13, "settle": "daily", "settledDay": 12,
         "allowNakedShort": false, "shortInterest": 120000, "history": []
       },
       "depth": {
@@ -439,7 +440,7 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" $GUSHEN_BASE/open/v1/account
       "financeDebt": 0, "financePrincipal": 0, "financeInterest": 0,
       "liquidationPrice": null, "liquidationPriceLong": null,
       "lending": { "stockId": "600001", "offered": 0, "lentOut": 0, "removable": 0,
-                   "freeToLend": 0, "interestEarned": 0, "interestDebt": 0, "interestPaid": 0 }
+                   "freeToLend": 0, "interestEarned": 0, "interestDebt": 0, "interestPaid": 0, "interestPending": 0 }
     }
   ],
   "orders": [
@@ -850,8 +851,8 @@ Access-Control-Max-Age: 600
 | `finance.baseMinuteRate` | number | 小数/分钟 | 基础融资利率，`0.0001` = 0.01%/分钟 |
 | `finance.maxMinuteRate` | number | 小数/分钟 | 融资利率上限 |
 | `lending.enabled` | bool | — | 融券池是否开放 |
-| `lending.baseMinuteRate` | number | 小数/分钟 | 基础融券利率 |
-| `lending.maxMinuteRate` | number | 小数/分钟 | 融券利率上限 |
+| `lending.baseDailyRate` | number | 小数/**日** | 基础融券（做空）日利率，`0.001` = 0.1%/日 |
+| `lending.maxDailyRate` | number | 小数/**日** | 做空日利率上限。做空利息**每个游戏日结算一次**，收盘日终结算时扣 |
 | `priceLimit.enabled` | bool | — | 是否启用涨跌停 |
 | `priceLimit.pct` | number | **百分数** | `30` 表示 ±30%（不是 0.3） |
 | `actions` | array | — | 支持的四种 action |
@@ -942,7 +943,8 @@ Access-Control-Max-Age: 600
 
 ```json
 { "enabled": true, "total": 800000, "borrowed": 120000, "reserved": 0,
-  "available": 680000, "utilization": 15, "minuteRate": 0.01,
+  "available": 680000, "utilization": 15,
+  "dailyRate": 0.13, "settle": "daily", "settledDay": 12,
   "allowNakedShort": false, "shortInterest": 120000, "history": [] }
 ```
 
@@ -954,7 +956,9 @@ Access-Control-Max-Age: 600
 | `reserved` | 已下单未成交占用的券源 |
 | `available` | 可借股数 = `total - borrowed - reserved` |
 | `utilization` | 利用率（百分数） |
-| `minuteRate` | 当前分钟息（**百分数**，`0.01` 表示 0.01%/分钟） |
+| `dailyRate` | 当前**日息**（**百分数**，`0.13` 表示 0.13%/日），随利用率上升、封顶 `maxDailyRate` |
+| `settle` | 计息口径，恒为 `"daily"`：每个游戏日结算一次 |
+| `settledDay` | 已结算到第几个交易日（`-1` = 还没结过任何一天；收盘结算时它的值恒 ≥ 1） |
 | `allowNakedShort` | 是否允许无券开空 |
 | `shortInterest` | 未平空头总量 |
 | `history` | 空头仓位采样 `[{t, qty}]`，约 5 分钟一点 |
@@ -1176,7 +1180,7 @@ marginUsage = (空头市值 + 融资负债 + 融券欠息) / equity × 100
   "liquidationPrice": null,
   "liquidationPriceLong": null,
   "lending": { "stockId": "600001", "offered": 0, "lentOut": 0, "removable": 0,
-               "freeToLend": 0, "interestEarned": 0, "interestDebt": 0, "interestPaid": 0 }
+               "freeToLend": 0, "interestEarned": 0, "interestDebt": 0, "interestPaid": 0, "interestPending": 0 }
 }
 ```
 
@@ -1210,6 +1214,7 @@ marginUsage = (空头市值 + 融资负债 + 融券欠息) / equity × 100
 | `interestEarned` | 累计已收利息 |
 | `interestDebt` | 应收未收（借券方现金不足时挂账） |
 | `interestPaid` | 累计已付利息（你作为空头借券时） |
+| `interestPending` | **今日已累计、还没到收盘结算**的做空利息（收盘那次结算一次性从现金扣） |
 
 > **卖出/平仓永远用 `sellable` / `coverable`，不要用 `qty`。** 用 `qty` 会在锁仓期、
 > 有在途平仓单、或已挂借时被拒。
@@ -1631,7 +1636,7 @@ with urllib.request.urlopen(req, timeout=60) as resp:
 - `sell_open` 默认必须从该股票的融券池借券（`allowNakedShort=false`）。
 - 可借量看 `markets[].lending.available`；部分券商还会打折。
 - 券源不足拒单：`可借券源不足，当前可借 300 股（请先有人挂借出）`。
-- 借券要付息：`lending.minuteRate`（百分数/分钟），随利用率上升，封顶 `maxMinuteRate`。
+- 借券要付息：按 `lending.dailyRate`（百分数/**日**）计，随利用率上升，封顶 `maxDailyRate`。**每个游戏日结算一次**——收盘日终结算时一次性扣，日内不逐个 tick 摊息。
 - 平空时自动还券，释放券源。
 - v1 开放接口**不提供**"挂借出"（把持仓借给别人收息），那只能在网页里操作。
 
@@ -2431,7 +2436,7 @@ A：v1 开放接口不提供这些。它们只在网页端有。
 | `changePct` / `marginUsage` / `utilization` / `outerPct` | 百分数 | 2.5 = 2.5% |
 | `priceLimit.pct` | 百分数 | 30 = ±30% |
 | `finance.baseMinuteRate` | 小数/分钟 | 0.0001 = 0.01%/分钟 |
-| `lending.minuteRate` | 百分数/分钟 | 0.01 = 0.01%/分钟 |
+| `lending.dailyRate` | 百分数/**日** | 0.1 = 0.1%/日（按游戏日结算） |
 | `cooldownMs` / `lockMs` / `phaseLeftMs` | 毫秒 | — |
 | `seq` | 整数 | 行情序号或成交序号，看上下文 |
 
@@ -2452,7 +2457,7 @@ A：v1 开放接口不提供这些。它们只在网页端有。
 | 维持保证金 | 30% |
 | 融资自备 | 50%（2 倍） |
 | 融资利率 | 0.01%/分钟 起，封顶 0.04%/分钟 |
-| 融券利率 | 0.01%/分钟 起，封顶 0.04%/分钟 |
+| 融券利率 | 0.1%/日 起，封顶 0.4%/日（**每个游戏日结算一次**，收盘扣） |
 | 单账户 Key 上限 | 8 |
 | 单 Key SSE 上限 | 2 |
 | 读配额 | 240 次/分钟/Key |

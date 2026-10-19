@@ -412,8 +412,9 @@ function rulesView(game, acc) {
     },
     lending: {
       enabled: !!(config.margin.lending && config.margin.lending.enabled),
-      baseMinuteRate: config.margin.lending ? config.margin.lending.baseMinuteRate : 0,
-      maxMinuteRate: config.margin.lending ? config.margin.lending.maxMinuteRate : 0,
+      // 做空利息按游戏日结算（每个交易日收盘收一次），下发给策略的是日息
+      baseDailyRate: config.margin.lending ? config.margin.lending.baseDailyRate : 0,
+      maxDailyRate: config.margin.lending ? config.margin.lending.maxDailyRate : 0,
     },
     // 涨跌停幅度给**百分数**（30 = ±30%），与 config 里的小数 0.3 区分开：
     // 策略作者写 `if (pct > 29.5)` 时不该还要猜单位

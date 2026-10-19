@@ -1558,7 +1558,7 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
       liquidationSlippage: 0.005,
       stocks: [{ id: '600001', name: '大米集团' }],
       finance: { enabled: true, ratio: 0.4, baseMinuteRate: 0.0001, maxMinuteRate: 0.0004, minuteRate: 0.01 },
-      lending: { enabled: true, baseMinuteRate: 0.0001, maxMinuteRate: 0.0004 },
+      lending: { enabled: true, baseDailyRate: 0.001, maxDailyRate: 0.004 },
       day: {
         enabled: true,
         totalMs: 620000,

@@ -8,7 +8,7 @@
  *   ④ 幂等：同 clientOrderId 只成交一次；**失败不缓存**（冷却过去后重试能成功）；同 cid 换参 → 409
  *   ⑤ 内幕字段不出圈（fairValue / force / intent / regime / llmPlan / cycleDir 一律不在响应里）
  *   ⑥ 成交游标是序号不是时间戳
- *   ⑦ 存档版本 7（api_keys 表）
+ *   ⑦ 存档版本 8（stock_ledger 的 lend_interest_accrued 列）
  *   ⑧ 撤销 Key 会掐掉已建立的 SSE
  */
 const fs = require('fs');
@@ -287,7 +287,7 @@ const api = async (method, p, { key, body, headers } = {}) => {
   // ============================================================
   console.log('\n[9] 存档版本');
   const v = Number(persist.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value);
-  assert(v === 7 && SCHEMA_VERSION === 7, `schema 版本 7（${v}）`);
+  assert(v === 8 && SCHEMA_VERSION === 8, `schema 版本 8（${v}）`);
   const table = persist.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'").get();
   assert(!!table, 'api_keys 表已建');
 

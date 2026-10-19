@@ -10,13 +10,14 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 8：做空利息按持仓时长累计（stock_ledger 加 lend_interest_accrued 列，可空默认 0）
 // 7：开放平台 API Key（api_keys 表；只加表，没有改既有列）
 // 6：账号与昵称分家（accounts 加 nick 列，name 从此只作登录账号）
 // 5：彩蛋里程碑（accounts 加 milestones 列，仅玩家写）
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   lend_interest_earned      REAL NOT NULL DEFAULT 0,
   lend_interest_debt        REAL NOT NULL DEFAULT 0,
   lend_interest_paid        REAL NOT NULL DEFAULT 0,
+  lend_interest_accrued     REAL NOT NULL DEFAULT 0,
   finance_interest_accrued  REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (account, stock_id)
 );
@@ -300,9 +302,20 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account);
 `;
 
+/**
+ * 版本 7 → 8 的**原地升级**：做空利息的「当日已累计、还没到收盘结算」那一档。
+ *
+ * 做空利息改成逐 tick 按持仓时长累计、收盘一次性实扣之后，重启会把当天已攒下的
+ * 那部分抹掉（收盘只扣重启之后累计的，等于给空头打折）。这一列把它落盘。
+ * 可空默认 0，老档原地升上来即可（缺列即"没有待结算的息"）。
+ */
+const MIGRATION_8 = `
+ALTER TABLE stock_ledger ADD COLUMN lend_interest_accrued REAL NOT NULL DEFAULT 0;
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;
