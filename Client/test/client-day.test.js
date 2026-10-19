@@ -1285,8 +1285,67 @@ console.log('\n[16] 主题系统：切换 / 落盘 / 吉祥物换装 / 两个视
   api.setTheme('nope', false);
   assert(api.themeOf() === '' && api.themeAttr() === null, '未知主题 id 回落默认主题');
 
-  assert(api.themes().length === 5, `主题表含默认在内共 5 套（实际 ${api.themes().length}）`);
-  assert(api.themes()[1] === 'broker' && api.themes()[4] === 'magic', '主题表顺序 = 弹窗里的排列顺序');
+  assert(api.themes().length === 7, `主题表含默认在内共 7 套（实际 ${api.themes().length}）`);
+  assert(api.themes()[1] === 'broker' && api.themes()[4] === 'eyecare' && api.themes()[5] === 'skyblue' && api.themes()[6] === 'magic', '主题表顺序 = 弹窗里的排列顺序（浅色三套排第二行）');
+
+  // ---- 主题 token 完整性：每套主题必须重写同一组 token（漏一个就继承默认深色，浅底上必翻车）----
+  const cssAll = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  const themeBlock = (id) => {
+    const m = new RegExp('\\[data-theme="' + id + '"\\]\\s*\\{([\\s\\S]*?)\\}').exec(cssAll);
+    return m ? m[1] : '';
+  };
+  const tok = (block, name) => {
+    const m = new RegExp('--' + name + '\\s*:\\s*(#[0-9a-fA-F]{6})').exec(block);
+    return m ? m[1].toLowerCase() : '';
+  };
+  const lum = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => {
+    const l1 = lum(a), l2 = lum(b);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
+  const HEX_TOKENS = ['bg', 'panel', 'panel-2', 'line', 'ink', 'muted', 'red', 'green', 'blue', 'gold',
+    'grad-a', 'grad-b', 'grad-green-a', 'grad-green-b', 'on-grad'];
+  for (const id of ['broker', 'gold', 'sakura', 'eyecare', 'skyblue', 'magic']) {
+    const block = themeBlock(id);
+    const miss = HEX_TOKENS.filter((t) => !tok(block, t))
+      .concat(['float-bg', 'chart-grid'].filter((t) => block.indexOf('--' + t + ':') < 0));
+    assert(miss.length === 0, `${id} 主题 token 齐全（缺：${miss.join('/') || '无'}）`);
+  }
+
+  // ---- 浅色主题口径：底色真的浅，且字压得住（护眼不是"看着淡"，是能长时间读）----
+  for (const id of ['sakura', 'eyecare', 'skyblue']) {
+    const bg = tok(themeBlock(id), 'bg');
+    assert(lum(bg) >= 0.7, `${id} 是浅底（bg ${bg} · L=${lum(bg).toFixed(2)}）`);
+  }
+  // 每套浅底都过一遍对比度下限（正文 / 次要字 / 四强调色 / 渐变按钮字 / 金底配字）
+  for (const id of ['eyecare', 'skyblue']) {
+    const blk = themeBlock(id);
+    assert(blk.indexOf('--on-gold:') >= 0, `${id} 自带 --on-gold（暗金底要配浅字）`);
+    assert(ratio(tok(blk, 'ink'), tok(blk, 'bg')) >= 7, `${id} 正文对比 ≥7（实际 ${ratio(tok(blk, 'ink'), tok(blk, 'bg')).toFixed(1)}）`);
+    assert(ratio(tok(blk, 'muted'), tok(blk, 'panel')) >= 3.8, `${id} 次要字对比 ≥3.8（实际 ${ratio(tok(blk, 'muted'), tok(blk, 'panel')).toFixed(1)}）`);
+    for (const t of ['red', 'green', 'blue', 'gold']) {
+      const r = ratio(tok(blk, t), tok(blk, 'panel'));
+      assert(r >= 4.5, `${id} --${t} 在卡片底上对比 ≥4.5（实际 ${r.toFixed(1)}）`);
+    }
+    assert(ratio(tok(blk, 'on-grad'), tok(blk, 'grad-b')) >= 4.5, `${id} 渐变按钮文字对比 ≥4.5（实际 ${ratio(tok(blk, 'on-grad'), tok(blk, 'grad-b')).toFixed(1)}）`);
+  }
+  const eye = themeBlock('eyecare');
+  assert(ratio(tok(eye, 'ink'), tok(eye, 'bg')) >= 7, `护眼主题正文对比 ≥7（实际 ${ratio(tok(eye, 'ink'), tok(eye, 'bg')).toFixed(1)}）`);
+  assert(ratio(tok(eye, 'muted'), tok(eye, 'panel')) >= 3.8, `护眼主题次要字对比 ≥3.8（实际 ${ratio(tok(eye, 'muted'), tok(eye, 'panel')).toFixed(1)}）`);
+  for (const t of ['red', 'green', 'blue', 'gold']) {
+    const r = ratio(tok(eye, t), tok(eye, 'panel'));
+    assert(r >= 4.5, `护眼主题 --${t} 在卡片底上对比 ≥4.5（实际 ${r.toFixed(1)}）`);
+  }
+  assert(ratio(tok(eye, 'on-grad'), tok(eye, 'grad-b')) >= 4.5, `护眼主题渐变按钮文字对比 ≥4.5（实际 ${ratio(tok(eye, 'on-grad'), tok(eye, 'grad-b')).toFixed(1)}）`);
+  api.setTheme('eyecare', false);
+  assert(api.themeBtnText() === '主题 · 护眼纸感', `浅色护眼主题进主题表（实际「${api.themeBtnText()}」）`);
 
   // ---- 吉祥物：默认跟随主题，二次元主题自带换装 ----
   api.setMascotPick(null);

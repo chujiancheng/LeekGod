@@ -204,7 +204,7 @@ html {
 .portal-btn.primary {
   border: none;
   background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
-  color: #fff;
+  color: var(--on-grad);
   font-weight: 600;
 }
 

@@ -97,6 +97,8 @@
     { id: 'broker', name: '老牌券商厅', tag: '传统', desc: '红木黄铜 · 90 年代营业部大厅' },
     { id: 'gold',   name: '黑金股神', tag: '传统', desc: '黑金配色 · 尊贵感拉满' },
     { id: 'sakura', name: '樱色交易所', tag: '二次元', desc: '樱粉白卡 · 抽卡式软萌 UI', mascotId: 'sakura' },
+    { id: 'eyecare', name: '护眼纸感', tag: '护眼', desc: '米绿纸底 · 低蓝光久看不累' },
+    { id: 'skyblue', name: '晴蓝事务所', tag: '清爽', desc: '雾蓝纸底 · 白卡靛蓝透气' },
     { id: 'magic',  name: '魔法夜空', tag: '二次元', desc: '深紫夜空 · 魔法少女夜战', mascotId: 'magic' },
   ];
   const THEME_KEY = 'gushen_theme'; // 只在玩家主动选过之后才写入：null = 从没选过（首次登录要弹选择）
