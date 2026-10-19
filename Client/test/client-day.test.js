@@ -166,6 +166,9 @@ src = src.replace(
     renderDay, renderClock, gameClockNow, fmtClockMs, dayInfo,
     // 分时时间刻度：墙钟 → 游戏内交易时刻
     gameClockAt, fmtHM, minuteTimeLabel,
+    // 分时横轴（休市压成 0 宽）：墙钟 → 轴坐标 ↔ 游戏内时刻
+    axisAt, axisCoord, axisDayWidth, clockAtAxis, axisTimeLabel, axisTickStep,
+    axisPhases, axisCloseAuctionSpan, axisAuctionMarks,
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall,
@@ -195,6 +198,8 @@ src = src.replace(
     setActiveTab: (t) => { activeTab = t; },
     setDrift: (ms) => { lastStateAt = Date.now() - ms; },
     setChartMode: (m) => { chartMode = m; },
+    setMinuteRange: (r) => { minuteRange = r === '5d' ? '5d' : 'day'; },
+    minuteDomain,
     dayLoadedSize: () => dayLoaded.size,
     chartModeOf: () => chartMode,
     // 分时取数窗口（当日 / 5 日）
@@ -1770,6 +1775,140 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
       return `${p(d.getHours())}:${p(d.getMinutes())}`;
     };
     assert(api.minuteTimeLabel(T0 + 30000) === wall(T0 + 30000), `无时钟时退回墙钟（${api.minuteTimeLabel(T0 + 30000)}）`);
+  }
+
+  // ==================================================================
+  console.log('\n[18c] 分时横轴：休市/开盘竞价压成 0 宽（11:30 直接接 13:00）');
+  {
+    const P = 620000; // 一天（墙钟）
+    const T0 = 1700000000000; // 今日开盘竞价起点
+    // 与 config.day.phases 同源
+    const PHASES = [
+      { key: 'auction', ms: 30000, g: 33300000, gm: 600000 },      // 09:15 +10min
+      { key: 'morning', ms: 230000, g: 34200000, gm: 7200000 },    // 09:30 +120min
+      { key: 'lunch', ms: 40000, g: 41400000, gm: 5400000 },       // 11:30 +90min
+      { key: 'afternoon', ms: 260000, g: 46800000, gm: 7020000 },  // 13:00 +117min
+      { key: 'closeAuction', ms: 20000, g: 53820000, gm: 180000 }, // 14:57 +3min
+      { key: 'night', ms: 40000, g: 54000000, gm: 65700000 },      // 15:00 +1095min
+    ];
+    const DAY = {
+      enabled: true, day: 6, phase: 'morning', label: '上午连续竞价', trading: true, auction: null, locked: false,
+      phaseMs: 230000, phaseElapsedMs: 10000, phaseLeftMs: 220000,
+      phaseEndsAt: T0 + P - 360000, dayStartAt: T0, dayEndsAt: T0 + P,
+      gameClockMs: 34200000, phaseGameMs: 7200000, phases: PHASES,
+    };
+    api.setState(mkState(DAY, null));
+
+    const MIN = 60000;
+    const DAYW = 240 * MIN; // 上午 120 + 下午 117 + 收盘竞价 3
+    const A = (off) => api.axisAt(T0 + off);
+
+    // ---- 一天的有效宽度 = 只有连续竞价 + 收盘竞价 ----
+    assert(api.axisDayWidth(PHASES) === DAYW, `一天占 240 分钟（${api.axisDayWidth(PHASES) / MIN}）`);
+
+    // ---- 开盘竞价塌在轴头：09:15 与 09:30 同一个 x ----
+    assert(A(0) === 0, `竞价起点在轴头（${A(0)}）`);
+    assert(A(30000) === 0, `开盘竞价整段不占宽：09:30 仍在轴头（${A(30000)}）`);
+    assert(A(15000) === 0, `竞价中段同样塌在轴头（${A(15000)}）`);
+
+    // ---- 午休压成一点：11:30 / 12:15 / 13:00 同一个 x ----
+    const noon = A(260000);
+    assert(noon === 120 * MIN, `11:30 落在 120 分钟处（${noon / MIN}）`);
+    assert(A(260000 + 20000) === noon, `午休中点 12:15 与 11:30 同一个 x（不留空档）`);
+    assert(A(300000) === noon, `13:00 与 11:30 同一个 x（中间没有横线的位置）`);
+    assert(A(259000) < noon, '11:29 严格在 11:30 左边（压缩只发生在休市段）');
+    assert(A(301000) > noon, '13:01 严格在 13:00 右边');
+
+    // ---- 收盘价直接连次日开盘价（隔夜跳空是竖线，不是空档）----
+    assert(A(580000) === DAYW, `15:00 在一天轴宽的末端（${A(580000) / MIN}）`);
+    assert(A(P + 30000) === DAYW, `次日 09:30 也在这个坐标上（收盘接开盘）`);
+
+    // ---- 轴坐标 → 游戏内时刻：午休那道接缝写成「11:30/13:00」----
+    const seam = api.clockAtAxis(noon, false);
+    assert(seam && api.fmtHM(seam.ms) === '13:00', `接缝读作 13:00（${seam && api.fmtHM(seam.ms)}）`);
+    assert(seam && api.fmtHM(seam.seam) === '11:30', `接缝同时带上 11:30（${seam && api.fmtHM(seam.seam)}）`);
+    assert(api.axisTimeLabel(noon) === '11:30/13:00', `刻度文案 11:30/13:00（${api.axisTimeLabel(noon)}）`);
+    assert(api.axisTimeLabel(0) === '09:30', `轴头刻度 09:30（${api.axisTimeLabel(0)}）`);
+    assert(api.axisTimeLabel(DAYW, true) === '15:00', `日界按前一天收盘读 15:00（${api.axisTimeLabel(DAYW, true)}）`);
+    assert(api.axisTimeLabel(DAYW, false) === '7日 09:30', `不标日界就是次日开盘（${api.axisTimeLabel(DAYW, false)}）`);
+    assert(api.axisTimeLabel(-DAYW) === '5日 09:30', `往前一天补天号前缀（${api.axisTimeLabel(-DAYW)}）`);
+    // 整点刻度落在整分上：一天 = 09:30 / 10:30 / 11:30·13:00 / 14:00 / 15:00
+    const step = api.axisTickStep(DAYW);
+    assert(step === 60 * MIN, `一天视图按 60 分钟落刻度（${step / MIN}）`);
+    const ticks = [];
+    for (let a = Math.ceil(0 / step) * step; a <= DAYW + 1; a += step) ticks.push(api.axisTimeLabel(a, a >= DAYW - 1));
+    assert(ticks.join('|') === '09:30|10:30|11:30/13:00|14:00|15:00', `一天的刻度（${ticks.join('|')}）`);
+    assert(api.axisTickStep(5 * DAYW) === 240 * MIN, `5 日视图按 240 分钟落刻度（${api.axisTickStep(5 * DAYW) / MIN}）`);
+    // 5 日视图里「今天开盘」那根刻度不读成前一天收盘（数据还长在它后面）
+    assert(api.axisTimeLabel(0, false) === '09:30', `有后续数据时日界读开盘（${api.axisTimeLabel(0, false)}）`);
+
+    // ---- 竞价分界：开盘收口点（0 宽）+ 收盘竞价起点（230 宽）----
+    const mk1 = api.axisAuctionMarks(0, DAYW);
+    assert(mk1.length === 2, `当日视图只有两个竞价标记（${mk1.length}）`);
+    assert(mk1[0].kind === 'open' && mk1[0].a === 0, `开盘竞价收口在轴头（${mk1[0] && mk1[0].kind}@${mk1[0] && mk1[0].a}）`);
+    assert(mk1[1].kind === 'close' && mk1[1].a === 237 * MIN, `收盘竞价起点 14:57（${mk1[1] && mk1[1].a / MIN}）`);
+    assert(mk1[1].width === 3 * MIN, `收盘竞价占 3 分钟（${mk1[1] && mk1[1].width / MIN}）`);
+    assert(api.fmtHM(api.clockAtAxis(mk1[1].a).ms) === '14:57', `收盘竞价起点读作 14:57（${api.fmtHM(api.clockAtAxis(mk1[1].a).ms)}）`);
+    const ca = api.axisCloseAuctionSpan();
+    assert(ca && ca.start === 237 * MIN && ca.width === 3 * MIN, '收盘竞价区间稳定（237~240 分钟）');
+    // 5 日：每天一组（开盘分界正好当交易日分隔）
+    const mk5 = api.axisAuctionMarks(0, 5 * DAYW);
+    assert(mk5.length === 10, `5 日视图 5 组竞价标记（${mk5.length}）`);
+    assert(mk5.filter((m) => m.kind === 'open').map((m) => m.day / 1).join(',') === '0,1,2,3,4', '每天一根开盘分界线');
+    assert(mk5.filter((m) => m.kind === 'open')[2].a === 2 * DAYW, '第 3 天的开盘分界落在 480 分钟处');
+    // 右端正好压在日界上时不许多画下一组（数据没走到那里）
+    assert(api.axisAuctionMarks(0, 2 * DAYW).length === 4, '右端不越界多画一组');
+    // 当日开盘时刻（刚开始，只有一天的左半）只该有开盘那一根
+    assert(api.axisAuctionMarks(0, 30 * MIN).length === 1, '上午 10:00 前只有开盘分界');
+
+    // ---- 横轴固定为「全天刻度」：当日 09:30~15:00、5 日整 5 天，右端压在今天收盘 ----
+    const PTS = [
+      { t: T0 + 30000, price: 20.0, vol: 100 },
+      { t: T0 + 120000, price: 20.1, vol: 200 },
+    ];
+    const dm1 = api.minuteDomain(PTS);
+    assert(dm1.full === true, '有阶段表时走全天固定刻度');
+    assert(dm1.a0 === 0 && dm1.a1 === DAYW, `当日视图域 = 09:30~15:00（${dm1.a0}~${dm1.a1 / MIN} 分钟）`);
+    api.setMinuteRange('5d');
+    const dm5 = api.minuteDomain(PTS);
+    assert(dm5.a0 === -4 * DAYW && dm5.a1 === DAYW, `5 日视图域 = 前 4 天到今天收盘（${dm5.a0 / MIN}~${dm5.a1 / MIN} 分钟）`);
+    // 负坐标也要画得出竞价分界（5 日视图左端在今天之前）
+    assert(api.axisAuctionMarks(-4 * DAYW, DAYW).length === 10, '5 日全天域里 5 组竞价标记都在');
+    assert(api.axisAuctionMarks(-4 * DAYW, DAYW).every((m) => m.a >= -4 * DAYW && m.a < DAYW), '标记全部落在域内');
+    api.setMinuteRange('day');
+    // 全天域的刻度：开盘 → 收盘五根，右端读 15:00（即使数据还没走到）
+    const dStep = api.axisTickStep(dm1.a1 - dm1.a0);
+    const dTicks = [];
+    for (let a = Math.ceil(dm1.a0 / dStep) * dStep; a <= dm1.a1 + 1; a += dStep) {
+      dTicks.push(api.axisTimeLabel(a, a >= dm1.a1 - 1));
+    }
+    assert(dStep === 60 * MIN, `全天刻度按 60 分钟落（${dStep / MIN}）`);
+    assert(dTicks.join('|') === '09:30|10:30|11:30/13:00|14:00|15:00', `开盘到收盘五根刻度（${dTicks.join('|')}）`);
+
+    // ---- 没有阶段表：轴坐标就是墙钟，与压缩之前逐位一致 ----
+    api.setState(mkState({ ...DAY, enabled: false }, null));
+    assert(api.axisAt(T0 + 260000) === null, 'day 未启用时 axisAt 返回 null');
+    assert(api.axisCoord(T0 + 260000) === T0 + 260000, 'axisCoord 退化成墙钟');
+    assert(api.axisAuctionMarks(0, DAYW).length === 0, '没有阶段表时不画任何竞价标记');
+    assert(api.minuteDomain(PTS).full === false, '没有阶段表时横轴退回贴合数据口径');
+
+    // ---- 画一次真图不崩（压缩后的 x 映射会走 measureText / 刻度夹边）----
+    api.setState(mkState(DAY, null));
+    api.setHistory(STOCK, [
+      { t: T0 + 30000, price: 20.0, vol: 1000 },
+      { t: T0 + 120000, price: 20.1, vol: 2000 },
+      { t: T0 + 260000, price: 20.2, vol: 3000 },
+      { t: T0 + 300000, price: 20.15, vol: 4000 },
+    ]);
+    api.setActiveView('trade');
+    let drew = true;
+    try {
+      api.drawChart();
+    } catch (e) {
+      drew = false;
+      console.log('    drawChart 抛了：' + e.message);
+    }
+    assert(drew, '压缩横轴下分时图能正常画完（不抛异常）');
   }
 
   // ==================================================================

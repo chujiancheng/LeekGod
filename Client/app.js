@@ -4838,6 +4838,210 @@
     return null;
   }
 
+  // ---------- 分时横轴：休市与开盘竞价压成 0 宽 ----------
+  //
+  // 墙钟横轴会把「根本没有行情的时间」照样铺开：午休只有 40 秒墙钟，却要在一天里
+  // 占掉 6% 的宽度，而这几段只留一个定格锚点（见上面「分时定格」），于是 11:30 到
+  // 13:00 之间被拉出一条又长又平的横线——看着像停牌、又像行情卡住了。
+  //
+  // 这里把横轴换成**连续竞价时间轴**：每个阶段按它映射的真实交易时长（phases[].gm）
+  // 占宽，休市（午休 / 夜间）与开盘集合竞价占 0 宽。于是 11:30 与 13:00 落在同一个 x 上，
+  // 曲线原地接续，中间既没有空档也没有横线；开盘竞价同理塌在轴头，第一笔连续竞价
+  // 直接从最左边画起。轴坐标 = 天序号 × 一天的有效宽度 + 当天进度，天与天首尾相接
+  // （收盘价直接连次日开盘价，隔夜跳空就是一根竖线），与真实行情软件的「N 日分时」同口径。
+  //
+  // 没有阶段表（老服务端 / 没接交易日时钟）时 axisAt() 返回 null，
+  // axisCoord() 退化成墙钟——与引入压缩之前逐位一致。
+
+  /** 不占横轴宽度的阶段：开盘集合竞价（只定价不连续成交）与休市（午休 / 夜间） */
+  const AXIS_ZERO_PHASES = new Set(['auction', 'lunch', 'night']);
+
+  /** 该阶段在横轴上占的宽度（毫秒 · 游戏内交易时间）；休市与开盘竞价 = 0 */
+  function axisPhaseWidth(p) {
+    return AXIS_ZERO_PHASES.has(p && p.key) ? 0 : Math.max(0, Number(p && p.gm) || 0);
+  }
+
+  /** 一个交易日在横轴上的总宽（= 240 分钟：上午 120 + 下午 117 + 收盘竞价 3） */
+  function axisDayWidth(phases) {
+    let w = 0;
+    for (const p of phases) w += axisPhaseWidth(p);
+    return w;
+  }
+
+  /**
+   * 墙钟 t → 横轴坐标。阶段表缺失 / 不可用时返回 null（调用方退回墙钟）。
+   * 与 gameClockAt 同一套「逐阶段定位 + 阶段内线性插值」，只是把每段的宽度换成
+   * axisPhaseWidth：休市段宽 0，段内所有时刻都塌到段首那一个坐标上。
+   */
+  function axisAt(t) {
+    const d = dayInfo();
+    const phases = d && Array.isArray(d.phases) && d.phases.length ? d.phases : null;
+    if (!phases || !Number.isFinite(t)) return null;
+    const dayMs = Number(d.dayEndsAt) - Number(d.dayStartAt);
+    const dayW = axisDayWidth(phases);
+    if (!(dayMs > 0) || !(dayW > 0)) return null;
+    // 先落到「第几天 + 当天进度」（t 早于今天时 offset 为负，floor 仍然给出 0 ≤ rest < dayMs）
+    const dayOffset = Math.floor((t - d.dayStartAt) / dayMs);
+    const rest = t - d.dayStartAt - dayOffset * dayMs;
+    let acc = 0; // 墙钟累计
+    let aAcc = 0; // 轴坐标累计
+    for (let i = 0; i < phases.length; i++) {
+      const p = phases[i];
+      const ms = Number(p.ms) || 0;
+      const w = axisPhaseWidth(p);
+      const last = i === phases.length - 1;
+      if (rest < acc + ms || last) {
+        const frac = ms > 0 ? Math.max(0, Math.min(1, (rest - acc) / ms)) : 0;
+        return dayOffset * dayW + aAcc + frac * w;
+      }
+      acc += ms;
+      aAcc += w;
+    }
+    return null;
+  }
+
+  /** 分时图的横轴坐标：有阶段表时压掉休市，没有时就是墙钟本身 */
+  function axisCoord(t) {
+    const a = axisAt(t);
+    return a == null ? t : a;
+  }
+
+  /**
+   * 横轴坐标 → 游戏内时刻 `{ day, ms, seam }`。
+   * seam = 这一点同时是「上一段收盘」和「本段开盘」（午休被压成 0 宽后的那道接缝），
+   * 刻度据此写成「11:30/13:00」——玩家一眼看到中间没有行情、也没有空白。
+   * atDayEnd = 落在日界（= 前一天收盘 15:00）时按前一天读，否则会被写成「次日 09:30」。
+   */
+  function clockAtAxis(a, atDayEnd) {
+    const d = dayInfo();
+    const phases = d && Array.isArray(d.phases) && d.phases.length ? d.phases : null;
+    if (!phases || !Number.isFinite(a)) return null;
+    const on = phases.filter((p) => axisPhaseWidth(p) > 0);
+    if (!on.length) return null;
+    const dayW = axisDayWidth(on);
+    let dayOffset = Math.floor(a / dayW);
+    let rest = a - dayOffset * dayW;
+    if (atDayEnd && rest < 1) {
+      dayOffset -= 1;
+      rest = dayW;
+    }
+    let aAcc = 0;
+    let prevEnd = null; // 上一个占宽阶段的游戏内收盘时刻
+    for (let i = 0; i < on.length; i++) {
+      const p = on[i];
+      const w = axisPhaseWidth(p);
+      const g = Number(p.g) || 0;
+      const gm = Number(p.gm) || 0;
+      const last = i === on.length - 1;
+      if (rest < aAcc + w || last) {
+        const frac = Math.max(0, Math.min(1, (rest - aAcc) / w));
+        // 接缝：正好压在两个占宽阶段之间的那一点（午休 0 宽，11:30 与 13:00 同 x）
+        const seam = prevEnd != null && rest - aAcc < 1 && prevEnd !== g ? prevEnd : null;
+        return { day: (Number(d.day) || 1) + dayOffset, ms: (g + frac * gm) % 86400000, seam };
+      }
+      prevEnd = (g + gm) % 86400000;
+      aAcc += w;
+    }
+    return null;
+  }
+
+  /**
+   * 分时图横轴区间 `{ a0, a1, full }`（轴坐标）。
+   *  · full=true（有阶段表，常规）：**固定整天刻度**——当日视图 = 今天 09:30~15:00，
+   *    5 日视图 = 最近 5 天，右端永远压在**今天收盘**上。于是刻度从开盘到收盘一目了然，
+   *    开盘时曲线只占左边一小段、随时间往右生长，和真实行情软件的分时同口径
+   *    （不再像以前那样「贴合已有数据」把 5 分钟撑满全屏、刻度跟着数据跑）。
+   *  · full=false（老服务端 / 没接交易日时钟）：算不出全天宽度，退回贴合数据的老口径。
+   */
+  function minuteDomain(pts) {
+    const phases = axisPhases();
+    const d = dayInfo();
+    if (phases && d && pts.length) {
+      const dayW = axisDayWidth(phases);
+      const endA = axisCoord(Number(d.dayEndsAt)); // 今天收盘（15:00）＝ 今天轴末端
+      if (dayW > 0 && Number.isFinite(endA)) {
+        const days = minuteRange === '5d' ? MINUTE_DAYS : 1;
+        return { a0: endA - days * dayW, a1: endA, full: true };
+      }
+    }
+    // 退化口径：只留最近约 2 小时的分时点，域贴合数据（与压缩之前的画法一致）
+    const a0 = axisCoord(pts[0].t);
+    const aLast = axisCoord(pts[pts.length - 1].t);
+    const minSpan = 5 * 60 * 1000;
+    const a1 = aLast + Math.max(20 * 1000, Math.max(minSpan - (aLast - a0), (aLast - a0) * 0.08));
+    return { a0, a1, full: false };
+  }
+
+  /** 横轴刻度的文案：游戏内时刻，接缝写「11:30/13:00」，跨天补「N日」前缀 */
+  function axisTimeLabel(a, atDayEnd) {
+    const c = clockAtAxis(a, atDayEnd);
+    // 没有阶段表：a 就是墙钟（axisCoord 的退化口径），刻度照旧读墙钟
+    if (!c) return fmtHM(a);
+    const d = dayInfo();
+    const hm = c.seam != null ? `${fmtHM(c.seam)}/${fmtHM(c.ms)}` : fmtHM(c.ms);
+    return d && c.day !== d.day ? `${c.day}日 ${hm}` : hm;
+  }
+
+  /** 刻度步长：在 2~480 分钟里挑最小的一档，让一屏落 3~7 根刻度（且总是整分） */
+  function axisTickStep(dom) {
+    const MIN = 60 * 1000;
+    const ladder = [480, 240, 120, 60, 30, 20, 15, 10, 5, 2];
+    for (let i = ladder.length - 1; i >= 0; i--) {
+      if (dom / (ladder[i] * MIN) <= 6) return ladder[i] * MIN;
+    }
+    return ladder[0] * MIN;
+  }
+
+  /** 当前的阶段表（老服务端 / 没接交易日时钟时为 null） */
+  function axisPhases() {
+    const d = dayInfo();
+    return d && Array.isArray(d.phases) && d.phases.length ? d.phases : null;
+  }
+
+  /** 收盘集合竞价在当天轴坐标上的位置（start = 14:57 的轴偏移，width = 3 分钟）；没有该阶段返回 null */
+  function axisCloseAuctionSpan() {
+    const phases = axisPhases();
+    if (!phases) return null;
+    let acc = 0;
+    let span = null;
+    for (const p of phases) {
+      if (p && p.key === 'closeAuction') span = { start: acc, width: axisPhaseWidth(p) };
+      acc += axisPhaseWidth(p);
+    }
+    return span && span.width > 0 ? span : null;
+  }
+
+  /**
+   * 落在轴区间 [lo, hi] 里的「竞价分界」标记，供画图用：
+   *   kind='open'  开盘集合竞价的收口点。竞价本身 0 宽（见 axisAt），所以这个点同时是
+   *                当天连续竞价的起点——当日视图里它就是左边界，5 日视图里是交易日的分界。
+   *   kind='close' 收盘集合竞价的起点（14:57）。这一段有 3 分钟真实宽度，画成淡色带，
+   *                玩家能看出「最后三分钟是集中撮合、不是连续竞价」。
+   * 没有阶段表时返回空数组，画图那边什么也不加（与引入标记之前逐位一致）。
+   */
+  function axisAuctionMarks(lo, hi) {
+    const phases = axisPhases();
+    if (!phases || !Number.isFinite(lo) || !Number.isFinite(hi)) return [];
+    const dayW = axisDayWidth(phases);
+    if (!(dayW > 0)) return [];
+    const ca = axisCloseAuctionSpan();
+    const out = [];
+    // 只取与 [lo, hi] 真的相交的那些天。lo 可以是**负数**（5 日视图的轴起点在今天之前
+    // 第 4 天），所以这里不能夹到 0，否则前四天的分界标记全丢
+    const k0 = Math.floor(lo / dayW);
+    const k1 = Math.floor((hi - 1) / dayW);
+    for (let k = k0; k <= k1; k++) {
+      const base = k * dayW;
+      // 只留下真的落在 [lo, hi) 里的标记：右端那根（正好压在 hi 上）留给下一次滚动，
+      // 否则数据没走到的地方也会冒出一根线
+      if (base >= lo && base < hi) out.push({ day: k, kind: 'open', a: base, width: 0 });
+      if (ca && base + ca.start >= lo && base + ca.start < hi) {
+        out.push({ day: k, kind: 'close', a: base + ca.start, width: ca.width });
+      }
+    }
+    return out;
+  }
+
   /** 分时图的时间文案：游戏内时刻（跨天补「N日」前缀），没有交易日时钟时退回墙钟。
    *  withSec = 十字光标（精确到秒），否则刻度只要 HH:MM */
   function minuteTimeLabel(t, withSec) {
@@ -5659,13 +5863,13 @@
     const volTop = PAD_T + priceH + 6;
     const macdTop = volTop + VOL_H + 6;
 
-    // x 轴时间域：贴合当前保留的分时点（服务端/客户端只留最近约 2 小时）。
-    // 固定「开局 + 4 小时」会让开局挤在最左、数据裁剪后右侧大片空白。
-    const t0 = pts[0].t;
-    const tLast = pts[pts.length - 1].t;
-    const minSpan = 5 * 60 * 1000;
-    const t1 = tLast + Math.max(20 * 1000, Math.max(minSpan - (tLast - t0), (tLast - t0) * 0.08));
-    const x = (t) => PAD_L + ((t - t0) / (t1 - t0)) * (W - PAD_L - PAD_R);
+    // x 轴域：全天固定刻度（见 minuteDomain）——当日 09:30~15:00、5 日整 5 天，
+    // 右端压在今天收盘上；没有阶段表时退回贴合数据的口径
+    const { a0, a1 } = minuteDomain(pts);
+    const spanA = a1 - a0 || 1;
+    // 轴坐标 → 像素（x(t) 与竞价分界标记共用一套映射，免得两处各算一遍走样）
+    const xa = (a) => PAD_L + ((a - a0) / spanA) * (W - PAD_L - PAD_R);
+    const x = (t) => xa(axisCoord(t));
 
     // y 轴价格域
     let lo = Infinity;
@@ -5704,16 +5908,25 @@
     }
 
     // 时间刻度（纵线贯穿价格/成交量/MACD 三带）
-    // 刻度读**游戏内交易时刻**（09:15 / 11:30 / 13:00 / 15:00），与顶栏时钟同源——
-    // 墙钟 19:25 对玩家没有任何意义（既不是开盘也不是收盘）。跨天的刻度补「N日」前缀，
-    // 5 日视图才分得清是哪一天；没有交易日时钟（day 未启用 / 老服务端）时退回墙钟。
+    // 刻度读**游戏内交易时刻**（09:30 / 10:30 / 11:30·13:00 / 14:00 / 15:00），与顶栏时钟同源——
+    // 墙钟 19:25 对玩家没有任何意义（既不是开盘也不是收盘）。横轴已把休市压成 0 宽，
+    // 所以午休那根竖线同时是上午收盘与下午开盘，文案写成「11:30/13:00」。
+    // 跨天的刻度补「N日」前缀，5 日视图才分得清是哪一天；
+    // 没有交易日时钟（day 未启用 / 老服务端）时 a 就是墙钟，刻度照旧读墙钟。
     ctx.textAlign = 'center';
     ctx.fillStyle = themeC.muted;
-    for (let i = 0; i <= 4; i++) {
-      const tt = t0 + ((t1 - t0) * i) / 4;
-      const xx = x(tt);
-      const label = minuteTimeLabel(tt);
-      // 居中绘制会越出画布，两端按**实际字宽**夹回可视区（「123日 09:30」比「09:30」宽一倍，
+    const tickStep = axisTickStep(spanA);
+    let prevTick = '';
+    for (let k = 0, av = Math.ceil(a0 / tickStep) * tickStep; av <= a1 + 1 && k < 12; k++, av += tickStep) {
+      // 日界上的刻度有两读法（前一天收盘 15:00 / 次日开盘 09:30）：**只有最右端那根**
+      // （= 今天收盘，数据还没走到也照样按收盘读）读收盘，中间的日界一律读次日开盘
+      const label = axisTimeLabel(av, av >= a1 - 1);
+      // 数据还没走到的右侧留白区里，刻度会一起夹在同一个时刻上：重复的不画，
+      // 免得两条竖线贴在一起、两个一样的字叠成一坨
+      if (!label || label === prevTick) continue;
+      prevTick = label;
+      const xx = PAD_L + ((av - a0) / spanA) * (W - PAD_L - PAD_R);
+      // 居中绘制会越出画布，两端按**实际字宽**夹回可视区（「123日 11:30/13:00」比「11:30」宽好几倍，
       // 还按固定 18px 夹会压到右侧价格轴上）
       const half = ctx.measureText(label).width / 2;
       const lo = PAD_L + half;
@@ -5724,6 +5937,63 @@
       ctx.moveTo(xx, PAD_T);
       ctx.lineTo(xx, macdTop + MACD_H);
       ctx.stroke();
+    }
+
+    // 竞价分界（画在行情线**之下**：标记是背景信息，不该压住价格）
+    //  · 开盘集合竞价被压成 0 宽，收口点 = 连续竞价的起点；当日视图里它就是左边界（不重复画），
+    //    5 日视图里每天一根淡虚线，正好当交易日分隔。
+    //  · 收盘集合竞价有 3 分钟真实宽度：淡色带 + 起点竖线 + 竖排小字，让「尾盘三分钟是集中撮合」
+    //    看得见——否则玩家只会觉得 15:00 前那段线怪怪的。
+    {
+      const plotR = W - PAD_R;
+      const bandBottom = macdTop + MACD_H;
+      for (const mk of axisAuctionMarks(a0, a1)) {
+        const mx = xa(mk.a);
+        if (mx > plotR - 0.5) continue;
+        if (mk.kind === 'open') {
+          if (mx <= PAD_L + 1.5) continue; // 就是左边界，再压一条线只是把边框画粗
+          ctx.setLineDash([2, 3]);
+          ctx.strokeStyle = withA(themeC.muted, 0.5);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(mx + 0.5, PAD_T);
+          ctx.lineTo(mx + 0.5, bandBottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          continue;
+        }
+        const ex = xa(mk.a + mk.width);
+        const l = Math.max(mx, PAD_L);
+        const r = Math.min(ex, plotR);
+        if (r > l + 0.5) {
+          ctx.fillStyle = withA(themeC.gold, 0.08);
+          ctx.fillRect(l, PAD_T, r - l, bandBottom - PAD_T);
+        }
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = withA(themeC.gold, 0.6);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(mx + 0.5, PAD_T);
+        ctx.lineTo(mx + 0.5, bandBottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // 竖排小字：带子够宽才画。当日视图满屏时带宽 ≈ 8.5~9.3px（3 分钟 / 240+ 分钟域），
+        // 5 日视图只有 ~2px，画了就糊成一团。逐字竖排（不旋转），从带顶往下排
+        if (r - l >= 7) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(l, PAD_T, r - l, bandBottom - PAD_T);
+          ctx.clip();
+          ctx.font = '9px -apple-system, "PingFang SC", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = withA(themeC.gold, 0.9);
+          const cx = l + (r - l) / 2;
+          '收盘竞价'.split('').forEach((ch, i) => {
+            ctx.fillText(ch, cx, PAD_T + 7 + i * 10);
+          });
+          ctx.restore();
+        }
+      }
     }
 
     // 昨收虚线
@@ -5792,7 +6062,18 @@
       deltas.push(d);
       if (d > maxVol) maxVol = d;
     }
-    const bw = Math.max(1, ((W - PAD_L - PAD_R) / Math.max(pts.length, 1)) * 0.7);
+    // 量柱宽度按**轴上的实际间距**算（全天固定刻度后，开盘时点很少但挤在最左边，
+    // 再按「画布宽 / 点数」就会画出几十像素宽的柱子、糊成一整块）
+    let gapSum = 0;
+    let gapN = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const g = x(pts[i].t) - x(pts[i - 1].t);
+      if (g > 0.01) {
+        gapSum += g;
+        gapN += 1;
+      }
+    }
+    const bw = Math.max(1, Math.min(6, (gapN ? gapSum / gapN : 1) * 0.72));
     for (let i = 1; i < pts.length; i++) {
       const h = (deltas[i] / maxVol) * VOL_H;
       if (h < 0.5) continue;
@@ -5899,11 +6180,12 @@
       }
       const pts = minutePts(m.stockId);
       if (!pts.length) return;
-      // 反解时间（与 drawMinuteChart 的 x 轴同一套域）
-      const t0 = pts[0].t;
-      const tLast = pts[pts.length - 1].t;
-      const minSpan = 5 * 60 * 1000;
-      const t1 = tLast + Math.max(20 * 1000, Math.max(minSpan - (tLast - t0), (tLast - t0) * 0.08));
+      // 反解（与 drawMinuteChart 的 x 轴同一套域）：横向比例 → **轴坐标**，再按轴坐标
+      // 找最近的点。休市被压成 0 宽后，墙钟上的远近不再等于画面上的远近——
+      // 按 t 找的话，午休锚点会把光标从 11:30 拽到 12:15 附近去。
+      // 域必须与画图共用 minuteDomain：固定全天刻度后若各算各的，光标会整体偏移
+      const { a0, a1 } = minuteDomain(pts);
+      const spanA = a1 - a0 || 1;
       const W = rect.width;
       const PAD_L = 8;
       const PAD_R = 58;
@@ -5912,12 +6194,12 @@
         tip.hidden = true;
         return;
       }
-      const tt = t0 + frac * (t1 - t0);
+      const av = a0 + frac * spanA;
       let best = pts[0];
       let bestI = 0;
       let bd = Infinity;
       for (let i = 0; i < pts.length; i++) {
-        const d = Math.abs(pts[i].t - tt);
+        const d = Math.abs(axisCoord(pts[i].t) - av);
         if (d < bd) {
           bd = d;
           best = pts[i];
