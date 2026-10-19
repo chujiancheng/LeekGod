@@ -65,7 +65,22 @@
   // 上限 260 抓（config.market.dailyBarsKeep），日线只画最近 120 根，免得 260 根挤成发丝。
   const DAILY_LIMIT_DAY = 120;
   const DAILY_LIMIT_KLINE = 260;
+  // 日线**默认**一屏放多少根（不是数据上限）：260 根全铺开每根只有 2px，挤成发丝。
+  // 放大/缩小走 kViews 的 count，最多能缩到全量（见 klineView）
   const DAY_SHOW_MAX = 120;
+  // K 线视窗（滚轮缩放 + 拖动平移）：按模式各记一份，日/周/月切换互不影响。
+  //   count  = 屏上放几根（0 = 还没调过，取默认值）
+  //   offset = 右端丢掉几根（0 = 贴最新一根；>0 = 正在翻历史）
+  // 一律**相对尾部**记：跟着最新价看的玩家 offset=0，新的一根进来时视窗自动右移；
+  // 正在翻历史的玩家 offset>0，窗口内容原地不动，不会被新数据顶走。
+  const KVIEW_MIN_BARS = 15; // 最多放大到 15 根（再少就看不出形态了）
+  const ZOOM_STEP = 1.25;    // 每一格滚轮的缩放倍率
+  const kViews = {
+    day: { count: 0, offset: 0 },
+    week: { count: 0, offset: 0 },
+    month: { count: 0, offset: 0 },
+  };
+  let chartPan = null; // 拖动平移的会话（pointerdown 起、pointerup 止）
   // MACD 预热门槛：DIF = EMA12 − EMA26、DEA 再套 EMA9，不足慢线 + 信号线（26 + 9）根时
   // 数值只是「从第一根开始推」的初始化残差，不是 MACD。图上要标「未预热」而不是让它冒充指标
   //（实测月线常常只有 4 根、周线 10 根，都在这条线以下）
@@ -2045,7 +2060,8 @@
         b.classList.toggle('on', b.dataset.mode === chartMode);
       });
     }
-    // 「当日 / 5 日」只对分时有效，K 线模式整块隐藏（K 线本来就是按期一根一根的）
+    // 「当日 / 5 日」只对分时有效，K 线模式整块隐藏（K 线本来就是按期一根一根的）；
+    // 缩放/平移按钮反过来——只在 K 线模式出现（分时是连续曲线，没有「根数」可缩放）
     const ranges = $('chartRanges');
     if (ranges) {
       ranges.hidden = isKline();
@@ -2053,6 +2069,8 @@
         b.classList.toggle('on', b.dataset.range === minuteRange);
       });
     }
+    const zoomBox = $('chartZoom');
+    if (zoomBox) zoomBox.hidden = !isKline();
     const m = curMarket() || {};
     const sub = $('chartSub');
     if (!sub) return;
@@ -3815,16 +3833,19 @@
     const mixTotal = (a.cash || 0) + (a.longValue || 0) + (a.shortMargin || 0);
     const mixPct = (v) => (mixTotal > 0 ? (v / mixTotal) * 100 : 0);
     const mixSegs = [
-      { label: '可用资金', value: a.cash || 0, color: 'var(--blue)' },
-      { label: '持仓市值', value: a.longValue || 0, color: 'var(--gold)' },
-      { label: '空头保证金', value: a.shortMargin || 0, color: 'var(--green)' },
+      { label: '可用资金', value: a.cash || 0, tone: 'cash' },
+      { label: '持仓市值', value: a.longValue || 0, tone: 'long' },
+      { label: '空头保证金', value: a.shortMargin || 0, tone: 'short' },
     ].filter((s) => s.value > 0.005);
+    // 配色与比例**都不许写成内联 style**：CSP 是 style-src 'self'，innerHTML 里带
+    // `style="..."` 的节点会被浏览器整条丢弃（控制台报 "Applying inline style violates…"），
+    // 资产构成条以前就是这样一直没上色。颜色走 .tone-* class，比例插入后用 CSSOM 写 flex。
     const mixBar = mixSegs.length
-      ? mixSegs.map((s) => `<i style="flex:${mixPct(s.value).toFixed(2)};background:${s.color}"></i>`).join('')
-      : '<i style="flex:1;background:var(--line)"></i>';
+      ? mixSegs.map((s) => `<i class="mix-seg tone-${s.tone}" data-mix="${s.value}"></i>`).join('')
+      : '<i class="mix-seg tone-empty"></i>';
     const mixLegend = mixSegs.map((s) => `
       <div class="mix-item">
-        <i style="background:${s.color}"></i>
+        <i class="tone-${s.tone}"></i>
         <label>${s.label}</label>
         <span>¥${fmtMoney(s.value)}<em>${mixPct(s.value).toFixed(0)}%</em></span>
       </div>`).join('');
@@ -3845,6 +3866,12 @@
         <div class="mix-legend">${mixLegend}</div>
       </div>
     `;
+    // 段宽 = 该段占「现金 + 持仓市值 + 空头保证金」的比例（flex-grow 百分比，basis 0）。
+    // 走 CSSOM（和进度条同一套写法）：CSP 拦的是 HTML 里的 style 属性，不拦 CSSOM
+    $('homeAssets').querySelectorAll('.mix-bar .mix-seg').forEach((el) => {
+      const v = Number(el.dataset.mix);
+      if (v > 0) el.style.flexGrow = mixPct(v).toFixed(2);
+    });
 
     // 持仓：按「股票 × 方向」展开，多股票时自然排成多行
     $('homePosSub').innerHTML = pos.length
@@ -4993,9 +5020,9 @@
         live: true,
       });
     }
-    // 日线只画最近 DAY_SHOW_MAX 根（含当日那根）：抓 260 根是给周/月线并期用的，
-    // 日线全铺上会挤成发丝；周/月线必须吃全量，否则并不出足够多的期
-    return chartMode === 'day' ? bars.slice(-DAY_SHOW_MAX) : bars;
+    // 日线**不再截断**：能缩放到全量 260 根，截断就白拉了（一屏放多少根由 klineView 的
+    // count 决定，默认最近 DAY_SHOW_MAX 根）。周/月线本来就要吃全量才能并出足够多的期
+    return bars;
   }
 
   /**
@@ -5055,8 +5082,64 @@
     return out;
   }
 
-  /** K 线图的几何布局：绘制与十字光标共用一套，避免两处坐标算法跑偏。价格 / 成交量 / MACD 三带 */
-  function dayLayout(W, H, bars) {
+  /**
+   * K 线可视窗口（缩放 / 平移的唯一真源）。
+   * 返回 `{ start, end, count, total, offset }`，`start/end` 是**全量 bars 的下标**（end 为开区间），
+   * 绘制、十字光标、拖动反解都吃这一份，避免三处各算一套窗口导致错位。
+   *
+   * 越界一律就地夹回（缩放 / 平移 / 新数据进来都只改 count 与 offset 两个数）：
+   * offset 的最大值是 `total - count`，不是 total——右端留不满一屏时再往左滑就没意义了。
+   */
+  function klineView(bars) {
+    const total = bars.length;
+    const st = kViews[chartMode] || (kViews[chartMode] = { count: 0, offset: 0 });
+    const def = chartMode === 'day' ? Math.min(DAY_SHOW_MAX, total) : total;
+    const floor = Math.min(KVIEW_MIN_BARS, total);
+    let count = Math.round(st.count) || def;
+    count = Math.max(floor, Math.min(count, total));
+    let offset = Math.round(st.offset) || 0;
+    offset = Math.max(0, Math.min(offset, total - count));
+    // 注意：**不把夹过的值写回 st**。st 记的是「玩家想要多少根」，不是「这只股票能给多少根」：
+    // 切开到一只只有 30 根日线的股票时 count 被夹到 30，写回的话切回 260 根的股票就只剩 30 根了
+    const end = total - offset;
+    return { start: end - count, end, count, total, offset, zoomed: count < total || offset > 0 };
+  }
+
+  /** 视窗复位：恢复该模式的默认视图（日线最近 120 根、周/月线全量、贴最新一根） */
+  function resetKlineView() {
+    kViews[chartMode] = { count: 0, offset: 0 };
+  }
+
+  /**
+   * 缩放：`dir` = +1 缩小（看到更多根）、-1 放大，`mx` 是画布内 x（缩放围绕光标下的那根，
+   * 与行情软件一致——否则放大一次，正在看的那段就被推出屏幕了）。
+   * 纯计算 + 写 kViews，不负责重绘（调用方决定什么时候画）。
+   * @returns {boolean} 是否真的改了窗口
+   */
+  function zoomKline(bars, dir, mx, W) {
+    const total = bars.length;
+    if (total < 2) return false;
+    const L = dayLayout(W, 800, bars); // H 只影响三带高度，不影响 x 轴
+    const plotW = W - L.PAD_L - L.PAD_R;
+    if (plotW <= 0) return false;
+    const x = Math.max(0, Math.min(plotW, mx - L.PAD_L));
+    const floor = Math.min(KVIEW_MIN_BARS, total);
+    const next = Math.max(floor, Math.min(total, Math.round(L.count * (dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP))));
+    if (next === L.count) return false;
+    // 光标下的「虚拟下标」（可以是小数）：缩放前后必须停在同一个 x 位置
+    const vi = L.start + (x / plotW) * L.count;
+    const slot = plotW / next;
+    let start = Math.round(vi - x / slot);
+    start = Math.max(0, Math.min(start, total - next));
+    kViews[chartMode] = { count: next, offset: total - next - start };
+    return true;
+  }
+
+  /** K 线图的几何布局：绘制与十字光标共用一套，避免两处坐标算法跑偏。价格 / 成交量 / MACD 三带。
+   *  `view` 不传时按当前模式的视窗现算（klineView），价格/量的取值范围只算**窗口内**的根——
+   *  放大到 15 根时，y 轴要贴着这 15 根的振幅，而不是被两年前的一根针拉平。 */
+  function dayLayout(W, H, bars, view) {
+    const v = view || klineView(bars);
     const PAD_L = 8;
     const PAD_R = 58;
     const PAD_T = 14;
@@ -5069,19 +5152,27 @@
     let lo = Infinity;
     let hi = -Infinity;
     let maxVol = 1;
-    for (const b of bars) {
+    for (let i = v.start; i < v.end; i++) {
+      const b = bars[i];
+      if (!b) continue;
       lo = Math.min(lo, b.low);
       hi = Math.max(hi, b.high);
       maxVol = Math.max(maxVol, b.volume || 0);
     }
+    // 窗口空 / 数据异常时兜一个极小区间，免得 y 轴拿到 Infinity 画出空白
+    if (!(hi > lo)) {
+      lo = Number.isFinite(lo) ? lo - 0.05 : 0;
+      hi = Number.isFinite(hi) ? hi + 0.05 : 1;
+    }
     const padP = Math.max((hi - lo) * 0.08, 0.02);
     lo -= padP;
     hi += padP;
-    const slot = (W - PAD_L - PAD_R) / Math.max(bars.length, 1);
+    const slot = (W - PAD_L - PAD_R) / Math.max(v.count, 1);
     return {
       W, H, PAD_L, PAD_R, PAD_T, PAD_B, VOL_H, MACD_H, priceH, volTop, macdTop, lo, hi, maxVol, slot,
-      // 蜡烛中心与价格轴映射
-      xc: (i) => PAD_L + slot * (i + 0.5),
+      start: v.start, end: v.end, count: v.count, total: v.total, offset: v.offset,
+      // 蜡烛中心与价格轴映射：i 是**全量 bars 的下标**（与均线/MACD 数组同下标）
+      xc: (i) => PAD_L + slot * (i - v.start + 0.5),
       y: (p) => PAD_T + ((hi - p) / (hi - lo)) * priceH,
     };
   }
@@ -5228,7 +5319,10 @@
 
     const L = dayLayout(W, H, bars);
     const n = bars.length;
-    const bw = Math.max(1.5, Math.min(L.slot * 0.68, 18));
+    // 屏上只有 [L.start, L.end) 这几根（滚轮缩放 / 拖动平移的结果）；
+    // 均线、MACD 这些序列仍按全量下标存，所以循环一律从 L.start 起、到 L.end 止
+    const lastIdx = L.end - 1;
+    const bw = Math.max(1.5, Math.min(L.slot * 0.68, 22));
 
     // 网格 + 右侧价格标签
     ctx.textBaseline = 'middle';
@@ -5246,11 +5340,13 @@
       ctx.fillText(p.toFixed(2), W - L.PAD_R + 6, yy);
     }
 
-    // 时间刻度（纵线，日线标签用交易日号，周/月线用期号）
-    const ticks = Math.min(6, n);
+    // 时间刻度（纵线，日线标签用交易日号，周/月线用期号）。
+    // 密度按**可见宽度**定：放大到 15 根时 6 条刻度太稀，缩到 260 根时 6 条又太密
+    const plotW = W - L.PAD_L - L.PAD_R;
+    const ticks = Math.max(2, Math.min(7, L.count, Math.floor(plotW / 72)));
     ctx.textAlign = 'center';
     for (let k = 0; k < ticks; k++) {
-      const i = Math.round(((n - 1) * k) / Math.max(1, ticks - 1));
+      const i = L.start + Math.round(((L.count - 1) * k) / Math.max(1, ticks - 1));
       const xx = L.xc(i);
       ctx.strokeStyle = themeC.grid;
       ctx.lineWidth = 1;
@@ -5263,8 +5359,8 @@
       ctx.fillText(tickLabel, Math.min(Math.max(xx, L.PAD_L + 20), W - L.PAD_R - 22), H - L.PAD_B / 2 - 2);
     }
 
-    // 蜡烛与成交量柱
-    for (let i = 0; i < n; i++) {
+    // 蜡烛与成交量柱（只画窗口内的根）
+    for (let i = L.start; i < L.end; i++) {
       const b = bars[i];
       const up = b.close >= b.open;
       const color = up ? themeC.red : themeC.green;
@@ -5291,7 +5387,7 @@
     const drawMa = (arr, color, width) => {
       ctx.beginPath();
       let started = false;
-      for (let i = 0; i < n; i++) {
+      for (let i = L.start; i < L.end; i++) {
         if (arr[i] == null) continue;
         const px = L.xc(i);
         const py = L.y(arr[i]);
@@ -5307,20 +5403,22 @@
     };
     for (const ma of maSeries) drawMa(ma.arr, ma.color, ma.width);
 
-    // 当期未收盘的标记
-    const last = bars[n - 1];
-    if (last.live) {
+    // 当期未收盘的标记：只有「贴着最新一根」看的时候才有意义，翻历史时不画
+    const last = bars[lastIdx];
+    if (last.live && lastIdx === n - 1) {
       ctx.beginPath();
-      ctx.arc(L.xc(n - 1), L.y(last.close), 3, 0, Math.PI * 2);
+      ctx.arc(L.xc(lastIdx), L.y(last.close), 3, 0, Math.PI * 2);
       ctx.strokeStyle = themeC.ink;
       ctx.lineWidth = 1.2;
       ctx.stroke();
     }
 
-    // MACD(12,26,9)：柱 = 2×(DIF−DEA)，红柱 DIF>DEA / 绿柱 DIF<DEA（与分时同一套画法）
+    // MACD(12,26,9)：柱 = 2×(DIF−DEA)，红柱 DIF>DEA / 绿柱 DIF<DEA（与分时同一套画法）。
+    // 数值按全量算（EMA 要看历史才对），但**刻度取窗口内的极值**——否则放大到一小段时
+    // MACD 会被窗口外的历史峰值压成一条平线
     const macd = klineMacdOf(bars);
     let mAbs = 1e-9;
-    for (let i = 0; i < n; i++) {
+    for (let i = L.start; i < L.end; i++) {
       mAbs = Math.max(mAbs, Math.abs(macd.dif[i]), Math.abs(macd.dea[i]), Math.abs(macd.hist[i]));
     }
     const mMid = L.macdTop + L.MACD_H / 2;
@@ -5331,50 +5429,51 @@
     ctx.moveTo(L.PAD_L, mMid);
     ctx.lineTo(W - L.PAD_R, mMid);
     ctx.stroke();
-    for (let i = 0; i < n; i++) {
+    for (let i = L.start; i < L.end; i++) {
       const h = (Math.abs(macd.hist[i]) / mAbs) * (L.MACD_H / 2 - 8);
       if (h < 0.4) continue;
       ctx.fillStyle = macd.hist[i] > 0 ? withA(themeC.red, .9) : withA(themeC.green, .9);
       ctx.fillRect(L.xc(i) - bw / 2, macd.hist[i] > 0 ? mMid - h : mMid, bw, h);
     }
     ctx.beginPath();
-    for (let i = 0; i < n; i++) {
+    for (let i = L.start; i < L.end; i++) {
       const px = L.xc(i);
       const py = mY(macd.dif[i]);
-      if (i === 0) ctx.moveTo(px, py);
+      if (i === L.start) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
     ctx.strokeStyle = themeC.gold;
     ctx.lineWidth = 1.3;
     ctx.stroke();
     ctx.beginPath();
-    for (let i = 0; i < n; i++) {
+    for (let i = L.start; i < L.end; i++) {
       const px = L.xc(i);
       const py = mY(macd.dea[i]);
-      if (i === 0) ctx.moveTo(px, py);
+      if (i === L.start) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
     }
     ctx.strokeStyle = themeC.blue;
     ctx.lineWidth = 1.3;
     ctx.stroke();
 
-    // 图例
+    // 图例（数值取**最右可见那根**：翻历史时图例要跟屏幕上的内容对上，而不是永远报最新价）
     ctx.textAlign = 'left';
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
     ctx.fillStyle = themeC.muted;
     let lx = L.PAD_L + 4;
-    const head = `${modeLabel} · 共 ${n} 根${last.live ? '（含当期未收盘）' : ''}`;
+    const zoomTxt = L.count < n || L.offset > 0 ? ` · 显示 ${L.count}/${n} 根` : ` · 共 ${n} 根`;
+    const head = `${modeLabel}${zoomTxt}${last.live && lastIdx === n - 1 ? '（含当期未收盘）' : ''}`;
     ctx.fillText(head, lx, L.PAD_T - 3);
     lx += ctx.measureText(head).width + 12;
     // 只列画得出线的均线：根数不够的那几条不占位置（否则周/月线上半屏全是 --），
     // 但要说清「有几条没画出来」，别让玩家以为指标漏了
     let hiddenMa = 0;
     for (const ma of maSeries) {
-      if (ma.arr[n - 1] == null) {
+      if (ma.arr[lastIdx] == null) {
         hiddenMa += 1;
         continue;
       }
-      const txt = 'MA' + ma.period + (ma.approx ? '≈' : ' ') + ma.arr[n - 1].toFixed(2);
+      const txt = 'MA' + ma.period + (ma.approx ? '≈' : ' ') + ma.arr[lastIdx].toFixed(2);
       const tw = ctx.measureText(txt).width;
       if (lx + tw > W - L.PAD_R) break; // 排不下就不画，免得溢出右边界
       ctx.fillStyle = ma.color;
@@ -5401,11 +5500,11 @@
       ctx.fillText(`样本 ${n} 根 · 未预热`, lx, L.macdTop + 8);
     } else {
       ctx.fillStyle = themeC.gold;
-      const difTxt = 'DIF ' + macd.dif[n - 1].toFixed(3);
+      const difTxt = 'DIF ' + macd.dif[lastIdx].toFixed(3);
       ctx.fillText(difTxt, lx, L.macdTop + 8);
       lx += ctx.measureText(difTxt).width + 12;
       ctx.fillStyle = themeC.blue;
-      ctx.fillText('DEA ' + macd.dea[n - 1].toFixed(3), lx, L.macdTop + 8);
+      ctx.fillText('DEA ' + macd.dea[lastIdx].toFixed(3), lx, L.macdTop + 8);
     }
   }
 
@@ -5418,8 +5517,14 @@
       return;
     }
     const L = dayLayout(rect.width, rect.height, bars);
-    const i = Math.floor((mx - L.PAD_L) / L.slot);
-    if (i < 0 || i >= bars.length) {
+    // 光标在右侧价格轴 / 画布边缘外时不弹框（那边的 x 反解出来是窗口外的下标）
+    if (mx < L.PAD_L || mx > rect.width - L.PAD_R) {
+      tip.hidden = true;
+      return;
+    }
+    // 下标要加窗口起点：xc(i) 里的 i 是全量下标，mx 反解出来的是窗口内的偏移
+    const i = L.start + Math.floor((mx - L.PAD_L) / L.slot);
+    if (i < L.start || i >= L.end) {
       tip.hidden = true;
       return;
     }
@@ -5779,6 +5884,11 @@
     c.addEventListener('mousemove', (e) => {
       const m = curMarket();
       if (!state || !m) return;
+      // 拖动平移中不弹光标框：它跟着手指跑、还挡着 K 线
+      if (chartPan && chartPan.moved) {
+        tip.hidden = true;
+        return;
+      }
       const rect = c.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -5838,6 +5948,111 @@
     });
   }
 
+  /**
+   * K 线的缩放与平移（只对日/周/月生效，分时图不受影响）：
+   *   滚轮           → 以光标为中心缩放（下滚缩小、上滚放大）
+   *   按住左键拖动   → 左右平移（往右拖看更早的）
+   *   双击           → 复位（默认根数 + 贴最新一根）
+   *   右上角 −/+/⟲   → 没滚轮的触控板 / 触屏设备走按钮
+   * 拖动期间锁住十字光标（跟着手跳、还挡视线），松手后下一帧自动恢复。
+   */
+  function bindKlineView() {
+    const c = canvas();
+
+    c.addEventListener('wheel', (e) => {
+      if (!isKline() || activeView !== 'trade') return;
+      const m = curMarket();
+      if (!m) return;
+      const bars = klineSeriesOf(m);
+      if (bars.length < 2) return;
+      // passive: false 才能 preventDefault，否则滚轮会把整个页面一起滚
+      e.preventDefault();
+      const rect = c.getBoundingClientRect();
+      const dir = e.deltaY > 0 ? 1 : -1; // 下滚 = 缩小（看到更多根）
+      if (!zoomKline(bars, dir, e.clientX - rect.left, rect.width)) return;
+      $('chartTip').hidden = true;
+      drawChart();
+    }, { passive: false });
+
+    c.addEventListener('pointerdown', (e) => {
+      if (!isKline() || activeView !== 'trade' || e.button !== 0) return;
+      const m = curMarket();
+      if (!m) return;
+      const bars = klineSeriesOf(m);
+      if (bars.length < 2) return;
+      const rect = c.getBoundingClientRect();
+      const L = dayLayout(rect.width, rect.height, bars);
+      if (!(L.slot > 0)) return;
+      chartPan = {
+        id: e.pointerId,
+        x0: e.clientX,
+        slot: L.slot,
+        total: bars.length,
+        count: L.count,
+        offset: L.offset,
+        moved: false,
+      };
+      // 指针捕获：拖出画布再松手也能收到 pointerup，否则 chartPan 会一直挂着
+      if (c.setPointerCapture) {
+        try {
+          c.setPointerCapture(e.pointerId);
+        } catch (err) {
+          /* 老浏览器没有捕获，窗口级的 pointerup 兜底 */
+        }
+      }
+    });
+
+    c.addEventListener('pointermove', (e) => {
+      if (!chartPan || e.pointerId !== chartPan.id) return;
+      const dx = e.clientX - chartPan.x0;
+      if (!chartPan.moved && Math.abs(dx) < 3) return; // 手抖不算拖动，别把光标锁住
+      chartPan.moved = true;
+      // 拖动方向与内容方向相反：往右拖 = 右端多丢几根 = 看更早的行情
+      let offset = Math.round(chartPan.offset + dx / chartPan.slot);
+      offset = Math.max(0, Math.min(offset, chartPan.total - chartPan.count));
+      const st = kViews[chartMode] || (kViews[chartMode] = { count: 0, offset: 0 });
+      if (offset === st.offset) return;
+      kViews[chartMode] = { count: chartPan.count, offset };
+      $('chartTip').hidden = true;
+      c.classList.add('panning');
+      drawChart();
+    });
+
+    const endPan = (e) => {
+      if (!chartPan) return;
+      if (e && e.pointerId !== undefined && e.pointerId !== chartPan.id) return;
+      chartPan = null;
+      c.classList.remove('panning');
+    };
+    c.addEventListener('pointerup', endPan);
+    c.addEventListener('pointercancel', endPan);
+    // 窗口级兜底：指针在画布外松开（没捕获成功）时也要收尾
+    window.addEventListener('pointerup', endPan);
+
+    c.addEventListener('dblclick', () => {
+      if (!isKline()) return;
+      resetKlineView();
+      $('chartTip').hidden = true;
+      drawChart();
+    });
+
+    const box = $('chartZoom');
+    if (!box) return;
+    box.querySelectorAll('[data-zoom]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!isKline()) return;
+        const m = curMarket();
+        if (!m) return;
+        const cW = c.getBoundingClientRect().width;
+        const act = btn.dataset.zoom;
+        if (act === 'reset') resetKlineView();
+        // 按钮没有光标位置，以绘图区中心为锚点缩放
+        else zoomKline(klineSeriesOf(m), act === 'out' ? 1 : -1, (cW - 58 + 8) / 2, cW);
+        drawChart();
+      });
+    });
+  }
+
   // ---------- 心跳 / 冷却刷新 ----------
   function tickUI() {
     if (!state) return;
@@ -5885,6 +6100,7 @@
     bindHolders();
     bindPlayerPositions();
     bindCrosshair();
+    bindKlineView();
     bindChartMode();
     bindTransfer();
     bindEggs();

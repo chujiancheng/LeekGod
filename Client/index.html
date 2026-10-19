@@ -280,6 +280,13 @@
           </div>
           <div class="chart-wrap">
             <canvas id="chart"></canvas>
+            <!-- K 线缩放/平移：滚轮缩放、拖动平移、双击复位；这块按钮是给没有滚轮的
+                 触控板/触屏留的后路，只在 K 线模式显示（renderChartMode 控制 hidden） -->
+            <div class="chart-zoom" id="chartZoom" hidden>
+              <button type="button" data-zoom="out" title="缩小（多显示几根）· 也可下滚轮">−</button>
+              <button type="button" data-zoom="in" title="放大（少显示几根）· 也可上滚轮">+</button>
+              <button type="button" data-zoom="reset" title="复位视图 · 也可双击图表">⟲</button>
+            </div>
             <div class="chart-tip" id="chartTip" hidden></div>
           </div>
           <!-- 资金指标：外盘=主动买、内盘=主动卖，净流入 = 外盘成交额 − 内盘成交额（口径见服务端 flow.js） -->

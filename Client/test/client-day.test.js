@@ -207,6 +207,11 @@ src = src.replace(
     setDayBars: (id, arr) => { dayBars.set(id, arr); },
     dayLoadedOf: (id) => dayLoaded.get(id),
     klineSeriesOf, dayLayout, klineMacdOf, computeMacd, daySeriesOf, weekPer,
+    // K 线视窗：滚轮缩放 / 拖动平移（count = 屏上几根、offset = 右端丢几根）
+    klineView, zoomKline, resetKlineView,
+    viewOf: () => ({ ...kViews[chartMode] }),
+    setKView: (count, offset) => { kViews[chartMode] = { count, offset }; },
+    kviewMin: () => KVIEW_MIN_BARS,
     drawChart, dayCrosshair,
     // 均线组：日周月线共用一套 MA5/10/20/30/60/120/250
     movingAvg, klineMaOf, klineLeadBars,
@@ -236,6 +241,7 @@ src = src.replace(
     comicKickerText: () => $('comicKicker').textContent,
     comicGoText: () => $('comicGoBtn').textContent,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
+    renderHome,
     // 排行 → 玩家持仓弹窗
     openPlayerPositions, closePlayerPositions, renderPlayerPositions,
     rankPosShown: () => !$('rankPosOverlay').classList.contains('hidden'),
@@ -669,16 +675,20 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
   assert(api.el('chartRanges').hidden === false, '分时模式恢复「当日 / 5 日」');
 
   // ================= 10b-2：数据量与口径（实测存档只有 65 根日线 / 4 根月线）=================
-  // ---- 日线抓 260 根只为周/月线：日线自己只画最近 120 根 ----
+  // ---- 日线抓 260 根：序列拿全量，默认窗口只放最近 120 根（可缩放）----
   const long = [];
   for (let d = 1; d <= 260; d++) long.push(mkBar(d, 10, 11, 9, 10 + d * 0.1, 1000));
   api.setDayBars(STOCK, long);
   const stLong = mkState({ ...AUCTION_DAY, day: 260, phase: 'morning', auction: null }, null);
   api.setState(stLong);
   api.setChartMode('day');
+  api.resetKlineView();
   const d120 = api.daySeriesOf(stLong.markets[0]);
-  assert(d120.length === 120, `日线只画最近 120 根（${d120.length} 根）`);
-  assert(d120[d120.length - 1].day === 260, `截的是尾部、末根仍是第 260 天（${d120[d120.length - 1].day}）`);
+  assert(d120.length === 260, `日线序列返回全量 260 根（${d120.length} 根，缩放到全量才用得上）`);
+  assert(d120[d120.length - 1].day === 260, `末根仍是第 260 天（${d120[d120.length - 1].day}）`);
+  const Lday = api.dayLayout(900, 320, d120);
+  assert(Lday.count === 120 && Lday.end === 260 && Lday.start === 140,
+    `日线默认窗口 = 最近 120 根（start ${Lday.start} / end ${Lday.end}）`);
   api.setChartMode('week');
   const wk260 = api.klineSeriesOf(stLong.markets[0]);
   assert(wk260.length === 38, `周线吃全量 260 根并期（${wk260.length} 根，期望 38）`);
@@ -756,15 +766,16 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
   const want5 = (dBars[15].close + dBars[14].close + dBars[13].close + dBars[12].close + dBars[11].close) / 5;
   assert(Math.abs(dMa5.arr[15] - want5) < 1e-12, `日线 MA5 末根 = 最近 5 根收盘均价（${dMa5.arr[15].toFixed(4)}）`);
   assert(dMa5.arr[3] === null && dMa5.arr[4] !== null, '日线第 5 根才开始有 MA5');
-  // 日线只画 120 根，MA120 恰好末根有值、MA250 整条空
+  // 日线序列拿全量 260 根，均线按全量算（窗口只是「画哪几根」，不影响指标精度）
   api.setDayBars(STOCK, long);
   api.setState(stLong);
   api.setChartMode('day');
   const mLong = stLong.markets[0];
   const dMa120 = api.klineMaOf(mLong, 120);
   const dMa250 = api.klineMaOf(mLong, 250);
-  assert(dMa120.arr[119] !== null && dMa120.arr[118] === null, '日线 120 根时 MA120 只有末根有值');
-  assert(dMa250.arr.every((v) => v === null), '日线 120 根时 MA250 全空（样本不够，不硬凑）');
+  assert(dMa120.arr[119] !== null && dMa120.arr[118] === null, '日线 MA120 从第 120 根起有值');
+  assert(dMa250.arr[249] !== null && dMa250.arr[248] === null,
+    '日线 260 根时 MA250 从第 250 根起有值（不再整条空）');
 
   // ---- 周线：展开成交易日平滑，窗口被截短时标 ≈ 并写明实际/名义窗口 ----
   api.setChartMode('week');
@@ -835,6 +846,97 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
   const tipHtml = api.crosshairHtml();
   assert(/ma-c5|ma-c\d+/.test(tipHtml), `十字光标带上均线一行（${tipHtml.slice(-160)}）`);
   assert(!/style=/.test(tipHtml), '均线颜色走 class，不用内联 style（CSP style-src self）');
+
+  // ================= 10b-4：缩放 / 平移（滚轮 + 拖动 + 双击复位）=================
+  api.setChartMode('day');
+  api.setState(stLong);
+  api.setActiveView('trade');
+  api.resetKlineView();
+  const plotCenter = 8 + (900 - 8 - 58) / 2;
+
+  // ---- 放大一格：根数 120 → 96，光标（画布中心）下那根不动 ----
+  const L0 = api.dayLayout(900, 320, d120);
+  const okZoom = api.zoomKline(d120, -1, plotCenter, 900);
+  const L1 = api.dayLayout(900, 320, d120);
+  assert(okZoom && L1.count === 96, `放大一格：120 → 96 根（${L1.count}）`);
+  assert(Math.abs(L1.start + L1.count / 2 - (L0.start + L0.count / 2)) < 0.51,
+    `缩放围绕光标：中心下标 ${L0.start + L0.count / 2} → ${L1.start + L1.count / 2}`);
+
+  // ---- 缩小到底 = 全量；放大到底 = KVIEW_MIN_BARS ----
+  for (let k = 0; k < 40; k++) api.zoomKline(d120, 1, plotCenter, 900);
+  const Lall = api.dayLayout(900, 320, d120);
+  assert(Lall.count === 260 && Lall.start === 0 && Lall.offset === 0,
+    `一直缩小能铺满全量（count ${Lall.count} / start ${Lall.start} / offset ${Lall.offset}）`);
+  for (let k = 0; k < 20; k++) api.zoomKline(d120, -1, plotCenter, 900);
+  const Lmin = api.dayLayout(900, 320, d120);
+  assert(Lmin.count === api.kviewMin(), `一直放大夹在最少 ${api.kviewMin()} 根（${Lmin.count}）`);
+  assert(Lmin.slot > 20, `放大后每根 ~${Lmin.slot.toFixed(1)}px（蜡烛才画得开）`);
+  assert(api.klineSeriesOf(mLong).length === 260, '缩放不改数据，序列还是 260 根');
+
+  // ---- offset 越界夹回：右端最多丢到 total−count（再丢左边就空了）----
+  api.setKView(40, 5000);
+  const Lp = api.dayLayout(900, 320, d120);
+  assert(Lp.count === 40 && Lp.offset === 220 && Lp.end === 40 && Lp.start === 0,
+    `offset 夹到 total−count（offset ${Lp.offset} / end ${Lp.end}）`);
+  api.setKView(40, 30);
+  const Lh = api.dayLayout(900, 320, d120);
+  assert(Lh.end === 230 && Lh.start === 190, `翻历史：右端丢 30 根（${Lh.start}–${Lh.end}）`);
+
+  // ---- y 轴只看窗口内的根：窗口外的历史尖刺不该把放大后的图拉平 ----
+  const spike = long.map((b, i) => (i === 5 ? { ...b, high: 999, low: 0.01 } : { ...b }));
+  api.setKView(40, 0);
+  const Ls = api.dayLayout(900, 320, spike);
+  assert(Ls.hi < 100 && Ls.lo > 0.01, `y 轴按窗口取范围（lo ${Ls.lo.toFixed(2)} / hi ${Ls.hi.toFixed(2)}）`);
+
+  // ---- 拖动平移：真的走一遍 pointerdown → pointermove → pointerup ----
+  api.resetKlineView();
+  const beforeCount = api.dayLayout(800, 320, d120).count;
+  const beforeOffset = api.dayLayout(800, 320, d120).offset;
+  fire('chart', 'pointerdown', { button: 0, pointerId: 1, clientX: 400, clientY: 100, preventDefault() {} });
+  fire('chart', 'pointermove', { pointerId: 1, clientX: 402, clientY: 100 }); // 手抖 2px：不算拖动
+  assert(api.dayLayout(800, 320, d120).offset === beforeOffset, '手抖 2px 不触发平移');
+  fire('chart', 'pointermove', { pointerId: 1, clientX: 460, clientY: 100 });
+  const dragged = api.viewOf();
+  const Ldrag = api.dayLayout(800, 320, d120);
+  assert(dragged.offset > 0 && Ldrag.end < 260,
+    `往右拖 60px 看更早的（offset ${dragged.offset} / 末根 ${Ldrag.end - 1}）`);
+  assert(Ldrag.count === beforeCount, `拖动只平移，不改缩放（根数 ${Ldrag.count} 不变）`);
+  fire('chart', 'pointerup', { pointerId: 1 });
+  assert(api.dayLayout(800, 320, d120).offset === dragged.offset, '松手后视窗停住');
+
+  // ---- 滚轮：上滚放大、下滚缩小 ----
+  const c0 = api.dayLayout(800, 320, d120).count;
+  const prevented = { flag: false };
+  fire('chart', 'wheel', { deltaY: -120, clientX: 400, clientY: 100, preventDefault() { prevented.flag = true; } });
+  assert(prevented.flag, '滚轮阻止了页面滚动（passive:false）');
+  assert(api.dayLayout(800, 320, d120).count < c0, `上滚放大：${c0} → ${api.dayLayout(800, 320, d120).count} 根`);
+  fire('chart', 'dblclick', {});
+  assert(api.viewOf().count === 0 && api.viewOf().offset === 0, '双击复位成默认视图');
+
+  // ---- 「复位」按钮与默认窗口随模式各记一份 ----
+  api.setKView(30, 5);
+  const dayKept = api.viewOf();
+  api.setChartMode('week');
+  const wv = api.viewOf();
+  assert(wv.count === 0 && wv.offset === 0, '周线有自己的视窗（不受日线缩放影响）');
+  const wLayout = api.dayLayout(800, 320, api.klineSeriesOf(mLong));
+  assert(wLayout.count === wLayout.total, `周线默认看全量（${wLayout.count} 根）`);
+  api.setKView(20, 0);
+  assert(api.dayLayout(800, 320, api.klineSeriesOf(mLong)).count === 20, '周线也能缩到 20 根');
+  api.setChartMode('day');
+  assert(api.viewOf().count === dayKept.count && api.viewOf().offset === dayKept.offset,
+    '切回日线还是刚才那段（按模式各记一份）');
+
+  // ---- DOM：按钮组只在 K 线模式出现 ----
+  api.setChartMode('day');
+  api.renderChartMode();
+  assert(api.el('chartZoom').hidden === false, '日线模式显示缩放按钮组');
+  api.setChartMode('minute');
+  api.renderChartMode();
+  assert(api.el('chartZoom').hidden === true, '分时模式隐藏缩放按钮组');
+  const idxHtml = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert(idxHtml.indexOf('id="chartZoom"') > 0, 'HTML 里有 #chartZoom');
+  assert((idxHtml.match(/data-zoom="/g) || []).length === 3, '缩放组三个按钮（−/+/复位）');
 
   api.setChartMode('minute');
   api.setDayBars(STOCK, dayBars);
@@ -2172,6 +2274,32 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     await flush();
     api.closePlayerPositions();
     resetFetch();
+  }
+
+  // ---- 资产构成条：配色与比例都不许走内联 style（CSP style-src 'self' 会把整条属性丢掉）----
+  console.log('\n[23] 主页资产构成条（CSP 兼容）');
+  {
+    const st = mkState({ ...AUCTION_DAY, phase: 'morning', auction: null }, null);
+    st.rules = Object.assign({}, st.rules, { initialCash: 1000000 });
+    st.account = Object.assign({}, st.account, {
+      cash: 400000,
+      longValue: 350000,
+      shortMargin: 250000,
+      equity: 1000000,
+      realizedPnL: 0,
+    });
+    api.setState(st);
+    api.renderHome();
+    const html = api.el('homeAssets').innerHTML;
+    assert(html.indexOf('style=') < 0, '资产构成条里没有内联 style（CSP 禁，会被浏览器整条丢弃）');
+    assert((html.match(/tone-(cash|long|short)/g) || []).length >= 6,
+      `三段配色走 tone-* class（bar + 图例各一次，共 ${(html.match(/tone-(cash|long|short)/g) || []).length} 处）`);
+    assert(/class="mix-seg tone-cash" data-mix="400000"/.test(html),
+      '段上带原始金额（插入后由 CSSOM 写 flex-grow 算比例）');
+    assert(html.indexOf('¥400000') >= 0 || html.indexOf('¥400,000') >= 0, '图例带各段金额');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+    assert(/\.mix-bar \.tone-cash/.test(css) && /\.mix-item \.tone-long/.test(css),
+      'CSS 里有 tone-* 配色规则（bar / 图例共用）');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
