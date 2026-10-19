@@ -119,6 +119,8 @@
     { id: 'doro',    name: '小恶魔朵洛', img: '/img/mascot-doro-256.png', thumb: '/img/mascot-doro-96.png', desc: '举爪招涨' },
     { id: 'duck',    name: '咕咕嘎嘎', img: '/img/mascot-duck-256.png', thumb: '/img/mascot-duck-96.png', desc: 'duck 不服' },
     { id: 'knight',  name: '刀盾骑士', img: '/img/mascot-knight-256.png', thumb: '/img/mascot-knight-96.png', desc: '我的刀！我的盾！' },
+    { id: 'kanpan',  name: '看盘少女', img: '/img/mascot-kanpan-256.png', thumb: '/img/mascot-kanpan-96.png', desc: '盯盘不眨眼，只看涨' },
+    { id: 'whale',   name: '小鲸鱼', img: '/img/mascot-whale-256.png', thumb: '/img/mascot-whale-96.png', desc: '深海捞涨点' },
   ];
   const MASCOT_KEY = 'gushen_mascot'; // '' = 跟随主题；null = 从没选过（同样跟随主题）
   let currentMascot = null;

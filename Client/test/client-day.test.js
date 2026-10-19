@@ -1368,6 +1368,20 @@ console.log('\n[16] 主题系统：切换 / 落盘 / 吉祥物换装 / 两个视
   // ---- 立绘与缩略图分档：主页 120px 用 -256，44/56px 的小位用 -96（别挂 1~2MB 原图）----
   assert(api.mascotOf().img.endsWith('-256.png') && api.mascotOf().thumb.endsWith('-96.png'), '立绘取 -256、缩略图取 -96');
 
+  // ---- 新成员「看盘少女」：阵容在册、可自选、上主页立绘 ----
+  assert(api.mascots().includes('kanpan'), '吉祥物阵容包含看盘少女（kanpan）');
+  api.setMascotPick('kanpan');
+  api.applyMascot();
+  assert(api.mascotOf().id === 'kanpan' && api.heroMascot().src === '/img/mascot-kanpan-256.png' && !api.heroMascot().hidden, '看盘少女可自选并上主页立绘');
+  api.setMascotPick('');
+
+  // ---- 新成员「小鲸鱼」：阵容在册、可自选、上主页立绘 ----
+  assert(api.mascots().includes('whale'), '吉祥物阵容包含小鲸鱼（whale）');
+  api.setMascotPick('whale');
+  api.applyMascot();
+  assert(api.mascotOf().id === 'whale' && api.heroMascot().src === '/img/mascot-whale-256.png' && !api.heroMascot().hidden, '小鲸鱼可自选并上主页立绘');
+  api.setMascotPick('');
+
   // ---- 首次登录弹一次：本地从没选过才弹，选过就不再打扰 ----
   api.el('themeOverlay').classList.add('hidden');
   localStorageStub.removeItem('gushen_theme');

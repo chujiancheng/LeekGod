@@ -82,7 +82,7 @@ for (const key of Object.keys((config.brokers && config.brokers.list) || {})) {
 for (const key of milestones.MASCOT_KEYS) registerImg(`egg-cat-${key}-96.png`, 'sm');
 // 主题吉祥物：key 与前端 app.js 的 MASCOTS 对齐（不含 'cat'——股神猫没有主页立绘，
 // 只用上面那批 egg-cat 头像）
-for (const key of ['sakura', 'magic', 'maodiao', 'orange', 'doro', 'duck', 'knight']) {
+for (const key of ['sakura', 'magic', 'maodiao', 'orange', 'doro', 'duck', 'knight', 'kanpan', 'whale']) {
   registerImg(`mascot-${key}.png`, 'lg');
   registerImg(`mascot-${key}-256.png`, 'md');
   registerImg(`mascot-${key}-96.png`, 'sm');
