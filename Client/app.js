@@ -3760,13 +3760,40 @@
         })
         .join('') || '<tr><td colspan="9" class="empty">暂无行情</td></tr>');
 
+    const initialCash = state.rules.initialCash || 0;
+    const retPct = initialCash > 0 ? ((a.equity - initialCash) / initialCash) * 100 : 0;
+    const mixTotal = (a.cash || 0) + (a.longValue || 0) + (a.shortMargin || 0);
+    const mixPct = (v) => (mixTotal > 0 ? (v / mixTotal) * 100 : 0);
+    const mixSegs = [
+      { label: '可用资金', value: a.cash || 0, color: 'var(--blue)' },
+      { label: '持仓市值', value: a.longValue || 0, color: 'var(--gold)' },
+      { label: '空头保证金', value: a.shortMargin || 0, color: 'var(--green)' },
+    ].filter((s) => s.value > 0.005);
+    const mixBar = mixSegs.length
+      ? mixSegs.map((s) => `<i style="flex:${mixPct(s.value).toFixed(2)};background:${s.color}"></i>`).join('')
+      : '<i style="flex:1;background:var(--line)"></i>';
+    const mixLegend = mixSegs.map((s) => `
+      <div class="mix-item">
+        <i style="background:${s.color}"></i>
+        <label>${s.label}</label>
+        <span>¥${fmtMoney(s.value)}<em>${mixPct(s.value).toFixed(0)}%</em></span>
+      </div>`).join('');
     $('homeAssets').innerHTML = `
-      <div class="cell hero-cell"><label>总权益</label><span class="${cls(a.equity - state.rules.initialCash)}">¥${fmtMoney(a.equity)}</span></div>
-      <div class="cell"><label title="现金口径，含融券卖出所得；开空后会大于总权益">可用资金</label><span>¥${fmtMoney(a.cash)}</span></div>
-      <div class="cell"><label>浮动盈亏</label><span class="${cls(pnl)}">${money(pnl)}</span></div>
-      <div class="cell"><label>已实现盈亏</label><span class="${cls(a.realizedPnL)}">${money(a.realizedPnL)}</span></div>
-      <div class="cell"><label>持仓市值</label><span>¥${fmtMoney(a.longValue || 0)}</span></div>
-      <div class="cell"><label>空头保证金</label><span>¥${fmtMoney(a.shortMargin)}</span></div>
+      <div class="cell hero-cell">
+        <label>总权益</label>
+        <span class="${cls(a.equity - initialCash)}">¥${fmtMoney(a.equity)}</span>
+        <em class="hero-sub">初始资金 ¥${fmtMoney(initialCash)} · 收益率 <b class="${cls(retPct)}">${retPct >= 0 ? '+' : ''}${retPct.toFixed(1)}%</b></em>
+      </div>
+      <div class="asset-quad">
+        <div class="cell"><label>浮动盈亏</label><span class="${cls(pnl)}">${money(pnl)}</span></div>
+        <div class="cell"><label>已实现盈亏</label><span class="${cls(a.realizedPnL)}">${money(a.realizedPnL)}</span></div>
+        <div class="cell"><label title="现金口径，含融券卖出所得；开空后会大于总权益">可用资金</label><span>¥${fmtMoney(a.cash)}</span></div>
+        <div class="cell"><label>持仓市值</label><span>¥${fmtMoney(a.longValue || 0)}</span></div>
+      </div>
+      <div class="asset-mix">
+        <div class="mix-bar">${mixBar}</div>
+        <div class="mix-legend">${mixLegend}</div>
+      </div>
     `;
 
     // 持仓：按「股票 × 方向」展开，多股票时自然排成多行

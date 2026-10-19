@@ -1178,21 +1178,48 @@ input { font: inherit; color: inherit; }
 }
 
 .asset-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 13px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
   padding: 14px 16px;
   flex: 1;
-  align-content: space-between;
+  min-height: 0;
 }
-.asset-grid .cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.asset-grid .cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .asset-grid label { color: var(--muted); font-size: 11px; }
 .asset-grid span {
-  font-size: 16px; font-weight: 600;
+  font-size: 15px; font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.asset-grid .cell.hero-cell span { font-size: 19px; font-weight: 700; }
+.asset-grid .cell.hero-cell span { font-size: 22px; font-weight: 700; }
+.asset-grid .hero-sub {
+  font-style: normal; font-size: 11px; color: var(--muted);
+  display: flex; gap: 4px; align-items: baseline;
+  white-space: nowrap; overflow: hidden;
+}
+.asset-grid .hero-sub b { font-weight: 600; }
+.asset-quad {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.asset-quad .cell span { font-size: 14px; }
+.asset-mix { display: flex; flex-direction: column; gap: 9px; }
+.mix-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); }
+.mix-bar i { display: block; height: 100%; min-width: 3px; }
+.mix-legend { display: flex; flex-direction: column; gap: 6px; }
+.mix-item { display: flex; align-items: center; gap: 6px; }
+.mix-item i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.mix-item label { flex: 1; font-size: 11px; color: var(--muted); }
+.mix-item span {
+  display: flex; align-items: baseline; gap: 5px;
+  font-size: 12px; font-weight: 600;
+}
+.mix-item em { font-style: normal; font-size: 10.5px; font-weight: 400; color: var(--muted); }
 
 .home-news { flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px 6px; }
 .home-news li { flex-wrap: wrap; gap: 6px 10px; padding: 7px 2px; }
