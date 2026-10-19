@@ -1870,6 +1870,74 @@ class Game {
     return all.slice(0, limit);
   }
 
+  /**
+   * 某个玩家的持仓概况（排行里点「持仓」按需拉，不进每帧 SSE）。
+   * 只给「看得懂的仓位」：股票 × 方向的数量 / 均价 / 现价 / 市值 / 盈亏 + 账户级汇总。
+   * 批次明细、强平价、挂单与成交流水**不下发**——那是本人视角；别人看榜只需要仓位。
+   * 口径复用 serializePosition，避免「榜上的盈亏」与「他自己看到的盈亏」两套算法。
+   */
+  playerPortfolio(account) {
+    const acc = account ? this.store.get(account) : null;
+    // NPC 与不存在的账号一律当「查无此人」：榜单只列玩家，别让这个接口变成 NPC 探针
+    if (!acc || acc.isNPC) return { ok: false, error: '玩家不存在' };
+    const now = Date.now();
+    const bk = this.brokerOf(acc, now);
+    const priceOf = (s) => this.priceOf(s);
+    const positions = [];
+    for (const stock of this.stocks) {
+      const p = this.serializePosition(acc, stock, now, bk);
+      if (!p) continue;
+      if (p.long.qty > 0) {
+        positions.push({
+          stockId: p.stockId,
+          name: p.name,
+          last: p.last,
+          side: 'long',
+          qty: p.long.qty,
+          avg: r2(p.long.cost / p.long.qty),
+          value: p.long.value,
+          pnl: p.long.pnl,
+        });
+      }
+      if (p.short.qty > 0) {
+        positions.push({
+          stockId: p.stockId,
+          name: p.name,
+          last: p.last,
+          side: 'short',
+          qty: p.short.qty,
+          avg: r2(p.short.cost / p.short.qty),
+          value: p.short.value,
+          pnl: p.short.pnl,
+          margin: p.short.margin,
+        });
+      }
+    }
+    positions.sort((a, b) => b.value - a.value);
+    const longValue = r2(acc.totalLongValue(priceOf));
+    const shortValue = r2(acc.totalShortMV(priceOf));
+    return {
+      ok: true,
+      t: now,
+      account: acc.name,
+      name: Game.displayName(acc),
+      broker: acc.broker || null,
+      star: acc.broker ? broker.starOf(acc, acc.broker) : 1,
+      equity: r2(acc.equity(priceOf)),
+      initialCash: config.account.initialCash,
+      cash: r2(acc.cash),
+      orderFrozen: r2(acc.orderFrozen),
+      shortMargin: r2(acc.shortMargin),
+      longValue,
+      shortValue,
+      longPnl: r2(positions.reduce((a, p) => a + (p.side === 'long' ? p.pnl : 0), 0)),
+      shortPnl: r2(positions.reduce((a, p) => a + (p.side === 'short' ? p.pnl : 0), 0)),
+      financeDebt: r2(acc.totalFinanceDebt()),
+      realizedPnL: r2(acc.realizedPnL),
+      positions,
+    };
+  }
+
   /** 券商榜（§5.3）：按券商聚合客户数与总权益，含组内第一名 */
   brokerBoard() {
     if (!this._brokerBoard) this.leaderboard();

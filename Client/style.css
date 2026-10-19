@@ -429,6 +429,19 @@ input { font: inherit; color: inherit; }
 .holder-actions .ha-qty { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .holder-actions .ha-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 12px; }
 
+/* ---------- 玩家持仓弹窗（排行 → 「持仓」） ---------- */
+.rank-pos-card { width: 620px; }
+.rank-pos-meta { padding-bottom: 8px; gap: 10px 20px; }
+.rank-pos-scroll {
+  max-height: 320px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.rank-pos-scroll .grid-table th { top: 0; }
+/* 持仓按钮在表格里，不受 .mini-btn 的 flex:1 影响；点开别人的仓位是榜上唯一可点的操作。
+   选择器带上 .grid-table：同为一个类时后续的 .mini-btn 会赢，按钮会被撑成 26px 高 */
+.grid-table .rank-pos-btn { flex: none; height: 22px; padding: 0 9px; white-space: nowrap; }
+.grid-table .rank-act-col, .grid-table .rank-act-cell { width: 62px; text-align: right; white-space: nowrap; }
+
 /* ---------- 布局 ---------- */
 .app {
   height: 100vh;
@@ -1326,6 +1339,8 @@ input { font: inherit; color: inherit; }
   .grid-table th, .grid-table td { padding: 9px 10px; }
   .grid-table th { position: static; }
   .assets-row { gap: 12px 18px; }
+  /* 玩家持仓弹窗：7 列塞不进 360px 的卡片，压紧内边距 + 容器横向滚动（别让数字被裁掉一半） */
+  .rank-pos-scroll .grid-table th, .rank-pos-scroll .grid-table td { padding: 7px 7px; font-size: 12px; }
 
   /* 登录 */
   .login-card { width: min(92vw, 360px); padding: 28px 22px; }

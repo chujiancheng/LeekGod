@@ -501,6 +501,21 @@ function createServer(game) {
         return json(res, r.ok ? 200 : 401, r);
       }
 
+      // ---- 某玩家的持仓概况：排行里点「持仓」按钮时按需拉 ----
+      // 榜单每 tick 都在重绘，把所有人的持仓塞进 state 会白撑 SSE 帧，所以走单独的按需接口。
+      // 只回仓位与账户级汇总（批次明细/强平价/委托/成交都不给）。
+      if (p === '/api/player/positions' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        const r = game.playerPortfolio(url.searchParams.get('account'));
+        return json(res, r.ok ? 200 : 404, r);
+      }
+
       if (p === '/api/order' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.order)) return;
         const body = await readBody(req);

@@ -223,6 +223,9 @@ src = src.replace(
     comicKickerText: () => $('comicKicker').textContent,
     comicGoText: () => $('comicGoBtn').textContent,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
+    // 排行 → 玩家持仓弹窗
+    openPlayerPositions, closePlayerPositions, renderPlayerPositions,
+    rankPosShown: () => !$('rankPosOverlay').classList.contains('hidden'),
     renderPositions, posRowsHtml,
     identity: () => ({ account: me, nick: myNick, token }),
     accountRe: () => String(ACCOUNT_RE),
@@ -1811,6 +1814,107 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     assert(pts.length === 3, `服务端平线只留到午休起点（${pts.length} 点）`);
     assert(pts[1].t === base + 259000 && pts[2].t === base + 260000, '末点被夹到午休起点');
     assert(pts.every((p) => p.t <= base + 260000), '午休期间的点一条都没留下');
+    resetFetch();
+  }
+
+  console.log('\n[22] 排行 → 「持仓」按钮 + 玩家持仓弹窗');
+  {
+    // ---- 骨架：两张榜的第 4 列是操作列，弹窗三个容器都在 ----
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    ['rankPosOverlay', 'rankPosTitle', 'rankPosSub', 'rankPosMeta', 'rankPosBody', 'rankPosCloseBtn'].forEach((id) => {
+      assert(html.indexOf(`id="${id}"`) >= 0, `HTML 里有 #${id}`);
+    });
+    const rankHead = (html.match(/<thead><tr>((?:(?!<\/thead>)[\s\S])*)<\/tr><\/thead>\s*<tbody id="rankBody"/) || [])[1] || '';
+    assert((rankHead.match(/<th/g) || []).length === 4, `玩家总榜表头 4 列（实际 ${(rankHead.match(/<th/g) || []).length}）`);
+    const homeHead = (html.match(/<thead><tr>((?:(?!<\/thead>)[\s\S])*)<\/tr><\/thead>\s*<tbody id="homeRankBody"/) || [])[1] || '';
+    assert((homeHead.match(/<th/g) || []).length === 4, `主页排行卡表头 4 列（实际 ${(homeHead.match(/<th/g) || []).length}）`);
+
+    // ---- 行里带按钮，账号不是昵称（重名/改名都不会点错人） ----
+    api.setBrokers({ zhaoshang: { key: 'zhaoshang', name: '招伤证券', abbr: '招伤' } });
+    api.setState(
+      Object.assign(mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null), {
+        rules: Object.assign(mkState({}, null).rules, { initialCash: 1000000 }),
+        players: [
+          { account: 'trader_a', name: '股神阿三', equity: 1800000, broker: 'zhaoshang', brokerRank: 1, star: 2 },
+          { name: '老服务端没账号', equity: 500000, broker: null },
+        ],
+      })
+    );
+    const rank = api.rankRowsHtml();
+    assert(rank.indexOf('data-account="trader_a"') >= 0, '「持仓」按钮带的是账号（不是昵称）');
+    assert(rank.indexOf('data-nick="股神阿三"') >= 0, '按钮捎带昵称，弹窗标题直接用');
+    assert(rank.split('rank-pos-btn').length - 1 === 1, '没有账号的老数据不渲染按钮（避免点了查不到人）');
+
+    // ---- 点按钮：拉 /api/player/positions，弹窗按账号取数并渲染 ----
+    scriptFetch((url) =>
+      String(url).indexOf('/api/player/positions') === 0
+        ? {
+            ok: true,
+            account: 'trader_a',
+            name: '股神阿三',
+            broker: 'zhaoshang',
+            star: 2,
+            equity: 1800000,
+            initialCash: 1000000,
+            cash: 600000,
+            longValue: 1200000,
+            shortValue: 0,
+            longPnl: 50000,
+            shortPnl: 0,
+            financeDebt: 0,
+            realizedPnL: -1200,
+            positions: [
+              { stockId: '600001', name: '大米集团', last: 21, side: 'long', qty: 3000, avg: 20, value: 63000, pnl: 3000 },
+            ],
+          }
+        : { ok: false, error: '网络错误' }
+    );
+    const btn = { dataset: { account: 'trader_a', nick: '股神阿三' } };
+    assert(
+      fire('rankBody', 'click', { target: { closest: () => btn } }) === 1,
+      '总榜容器上挂着「持仓」按钮的事件委托'
+    );
+    assert(api.rankPosShown(), '点「持仓」打开弹窗');
+    assert(api.el('rankPosSub').textContent === '正在读取…', '拉数据期间先给「正在读取…」');
+    await flush();
+    await flush();
+    assert(fetchCalls.length === 1 && fetchCalls[0].url === '/api/player/positions?account=trader_a',
+      `按账号拉取（${fetchCalls[0] && fetchCalls[0].url}）`);
+    const body = api.el('rankPosBody').innerHTML;
+    assert(body.indexOf('大米集团') >= 0 && body.indexOf('多头') >= 0, '持仓明细渲染出来（股票 + 方向）');
+    assert((body.match(/<td[ >]/g) || []).length === 7, `明细行 7 格，与弹窗表头 7 列对齐（实际 ${(body.match(/<td[ >]/g) || []).length}）`);
+    assert(body.indexOf('63,000.00') >= 0, '市值按千分位显示');
+    assert(api.el('rankPosMeta').innerHTML.indexOf('已实现盈亏') >= 0, '账户级汇总在弹窗里（已实现盈亏）');
+    assert(api.el('rankPosTitle').textContent === '股神阿三 · 持仓', `标题用昵称（${api.el('rankPosTitle').textContent}）`);
+
+    // ---- 关掉再开别人：旧响应不能串到新弹窗 ----
+    assert(fire('rankPosCloseBtn', 'click') === 1, '关闭按钮挂着监听器');
+    assert(!api.rankPosShown(), '点关闭收起弹窗');
+    scriptFetch(() => ({ ok: true, account: 'other_one', name: '另一个', equity: 900000, initialCash: 1000000,
+      cash: 900000, longValue: 0, shortValue: 0, longPnl: 0, shortPnl: 0, financeDebt: 0, realizedPnL: 0, positions: [] }));
+    api.openPlayerPositions('other_one', '另一个');
+    await flush();
+    await flush();
+    assert(api.el('rankPosBody').innerHTML.indexOf('空仓') >= 0, '没有持仓时显示「暂无持仓（空仓）」而不是空白表');
+
+    // ---- 失败响应：给错误文案，不冒充空仓 ----
+    scriptFetch(() => ({ ok: false, error: '玩家不存在' }));
+    api.openPlayerPositions('ghost', '幽灵');
+    await flush();
+    await flush();
+    assert(api.el('rankPosSub').textContent === '玩家不存在', `失败时把服务端文案透出来（${api.el('rankPosSub').textContent}）`);
+    assert(api.el('rankPosBody').innerHTML.indexOf('空仓') === -1, '读取失败不渲染成「空仓」');
+
+    // ---- 主页排行卡也走同一个委托 ----
+    resetFetch();
+    scriptFetch(() => ({ ok: false, error: '玩家不存在' }));
+    assert(
+      fire('homeRankBody', 'click', { target: { closest: () => ({ dataset: { account: 'trader_a', nick: 'X' } }) } }) === 1,
+      '主页排行卡同样能点开「持仓」'
+    );
+    await flush();
+    await flush();
+    api.closePlayerPositions();
     resetFetch();
   }
 

@@ -241,7 +241,7 @@
           <div class="panel-title"><span>收益排行</span><span class="panel-sub" id="homeRankSub"></span></div>
           <div class="card-scroll">
             <table class="grid-table">
-              <thead><tr><th>#</th><th>玩家</th><th>总权益</th></tr></thead>
+              <thead><tr><th>#</th><th>玩家</th><th>总权益</th><th class="rank-act-col"></th></tr></thead>
               <tbody id="homeRankBody"></tbody>
             </table>
           </div>
@@ -488,10 +488,10 @@
               <thead><tr><th>#</th><th>券商</th><th>客户数</th><th>总权益</th><th>组内第一</th></tr></thead>
               <tbody id="brokerBoardBody"><tr><td colspan="5" class="empty">暂无数据</td></tr></tbody>
             </table>
-            <div class="panel-title gap-top"><span>玩家总榜</span><span class="panel-sub">含组内名次</span></div>
+            <div class="panel-title gap-top"><span>玩家总榜</span><span class="panel-sub">含组内名次 · 点「持仓」看别人怎么买的</span></div>
             <table class="grid-table">
-              <thead><tr><th>#</th><th>玩家</th><th>总权益</th></tr></thead>
-              <tbody id="rankBody"></tbody>
+              <thead><tr><th>#</th><th>玩家</th><th>总权益</th><th class="rank-act-col"></th></tr></thead>
+              <tbody id="rankBody"><tr><td colspan="4" class="empty">暂无玩家</td></tr></tbody>
             </table>
           </div>
           <div class="tab-panel" data-panel="seats">
@@ -663,6 +663,23 @@
         <div class="rules-body" id="rulesBody"></div>
       </div>
       <button class="deposit-cancel" id="rulesCloseBtn">知道了，开干</button>
+    </div>
+  </div>
+
+  <!-- 玩家持仓弹窗：排行 tab / 主页排行卡里点某行的「持仓」打开。
+       数据走按需接口 /api/player/positions（榜单每帧重绘，持仓不进 state） -->
+  <div id="rankPosOverlay" class="overlay deposit-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rankPosTitle">
+    <div class="login-card deposit-card rank-pos-card">
+      <div class="deposit-title" id="rankPosTitle">玩家持仓</div>
+      <div class="login-sub" id="rankPosSub">--</div>
+      <div class="assets-row rank-pos-meta" id="rankPosMeta"></div>
+      <div class="rank-pos-scroll">
+        <table class="grid-table">
+          <thead><tr><th>股票</th><th>方向</th><th>数量</th><th>均价</th><th>现价</th><th>市值</th><th>盈亏</th></tr></thead>
+          <tbody id="rankPosBody"><tr><td colspan="7" class="empty">读取中…</td></tr></tbody>
+        </table>
+      </div>
+      <button class="deposit-cancel" id="rankPosCloseBtn">关闭</button>
     </div>
   </div>
 

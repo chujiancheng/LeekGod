@@ -34,6 +34,9 @@
   let holderHist = null; // 股东占比走势快照（点股东那行时按需拉取，不随每帧刷新）
   let holderHistName = ''; // 当前弹窗看的是哪位股东
   let holderFetching = false;
+  // 玩家持仓弹窗（排行 → 「持仓」）：按需拉，不进每帧 state
+  let rankPosAccount = ''; // 当前弹窗看的是哪个账号
+  let rankPosData = null;
   // 股东榜改为按需拉取（10 只股票全推会把每帧撑爆）：进 tab / 切股票时拉，前台 5 秒刷新
   let holdersData = null; // /api/holders 的最近一次响应
   let holdersStockId = '';
@@ -2757,17 +2760,23 @@
           ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
              <span class="panel-sub">组内 #${p.brokerRank || 1}</span>${p.star > 1 ? `<span class="mb-star flat">${'★'.repeat(Math.min(p.star, 5))}</span>` : ''}`
           : '<span class="panel-sub">未开户</span>';
+        // 「按账号取数」：按钮带上账号而不是昵称——昵称可重名、可随时改
+        const act = p.account
+          ? `<td class="rank-act-cell"><button class="mini-btn rank-pos-btn" type="button"
+               data-account="${esc(p.account)}" data-nick="${esc(p.name || p.account)}">持仓</button></td>`
+          : '<td class="rank-act-cell"></td>';
         return `<tr${mine ? ' class="row-mine"' : ''}>
           <td>${i + 1}</td>
           <td>${esc(p.name)}${mine ? '（我）' : ''} ${tag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
+          ${act}
         </tr>`;
       })
       .join('');
   }
 
   function renderRank() {
-    $('rankBody').innerHTML = rankRowsHtml() || '<tr><td colspan="3" class="empty">暂无玩家</td></tr>';
+    $('rankBody').innerHTML = rankRowsHtml() || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
     renderBrokerBoard();
   }
 
@@ -2795,6 +2804,104 @@
           </tr>`;
         })
         .join('') || '<tr><td colspan="5" class="empty">暂无数据</td></tr>';
+  }
+
+  // ---------- 玩家持仓弹窗（排行 → 「持仓」） ----------
+  /**
+   * 拉某玩家的持仓。走 `?account=`（账号而不是昵称）——昵称可重名、可随时改。
+   * 期间点了别的玩家就把旧响应丢掉，避免"先点 A 后点 B，回来的是 A"。
+   */
+  function loadPlayerPositions(account) {
+    apiGet('/api/player/positions?account=' + encodeURIComponent(account))
+      .then((r) => r.json())
+      .then((res) => {
+        if (account !== rankPosAccount) return;
+        if (!res || !res.ok) {
+          rankPosData = null;
+          $('rankPosSub').textContent = (res && res.error) || '读取失败';
+          $('rankPosBody').innerHTML = '<tr><td colspan="7" class="empty">读取失败</td></tr>';
+          return;
+        }
+        rankPosData = res;
+        renderPlayerPositions();
+      })
+      .catch(() => {
+        if (account !== rankPosAccount) return;
+        $('rankPosSub').textContent = '网络错误';
+        $('rankPosBody').innerHTML = '<tr><td colspan="7" class="empty">网络错误</td></tr>';
+      });
+  }
+
+  function openPlayerPositions(account, nick) {
+    if (!account) return;
+    rankPosAccount = account;
+    rankPosData = null;
+    $('rankPosTitle').textContent = (nick || account) + ' · 持仓';
+    $('rankPosSub').textContent = '正在读取…';
+    $('rankPosMeta').innerHTML = '';
+    $('rankPosBody').innerHTML = '<tr><td colspan="7" class="empty">正在读取…</td></tr>';
+    $('rankPosOverlay').classList.remove('hidden');
+    loadPlayerPositions(account);
+  }
+
+  function closePlayerPositions() {
+    $('rankPosOverlay').classList.add('hidden');
+    rankPosAccount = '';
+    rankPosData = null;
+  }
+
+  /** 弹窗内容：账户级汇总（权益/现金/持仓市值/盈亏）+ 持仓明细（按市值降序，多空各占一行） */
+  function renderPlayerPositions() {
+    const d = rankPosData;
+    if (!d) return;
+    const b = d.broker ? brokerMeta[d.broker] : null;
+    const pnl = d.longPnl + d.shortPnl;
+    const signed = (v) => (v >= 0 ? '+' : '') + fmtMoney(v);
+    const sub = b
+      ? `${b.name}${d.star > 1 ? ' · ' + '★'.repeat(Math.min(d.star, 5)) : ''}`
+      : '未开户';
+    $('rankPosSub').innerHTML = `${esc(sub)} · 账号 <b>${esc(d.account)}</b> · 总权益
+      <span class="${cls(d.equity - d.initialCash)}">¥${fmtMoney(d.equity)}</span>`;
+    $('rankPosMeta').innerHTML = `
+      <div class="item"><label>可用资金</label><span>¥${fmtMoney(d.cash)}</span></div>
+      <div class="item"><label>持仓市值</label><span>¥${fmtMoney(d.longValue)}</span></div>
+      <div class="item"><label>空头市值</label><span>¥${fmtMoney(d.shortValue)}</span></div>
+      <div class="item"><label>浮动盈亏</label><span class="${cls(pnl)}">${signed(pnl)}</span></div>
+      <div class="item"><label>已实现盈亏</label><span class="${cls(d.realizedPnL)}">${signed(d.realizedPnL)}</span></div>
+      <div class="item"><label>融资负债</label><span>¥${fmtMoney(d.financeDebt)}</span></div>
+    `;
+    $('rankPosBody').innerHTML =
+      (d.positions || [])
+        .map((p) => {
+          const long = p.side === 'long';
+          return `<tr class="${long ? 'row-long' : 'row-short'}">
+            <td>${esc(p.name)}<span class="sub-code">${esc(p.stockId)}</span></td>
+            <td>${long ? '多头' : '空头'}</td>
+            <td>${fmtQty(p.qty)}</td>
+            <td>${fmtP(p.avg)}</td>
+            <td>${fmtP(p.last)}</td>
+            <td>${fmtMoney(p.value)}</td>
+            <td class="${cls(p.pnl)}">${signed(p.pnl)}</td>
+          </tr>`;
+        })
+        .join('') || '<tr><td colspan="7" class="empty">暂无持仓（空仓）</td></tr>';
+  }
+
+  /** 「持仓」按钮的事件委托：两张榜每帧都整块重写 innerHTML，只能挂在容器上 */
+  function bindPlayerPositions() {
+    const pick = (e) => {
+      const btn = e.target.closest('.rank-pos-btn');
+      if (!btn) return;
+      openPlayerPositions(btn.dataset.account, btn.dataset.nick);
+    };
+    const rankBody = $('rankBody');
+    if (rankBody) rankBody.addEventListener('click', pick);
+    const homeRank = $('homeRankBody');
+    if (homeRank) homeRank.addEventListener('click', pick);
+    $('rankPosCloseBtn').addEventListener('click', closePlayerPositions);
+    $('rankPosOverlay').addEventListener('click', (e) => {
+      if (e.target === $('rankPosOverlay')) closePlayerPositions();
+    });
   }
 
   // ---------- 主页：交易大厅 ----------
@@ -3660,7 +3767,7 @@
 
     $('homeRankSub').textContent = myIdx >= 0 ? `我第 ${myIdx + 1} 名` : `共 ${players.length} 人`;
     $('homeRankBody').innerHTML =
-      rankRowsHtml(HOME_RANK_LIMIT) || '<tr><td colspan="3" class="empty">暂无玩家</td></tr>';
+      rankRowsHtml(HOME_RANK_LIMIT) || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
 
     const news = filterNews(state.news || []).slice(0, HOME_NEWS_LIMIT);
     $('homeNewsSub').textContent = (state.news || []).length ? `最近 ${news.length} 条` : '';
@@ -5474,6 +5581,7 @@
     bindOrderPanel();
     bindLending();
     bindHolders();
+    bindPlayerPositions();
     bindCrosshair();
     bindChartMode();
     bindTransfer();
