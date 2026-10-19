@@ -164,6 +164,8 @@ src = src.replace(
   init();
   globalThis.__day = {
     renderDay, renderClock, gameClockNow, fmtClockMs, dayInfo,
+    // 分时时间刻度：墙钟 → 游戏内交易时刻
+    gameClockAt, fmtHM, minuteTimeLabel,
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall,
@@ -1610,6 +1612,62 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
       html.indexOf('data-mode="week"') >= 0 && html.indexOf('data-mode="month"') >= 0,
       'HTML 里有周线/月线模式按钮'
     );
+  }
+
+  // ==================================================================
+  console.log('\n[18b] 分时时间刻度：墙钟 → 游戏内交易时刻（09:15 / 11:30 / 13:00）');
+  {
+    const P = 620000; // 一天
+    const T0 = 1700000000000; // 今日开盘竞价起点（墙钟锚）
+    // 与 config.day.phases 同源（服务端 snapshot 下发的就是这几个字段）
+    const PHASES = [
+      { key: 'auction', ms: 30000, g: 33300000, gm: 600000 },      // 09:15 +10min
+      { key: 'morning', ms: 230000, g: 34200000, gm: 7200000 },    // 09:30 +120min
+      { key: 'lunch', ms: 40000, g: 41400000, gm: 5400000 },       // 11:30 +90min
+      { key: 'afternoon', ms: 260000, g: 46800000, gm: 7020000 },  // 13:00 +117min
+      { key: 'closeAuction', ms: 20000, g: 53820000, gm: 180000 }, // 14:57 +3min
+      { key: 'night', ms: 40000, g: 54000000, gm: 65700000 },      // 15:00 +1095min
+    ];
+    const DAY = {
+      enabled: true, day: 6, phase: 'morning', label: '上午连续竞价', trading: true, auction: null, locked: false,
+      phaseMs: 230000, phaseElapsedMs: 10000, phaseLeftMs: 220000,
+      phaseEndsAt: T0 + P - 360000, dayStartAt: T0, dayEndsAt: T0 + P,
+      gameClockMs: 34200000, phaseGameMs: 7200000, phases: PHASES,
+    };
+    api.setState(mkState(DAY, null));
+
+    // ---- 纯函数：各阶段边界与阶段内插值（与 daycycle.js 的 gameClock 同算法）----
+    const at = (off) => api.gameClockAt(T0 + off);
+    const hm = (off) => api.fmtHM(at(off).ms);
+    assert(hm(0) === '09:15', `竞价起点 09:15（${hm(0)}）`);
+    assert(hm(15000) === '09:20', `竞价中点 09:20（${hm(15000)}）`);
+    assert(hm(30000) === '09:30', `上午开盘 09:30（${hm(30000)}）`);
+    assert(hm(30000 + 115000) === '10:30', `上午中点 10:30（${hm(30000 + 115000)}）`);
+    assert(hm(260000) === '11:30', `午休起点 = 上午收盘 11:30（${hm(260000)}）`);
+    assert(hm(260000 + 20000) === '12:15', `午休中点 12:15（${hm(260000 + 20000)}）`);
+    assert(hm(300000) === '13:00', `下午开盘 13:00（${hm(300000)}）`);
+    assert(hm(560000) === '14:57', `收盘竞价 14:57（${hm(560000)}）`);
+    assert(hm(580000) === '15:00', `夜间起点 15:00（${hm(580000)}）`);
+    assert(api.fmtClockMs(at(580000 + 20000).ms) === '00:07:30', `夜间中点跨夜回卷 00:07:30（${api.fmtClockMs(at(580000 + 20000).ms)}）`);
+    assert(at(30000).day === 6, `当天点带天号（${at(30000).day}）`);
+    assert(at(-P + 30000).day === 5, `前一天的点天号回推（${at(-P + 30000).day}）`);
+    assert(hm(-P + 30000) === '09:30', `前一天同一阶段同样是 09:30（${hm(-P + 30000)}）`);
+
+    // ---- 刻度文案：当天只写 HH:MM，跨天补「N日」前缀 ----
+    assert(api.minuteTimeLabel(T0 + 30000) === '09:30', `当天刻度 ${api.minuteTimeLabel(T0 + 30000)}`);
+    assert(api.minuteTimeLabel(T0 - P + 30000) === '5日 09:30', `跨天刻度带天号 ${api.minuteTimeLabel(T0 - P + 30000)}`);
+    assert(/^\d{2}:\d{2}:\d{2}$/.test(api.minuteTimeLabel(T0 + 30000, true)), `光标文案带秒 ${api.minuteTimeLabel(T0 + 30000, true)}`);
+    assert(api.minuteTimeLabel(T0 + 30000, true) === '09:30:00', `光标时刻 09:30:00（${api.minuteTimeLabel(T0 + 30000, true)}）`);
+
+    // ---- 没有阶段表（老服务端 / day 未启用）→ 退回墙钟，不能崩 ----
+    api.setState(mkState({ ...DAY, enabled: false }, null));
+    assert(api.gameClockAt(T0 + 30000) === null, 'day 未启用时 gameClockAt 返回 null');
+    const wall = (ts) => {
+      const d = new Date(ts);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+    assert(api.minuteTimeLabel(T0 + 30000) === wall(T0 + 30000), `无时钟时退回墙钟（${api.minuteTimeLabel(T0 + 30000)}）`);
   }
 
   // ==================================================================

@@ -410,6 +410,54 @@ console.log('\n[13] Game 集成：阶段切换驱动集合竞价撮合与日终�
 }
 
 // ============================================================
+console.log('\n[13b] 分时定格落库口径：冻结段只补阶段起点锚点，不逐 tick 爬平线');
+{
+  const g = new Game();
+  for (const s of config.stocks) {
+    g.npcs.get(s.id).init(g.startedAt);
+    const mk = g.markets.get(s.id);
+    mk.priceHistory.push({ t: g.startedAt, price: mk.lastPrice });
+  }
+  g.index.update(g.markets, g.startedAt);
+  const mk0 = g.markets.get(ID);
+
+  // 上午连续竞价：逐 tick 打点
+  g.day.reanchor(Date.now() - P.morning);
+  for (let i = 0; i < 5; i++) g.tick();
+  const morningLen = mk0.priceHistory.length;
+  assert(morningLen >= 6, `连续竞价逐 tick 打点（${morningLen} 个点）`);
+
+  // 跨进午休（真实运行里上午段有 230 秒，末点天然落在阶段起点之前；
+  // 测试里 tick 毫秒级连跑，靠「刚好跨过阶段边界」保证同样的时序）：
+  // 连打 5 个 tick，整段只允许多出 1 个锚点，且钉在阶段起点
+  g.day.reanchor(Date.now() - P.lunch);
+  g.tick();
+  const anchor = mk0.priceHistory[mk0.priceHistory.length - 1];
+  assert(mk0.priceHistory.length === morningLen + 1, `午休只补 1 个锚点（${morningLen} → ${mk0.priceHistory.length}）`);
+  assert(anchor.t === g._dayState.phaseStartAt, `锚点钉在阶段起点（t=${anchor.t}）`);
+  assert(anchor.price === mk0.lastPrice, `锚点带冻结价 ${anchor.price}`);
+  const idxLenAtLunch = g.index.priceHistory.length;
+  for (let i = 0; i < 4; i++) g.tick();
+  assert(mk0.priceHistory.length === morningLen + 1, '午休内继续 tick 不再长点（平线爬不动）');
+  assert(g.index.priceHistory.length === idxLenAtLunch, '指数在午休内同样不逐 tick 长点');
+
+  // 跨过收盘竞价 → 夜间：夜段起点补一个锚点，把收盘价带进分时序列
+  g.day.reanchor(Date.now() - P.closeAuction);
+  g.tick();
+  g.day.reanchor(Date.now() - P.night);
+  g.tick();
+  const nightAnchor = mk0.priceHistory[mk0.priceHistory.length - 1];
+  assert(nightAnchor.t === g._dayState.phaseStartAt && nightAnchor.price === mk0.lastPrice, `夜间锚点落在阶段起点、带走收盘价 ${nightAnchor.price}`);
+
+  // 恢复下午连续竞价：恢复逐 tick 生长，且时间戳越过锚点
+  g.day.reanchor(Date.now() - P.afternoon);
+  for (let i = 0; i < 3; i++) g.tick();
+  assert(mk0.priceHistory.length >= morningLen + 4, '下午连续竞价恢复逐 tick 打点');
+  const tail = mk0.priceHistory;
+  assert(tail[tail.length - 1].t > tail[tail.length - 2].t, '序列时间戳仍严格升序');
+}
+
+// ============================================================
 console.log('\n[14] 续跑补结算：只结「已收盘」的交易日，不误结今天');
 {
   const g = new Game();

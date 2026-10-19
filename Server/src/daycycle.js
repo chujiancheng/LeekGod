@@ -143,6 +143,18 @@ class DayCycle {
       dayEndsAt: st.dayEndsAt,
       gameClockMs: st.gameClockMs,
       phaseGameMs: st.phase.gameMs || st.phase.ms,
+      // 阶段表：客户端要把**任意**时间戳映射回「游戏内交易时刻」（分时图的时间刻度），
+      // 就必须知道每个阶段在墙钟上占多长（ms）、游戏内从几点起（g）、映射多少分钟（gm）。
+      // 各阶段压缩比差一个量级（竞价 30s→10min、午休 40s→90min、夜间 40s→1095min），
+      // 拿当前阶段的比例整条轴外推会把刻度算歪，只能逐阶段插值。
+      // dayStartAt 是天锚点、每天等长，客户端据此换算天号，5 日视图才不会串日。
+      // 只下发时间轴，不含任何内幕（阶段顺序与时长本来就是顶栏倒计时里看得见的东西）。
+      phases: this.phases.map((p) => ({
+        key: p.key,
+        ms: p.ms,
+        g: parseGameTime(p.gameTime),
+        gm: p.gameMs || p.ms,
+      })),
     };
   }
 }

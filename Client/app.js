@@ -1796,9 +1796,9 @@
 
   // ---------- 分时定格（集合竞价 / 午休 / 夜间） ----------
   //
-  // 服务端每 tick 都往分时序列补一个点，可它并不区分阶段：集合竞价只入簿不撮合、
-  // 午休与夜间直接冻结行情，这几段里价格一动不动。客户端要是照抄，线就会被拉成一条
-  // 越来越长的水平直线——价没动、线在动，x 轴跟着最新点一路右移，整张图都在"走"，
+  // 服务端对冻结段（集合竞价 / 午休 / 夜间）只补阶段起点一个锚点、不逐 tick 打点，
+  // 但客户端自己逐帧累积的点并不知道阶段：这几段里价格一动不动，照抄就会把线拉成
+  // 一条越来越长的水平直线——价没动、线在动，x 轴跟着最新点一路右移，整张图都在"走"，
   // 看起来像还在连续交易。
   //
   // 这里的口径是：**只有连续竞价（trading 且非 auction）才让分时往后生长**。
@@ -4732,6 +4732,54 @@
     return `${p(h)}:${p(m)}:${p(s)}`;
   }
 
+  /** 游戏内时刻 → 'HH:MM'：分时图的时间刻度只要到分钟（秒在这一层挤成一团） */
+  function fmtHM(ms) {
+    return fmtClockMs(ms).slice(0, 5);
+  }
+
+  /**
+   * 把**任意**时间戳映射回游戏内交易时刻 `{ day, ms }`（ms 自 00:00 起）；没有交易日时钟返回 null。
+   *
+   * 分时图的横轴是墙钟（点的 t 就是服务端 tick 的时刻），可玩家要读的是「09:30 / 11:30 / 13:00」
+   * 这层游戏内时间——就是顶栏时钟显示的那个。不能拿**当前阶段**的压缩比整条轴外推：各阶段
+   * 压缩比差一个量级（上午 230s→120min、午休 40s→90min、夜间 40s→1095min），外推会把前面的
+   * 刻度全算歪。这里按服务端下发的阶段表（`day.phases`）**逐阶段**线性插值——与
+   * daycycle.js 的 `gameClock()` 同一套算法，只是反过来查；天号按 dayStartAt 回推（每天等长），
+   * 5 日视图因此不会串日。
+   */
+  function gameClockAt(t) {
+    const d = dayInfo();
+    if (!d || !Array.isArray(d.phases) || !d.phases.length || !Number.isFinite(t)) return null;
+    const dayMs = Number(d.dayEndsAt) - Number(d.dayStartAt);
+    if (!(dayMs > 0)) return null;
+    // 先落到「第几天 + 当天进度」（t 早于今天时 offset 为负，floor 仍然给出 0 ≤ rest < dayMs）
+    const dayOffset = Math.floor((t - d.dayStartAt) / dayMs);
+    const rest = t - d.dayStartAt - dayOffset * dayMs;
+    let acc = 0;
+    for (let i = 0; i < d.phases.length; i++) {
+      const p = d.phases[i];
+      const ms = Number(p.ms) || 0;
+      const last = i === d.phases.length - 1;
+      if (rest < acc + ms || last) {
+        const frac = ms > 0 ? Math.max(0, Math.min(1, (rest - acc) / ms)) : 0;
+        const v = (Number(p.g) + frac * (Number(p.gm) || ms)) % 86400000;
+        return { day: (Number(d.day) || 1) + dayOffset, ms: (v + 86400000) % 86400000 };
+      }
+      acc += ms;
+    }
+    return null;
+  }
+
+  /** 分时图的时间文案：游戏内时刻（跨天补「N日」前缀），没有交易日时钟时退回墙钟。
+   *  withSec = 十字光标（精确到秒），否则刻度只要 HH:MM */
+  function minuteTimeLabel(t, withSec) {
+    const g = gameClockAt(t);
+    if (!g) return withSec ? fmtTime(t) : fmtTime(t).slice(0, 5);
+    const hm = withSec ? fmtClockMs(g.ms) : fmtHM(g.ms);
+    const d = dayInfo();
+    return d && g.day !== d.day ? `${g.day}日 ${hm}` : hm;
+  }
+
   /** 顶栏时钟：有交易日时钟就显示游戏内交易时刻，否则退回服务器时间 */
   function renderClock() {
     const g = gameClockNow();
@@ -5510,14 +5558,21 @@
     }
 
     // 时间刻度（纵线贯穿价格/成交量/MACD 三带）
+    // 刻度读**游戏内交易时刻**（09:15 / 11:30 / 13:00 / 15:00），与顶栏时钟同源——
+    // 墙钟 19:25 对玩家没有任何意义（既不是开盘也不是收盘）。跨天的刻度补「N日」前缀，
+    // 5 日视图才分得清是哪一天；没有交易日时钟（day 未启用 / 老服务端）时退回墙钟。
     ctx.textAlign = 'center';
     ctx.fillStyle = themeC.muted;
     for (let i = 0; i <= 4; i++) {
       const tt = t0 + ((t1 - t0) * i) / 4;
       const xx = x(tt);
-      // 居中绘制会越出画布，两端夹回可视区
-      const tx = Math.min(Math.max(xx, PAD_L + 18), W - PAD_R - 18);
-      ctx.fillText(fmtTime(tt).slice(0, 5), tx, H - PAD_B / 2 - 2);
+      const label = minuteTimeLabel(tt);
+      // 居中绘制会越出画布，两端按**实际字宽**夹回可视区（「123日 09:30」比「09:30」宽一倍，
+      // 还按固定 18px 夹会压到右侧价格轴上）
+      const half = ctx.measureText(label).width / 2;
+      const lo = PAD_L + half;
+      const hi = W - PAD_R - half;
+      ctx.fillText(label, hi > lo ? Math.min(Math.max(xx, lo), hi) : (lo + hi) / 2, H - PAD_B / 2 - 2);
       ctx.strokeStyle = themeC.grid;
       ctx.beginPath();
       ctx.moveTo(xx, PAD_T);
@@ -5727,8 +5782,10 @@
       const md = macdOf();
       const difV = md.dif[bestI] || 0;
       const deaV = md.dea[bestI] || 0;
+      // 光标时间同样走游戏内交易时刻（与轴刻度、顶栏时钟同源）；5 日视图补天号
+      const tLabel = minuteTimeLabel(best.t, true);
       tip.innerHTML =
-        `<span class="t">${fmtTime(best.t)}</span><br>价格 <b class="${cls(best.price - prev)}">${fmtP(best.price)}</b> <span class="${cls(best.price - prev)}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br><span class="t">成交量</span> ${fmtVol(mv)} <span class="t">（累计 ${fmtVol(bv)}）</span><br>` +
+        `<span class="t">${tLabel}</span><br>价格 <b class="${cls(best.price - prev)}">${fmtP(best.price)}</b> <span class="${cls(best.price - prev)}">${(pct >= 0 ? '+' : '') + pct.toFixed(2)}%</span><br><span class="t">成交量</span> ${fmtVol(mv)} <span class="t">（累计 ${fmtVol(bv)}）</span><br>` +
         `<span class="t">MACD</span> DIF <b class="${cls(difV)}">${difV.toFixed(3)}</b> DEA <b class="${cls(deaV)}">${deaV.toFixed(3)}</b>`;
       tip.hidden = false;
       const tw = tip.offsetWidth;

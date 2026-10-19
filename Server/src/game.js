@@ -495,6 +495,9 @@ class Game {
     this.ensureDaySettled(now);
     // 休市（午休 / 夜间）：不接受下单、不撮合、不报价，但公允价值继续迁移
     const closed = !!(dayState && !dayState.phase.trading);
+    // 分时定格段：休市或集合竞价（价格冻结，走势图不该往前走）。
+    // 没有交易日时钟（day 未启用）时恒为 false，退化为逐 tick 打点的旧行为
+    const frozenPhase = !!(dayState && (!dayState.phase.trading || dayState.phase.auction));
 
     // 停牌是全市场一起停（运营开关），以第一只股票的状态为准摊到全部股票
     const primary = this.markets.get(this.stocks[0].id);
@@ -599,8 +602,20 @@ class Game {
       market.updateDongfengHeat(now);
 
       // 分时序列（每 tick 一个点，vol 为累计成交量供客户端算柱）；停牌补平线，走势图不断点
+      // 冻结段（集合竞价 / 午休 / 夜间）**不逐 tick 打点**：价格一动不动，逐 tick 补平点会把
+      // 分时序列拉成一条往右爬的水平直线——客户端的定格锚点只救得了实时帧，救不了
+      // /api/history 里的整段平线（刷新页面 / 切股票后就现出原形）。改为整段只打一个
+      // 阶段起点锚点：线停在那里不走，恢复连续竞价后才继续生长（与客户端定格同口径，
+      // 见 Client/app.js「分时定格」段）。收盘竞价集中撮合后的收盘价由夜间锚点带走，不丢。
       const h = market.priceHistory;
-      h.push({ t: now, price: market.lastPrice, vol: market.volume });
+      if (frozenPhase) {
+        const lastPt = h[h.length - 1];
+        if (!lastPt || lastPt.t < dayState.phaseStartAt) {
+          h.push({ t: dayState.phaseStartAt, price: market.lastPrice, vol: market.volume });
+        }
+      } else {
+        h.push({ t: now, price: market.lastPrice, vol: market.volume });
+      }
       // 保留最近 N 个点：push 在尾部，截断必须从头丢，h.length=N 会把最新点砍掉导致分时冻住
       if (h.length > config.market.priceHistorySize) {
         h.splice(0, h.length - config.market.priceHistorySize);
@@ -610,8 +625,20 @@ class Game {
     // 玩家自动化策略（按策略所属股票逐个判断停牌与休市）
     if (active) this.auto.step(now);
 
-    // 大盘指数：用各股最新价合成点位并记分时
-    this.index.update(this.markets, now);
+    // 大盘指数：用各股最新价合成点位并记分时（冻结段与个股同口径：只补阶段起点锚点）
+    if (frozenPhase) {
+      const v = this.index.recompute(this.markets);
+      const ih = this.index.priceHistory;
+      const lastPt = ih[ih.length - 1];
+      if (!lastPt || lastPt.t < dayState.phaseStartAt) {
+        ih.push({ t: dayState.phaseStartAt, price: v, vol: 0 });
+        if (ih.length > config.market.priceHistorySize) {
+          ih.splice(0, ih.length - config.market.priceHistorySize);
+        }
+      }
+    } else {
+      this.index.update(this.markets, now);
+    }
 
     // 排行榜/股东按 tick 算一次，避免每个 SSE 连接各算一遍
     this.refreshStats();
