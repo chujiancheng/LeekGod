@@ -1438,8 +1438,13 @@
       'linear-gradient(120deg, ' + lore.color + ' 0%, rgba(0,0,0,0) 70%)';
     $('companyImg').src = lore.img;
     $('companyImg').alt = lore.waifu + '（' + m.name + '拟人）';
-    $('companyLogo').src = lore.logo;
-    $('companyLogo').alt = m.name + '徽记';
+    const lg = $('companyLogo');
+    // 指数没有徽记（lore.logo 为空）：隐藏 logo 位，防止裂图
+    lg.hidden = !lore.logo;
+    if (lore.logo) {
+      lg.src = lore.logo;
+      lg.alt = m.name + '徽记';
+    }
     $('companyName').textContent = m.name;
     $('companyCode').textContent = m.stockId;
     $('companyWaifu').textContent = '拟人 · ' + lore.waifu;
@@ -1839,12 +1844,12 @@
     if (!m) return;
     $('stockName').textContent = m.name;
     $('stockCode').textContent = m.stockId;
-    // 公司徽记：指数没有档案数据，隐藏 logo 位
+    // 公司徽记：没有档案或档案没配 logo（指数）时隐藏 logo 位
     const lore = window.COMPANY_LORE && window.COMPANY_LORE[m.stockId];
     const sl = $('stockLogo');
     if (sl) {
-      sl.hidden = !lore;
-      if (lore && sl.getAttribute('src') !== lore.logo) sl.src = lore.logo;
+      sl.hidden = !(lore && lore.logo);
+      if (lore && lore.logo && sl.getAttribute('src') !== lore.logo) sl.src = lore.logo;
     }
     const lp = $('lastPrice');
     lp.textContent = fmtP(m.last);
@@ -2017,7 +2022,7 @@
       // 周/月线由日线聚合（周 = 每 N 个交易日、月 = 每 4 周），副标题说清口径
       const label = chartMode === 'week' ? '周线' : chartMode === 'month' ? '月线' : '日线';
       const unit = chartMode === 'week' ? ` · 每 ${weekPer()} 个交易日` : chartMode === 'month' ? ' · 每 4 周' : '';
-      sub.textContent = `${m.isIndex ? '大盘指数' : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)`;
+      sub.textContent = `${m.isIndex ? m.name : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)`;
       return;
     }
     const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
@@ -2025,7 +2030,7 @@
     const d = dayInfo();
     const frozen = d && frozenPhaseStart() != null ? ` · ${d.label || '休市'}，分时定格` : '';
     sub.textContent = m.isIndex
-      ? `大盘指数分时 · ${scope}${frozen} · 成分股按流通市值加权`
+      ? `${m.name}分时 · ${scope}${frozen} · 成分股按流通市值加权`
       : `${scope}分时${frozen} · 均价与价格 · 成交量 · MACD(12,26,9)`;
   }
 
@@ -3373,7 +3378,7 @@
         '<div class="rule-cell"><b>同股只能一个方向</b><span>同一只股票要么做多要么做空（含在途开仓单），不能自己跟自己对着干。</span></div>' +
         '<div class="rule-cell"><b>一天只有 ' + fmtDur((r.day && r.day.totalMs) || 620000) + '</b><span>开盘竞价 → 上午 → 午休 → 下午 → 收盘竞价 → 夜间结算。</span></div>' +
         '<div class="rule-cell"><b>赚差价，也付利息</b><span>融资逐分钟计息；融券按持仓时长累计、每个游戏日收盘结算一次。扛得越久，成本越高。</span></div>' +
-        '<div class="rule-cell"><b>指数看得见，摸不着</b><span>大盘指数由十只股票加权合成，只做参照，不能下单。</span></div>' +
+        '<div class="rule-cell"><b>指数看得见，摸不着</b><span>「' + esc(state.index ? state.index.name : '全村希望') + '」由十只股票加权合成，只做参照，不能下单。</span></div>' +
       '</div>' +
       '<div class="rule-tip"><b>涨红跌绿</b>：红色 = 涨，绿色 = 跌（A 股口径，和美股正好相反）。</div>'
     );

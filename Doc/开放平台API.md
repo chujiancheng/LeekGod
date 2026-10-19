@@ -86,7 +86,7 @@ python Server/examples/quant_ma.py
 
 ### 1.1 这是一个什么系统
 
-- **模拟盘**：10 只股票（代码 `600001` ~ `600010`）+ 1 个不可交易的大盘指数（`999999`）。
+- **模拟盘**：10 只股票（代码 `600001` ~ `600010`）+ 1 个不可交易的大盘指数「全村希望」（`999999`）。
 - **服务端权威**：价格、盘口、成交、资金、持仓全部由服务端计算。你的本地状态只是缓存，
   任何时候都能用 `/account`、`/orders`、`/fills` 重新对齐。
 - **做市引擎**：NPC 持续报价提供流动性。行情里能看到五档、逐笔、内外盘、融券池，
@@ -321,7 +321,7 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" $GUSHEN_BASE/open/v1/meta
     { "id": "600001", "name": "大米集团", "lotSize": 100 },
     { "id": "600002", "name": "腾迅控股", "lotSize": 100 }
   ],
-  "index": { "stockId": "999999", "name": "大盘指数" },
+  "index": { "stockId": "999999", "name": "全村希望" },
   "rules": {
     "feeRate": 0.0001,
     "cooldownMs": 2000,
@@ -360,7 +360,7 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" \
   "serverTime": 1792300000000,
   "day": { "enabled": true, "day": 3, "phase": "morning", "trading": true, "...": "同 /meta" },
   "index": {
-    "stockId": "999999", "name": "大盘指数", "last": 1012.35,
+    "stockId": "999999", "name": "全村希望", "last": 1012.35,
     "prevClose": 1008.0, "change": 4.35, "changePct": 0.43,
     "volume": 1250000, "turnover": 38000000
   },
@@ -808,7 +808,7 @@ Access-Control-Max-Age: 600
 | `serverTime` | int | 毫秒 |
 | `day` | object | 交易日时钟，见 §5.4.1 |
 | `stocks` | array | `[{id, name, lotSize}]`，**不含**指数 |
-| `index` | object | `{stockId:"999999", name:"大盘指数"}` |
+| `index` | object | `{stockId:"999999", name:"全村希望"}` |
 | `rules` | object | 本账户有效规则，见 §5.4.2 |
 | `tickIntervalMs` | int | 撮合间隔，当前 700 |
 
@@ -1002,7 +1002,7 @@ Access-Control-Max-Age: 600
 | 字段 | 说明 |
 |---|---|
 | `stockId` | 固定 `999999` |
-| `name` | `大盘指数` |
+| `name` | `全村希望` |
 | `last` / `prevClose` / `change` / `changePct` | 点位与涨跌 |
 | `volume` / `turnover` | 成分股合计成交量/额 |
 
