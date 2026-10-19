@@ -2067,14 +2067,43 @@ SSE 的注意点：
 
 ## 11. 完整示例解读
 
-仓库里有两个示例：
+仓库里有三个示例：
 
 | 文件 | 用途 | 依赖 |
 |---|---|---|
 | `Server/examples/quant_ma.py` | 双均线策略，演示轮询、冷却、幂等、整手、可卖量 | 仅标准库 |
 | `Server/examples/quant_template.py` | 策略骨架，带 Client 封装、对账、风控、目标仓位 | 仅标准库 |
+| `Server/examples/quant_rotation.py` | 多股票动量轮动，演示选股、换股、止损禁入、补仓阻尼 | 仅标准库 |
 
-### 11.1 `quant_ma.py` 的关键逻辑
+### 11.1 `quant_rotation.py` 的关键逻辑
+
+另外两个示例都只做一只票。这个示例回答"怎么在 10 只票里选"：
+
+```python
+# 1) 一个读请求拿全市场（不要逐票拉：读配额 240 次/分钟，10 只票逐票轮询会打爆）
+mk = cli.markets(depth=1, trades=0)
+
+# 2) 每只票打分 = 短窗涨速 + 当日涨幅 + 主动买占比；只用站上短均线、
+#    离涨跌停还有空间的票（贴着涨停买不到，贴着跌停是接刀）
+score = W_ROC * roc(LOOKBACK) + W_DAY * changePct + W_FLOW * (outerPct - 50) / 10
+
+# 3) 持仓股排名加 REPLACE_BONUS：没有这个阻尼，榜单稍微抖一下就会来回换手，
+#    而每次换手要付两趟手续费 + 两轮冷却
+target = top_n(scored, bonus_if_holding=REPLACE_BONUS)
+
+# 4) 目标仓位模式：算"该持多少"再补差额，部分成交/重启都能自愈
+gap = win - (long.qty + 在途买 - 在途卖)
+```
+
+三个容易踩的点，示例里都处理了：
+
+- **补仓阻尼**（`MIN_GAP_PCT`）：按最新价重算目标股数时，价格抖一点就会算出"差 1 手"，为这 1 手付一次 2 秒冷却不划算。
+- **止损禁入**（`STOP_OUT_SEC`）：止损卖掉后分数往往还很高，下一 tick 会原价买回来，白交两趟手续费。
+- **买卖不打架**：同一只票有在途买单时不发卖单（先撤），有在途卖单时不发买单。§6.13 说系统会撤掉你自己的旧挂单，但那是兜底，不该依赖。
+
+跑法：把文件顶部「直接改这里」的 `API_KEY` / `BASE_URL` / `DRY_RUN_DEFAULT` 三行填上，直接 `python Server/examples/quant_rotation.py`（环境变量 `GUSHEN_API_KEY` / `GUSHEN_BASE` / `DRY_RUN` 仍然优先，换机器时不用改代码）；`TOP_N` / `POSITION_PCT` / `LOOKBACK` / `ENTRY_SCORE` 等调参项走环境变量，文件头有全套默认值。**Key 写进代码后别再把这个文件提交到 git 或发给别人。**
+
+### 11.2 `quant_ma.py` 的关键逻辑
 
 ```python
 # 1) 用 seq 判断新 tick
@@ -2121,7 +2150,7 @@ cooldown_until = time.time() * 1000 + res.get("cooldownLeftMs", meta["rules"]["c
 
 这些留给 `quant_template.py`。
 
-### 11.2 `quant_template.py` 的结构
+### 11.3 `quant_template.py` 的结构
 
 ```
 Config         环境变量：BASE / KEY / STOCK / 仓位比例
