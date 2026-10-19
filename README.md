@@ -3,6 +3,10 @@
 > 一个能单机跑起来的 A 股模拟交易游戏。内部代号「我是股神」（目录名、存档名、测试用例里的 `gushen` 都不改）。
 
 <p align="center">
+  <img src="Client/img/waifu-group-poster.png" width="480" alt="股娘大合照 · 十家上市公司拟人首张全家福">
+</p>
+
+<p align="center">
   <img src="Client/img/mascot-kanpan-256.png" width="120" alt="看盘少女">
   <img src="Client/img/mascot-whale-256.png" width="120" alt="小鲸鱼">
   <img src="Client/img/mascot-sakura-256.png" width="120" alt="樱">
