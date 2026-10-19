@@ -584,9 +584,16 @@ input { font: inherit; color: inherit; }
 .big-price { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .price-change { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .stat-group { display: flex; gap: 18px; flex: 1; flex-wrap: wrap; }
-.stat { display: flex; flex-direction: column; font-size: 12px; }
+.stat { display: flex; flex-direction: column; font-size: 12px; flex: none; }
 .stat label { color: var(--muted); font-size: 11px; }
 .stat span { font-variant-numeric: tabular-nums; }
+/* 顶栏行情数值每秒都在变。个别设备/字体下 tabular-nums 不完全生效，数字宽度会
+   微抖几像素，正好在临界宽度上把「涨跌停」指标挤下一条行——顶栏高度一变，
+   整页跟着上下跳（实测视频反馈）。给动态数值锁最小宽度，换行点就永远稳定。
+   取值按 12px 字号的最长稳定格式预留：成交量「9999.99万股」、成交额「99.99亿元」 */
+#stOpen, #stHigh, #stLow, #stPrev { min-width: 40px; }
+#stVol { min-width: 84px; }
+#stAmount { min-width: 68px; }
 .top-right { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
 .conn-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
