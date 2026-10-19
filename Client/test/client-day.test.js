@@ -54,6 +54,7 @@ function mkEl(id) {
     id,
     hidden: false,
     textContent: '',
+    innerHTML: '',
     className: '',
     disabled: false,
     title: '',
@@ -83,6 +84,9 @@ function mkEl(id) {
     focus() {},
     get offsetWidth() {
       return 120;
+    },
+    get offsetHeight() {
+      return 96;
     },
     getContext: () => mkCtx2d(),
     width: 800,
@@ -201,6 +205,13 @@ src = src.replace(
     setDayBars: (id, arr) => { dayBars.set(id, arr); },
     dayLoadedOf: (id) => dayLoaded.get(id),
     klineSeriesOf, dayLayout, klineMacdOf, computeMacd, daySeriesOf, weekPer,
+    drawChart, dayCrosshair,
+    // 均线组：日周月线共用一套 MA5/10/20/30/60/120/250
+    movingAvg, klineMaOf, klineLeadBars,
+    maPeriods: () => KLINE_MAS.map((x) => x.period),
+    maColors: () => KLINE_MAS.map((x) => x.color),
+    crosshairHtml: () => $('chartTip').innerHTML,
+    crosshairHidden: () => !!$('chartTip').hidden,
     // 账号 / 昵称 / 登录开户
     doLoginFlow, doOnboardFlow, probeLogin, showLoginStep, showLogin, renderIdentity, saveNick,
     // 游戏规则（主页入口 + 分类弹窗）
@@ -547,7 +558,7 @@ console.log('\n[10] 日线缓存：跨天与进入夜间都要重拉');
   api.onState(mkState({ ...AUCTION_DAY, day: 14, phase: 'morning', label: '上午连续竞价', auction: null }, null));
   assert(dailyCalls() === 1, `盘中首帧拉一次日线（${dailyCalls()} 次）`);
   assert(
-    api.el('chartSub').textContent === '日线 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+    api.el('chartSub').textContent === '日线 · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)',
     `日线副标题 ${api.el('chartSub').textContent}`
   );
   // 同一帧反复推：不能再拉（缓存有效）
@@ -626,12 +637,12 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
 
   // ---- 副标题与「当日/5日」显隐 ----
   api.renderChartMode();
-  assert(api.el('chartSub').textContent === '周线 · 每 7 个交易日 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+  assert(api.el('chartSub').textContent === '周线 · 每 7 个交易日 · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)',
     `周线副标题 ${api.el('chartSub').textContent}`);
   assert(api.el('chartRanges').hidden === true, '周线模式隐藏「当日 / 5 日」');
   api.setChartMode('month');
   api.renderChartMode();
-  assert(api.el('chartSub').textContent === '月线 · 每 4 周 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+  assert(api.el('chartSub').textContent === '月线 · 每 4 周 · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)',
     `月线副标题 ${api.el('chartSub').textContent}`);
 
   // ---- 布局含 MACD 带；K 线 MACD 按收盘价算且缓存键跟模式 ----
@@ -688,7 +699,7 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
   assert(api.klineSeriesOf(stPer.markets[0]).length === 1, '5 天一周时「月」= 20 个交易日 → 16 天并 1 根');
   api.setChartMode('week');
   api.renderChartMode();
-  assert(api.el('chartSub').textContent === '周线 · 每 5 个交易日 · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)',
+  assert(api.el('chartSub').textContent === '周线 · 每 5 个交易日 · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)',
     `副标题跟着配置改口（${api.el('chartSub').textContent}）`);
   delete stPer.rules.brokerMeta;
   api.setState(stPer);
@@ -711,7 +722,121 @@ console.log('\n[10b] 周/月线聚合：日线按交易日号并期，MACD 与�
   assert(Math.abs(a1.dif[1] - a2.dif[1]) > 1e-6,
     `中间根改写后 MACD 要重算（${a1.dif[1].toFixed(4)} → ${a2.dif[1].toFixed(4)}）`);
   assert(Math.abs(a1.dif[1] - api.klineMacdOf(s1).dif[1]) < 1e-12, '同一份序列重算结果稳定');
+
+  // ================= 10b-3：均线组（5/10/20/30/60/120/250，日周月共用）=================
+  // ---- 周期清单与配色：七条，颜色两两不同（同色两根线叠在一起就分不清了）----
+  const periods = api.maPeriods();
+  assert(periods.join(',') === '5,10,20,30,60,120,250', `均线七条且有序（${periods.join(',')}）`);
+  const colors = api.maColors();
+  assert(new Set(colors).size === colors.length, `七条均线颜色互不相同（${colors.length} 个色值）`);
+
+  // ---- movingAvg：手工验算 + 不足周期留空 + 小数周期不许整条消失 ----
+  const closes = [1, 2, 3, 4, 5, 6];
+  const mv = (arr, p) => api.movingAvg(arr.map((x) => ({ close: x })), p);
+  const mv3 = mv(closes, 3);
+  assert(mv3[0] === null && mv3[1] === null, 'MA3 前两根留空（不画）');
+  assert(Math.abs(mv3[2] - 2) < 1e-12 && Math.abs(mv3[5] - 5) < 1e-12,
+    `MA3 逐根均值（第 3 根 ${mv3[2]}、第 6 根 ${mv3[5]}）`);
+  assert(mv(closes, 2.4)[2] !== null && Math.abs(mv(closes, 2.4)[2] - 2.5) < 1e-9,
+    '小数周期取整成 2（2.4 → MA2），不会整条变空');
+
+  // ---- 日线：与 klineSeriesOf 逐根对齐，窗口就是名义周期 ----
+  api.setDayBars(STOCK, dayBars); // 16 根（day 1..16）
+  const stMa = mkState({ ...AUCTION_DAY, day: 16, phase: 'morning', auction: null }, null);
+  api.setState(stMa);
+  const mMa = stMa.markets[0];
+  api.setChartMode('day');
+  const dBars = api.klineSeriesOf(mMa);
+  const dMa5 = api.klineMaOf(mMa, 5);
+  assert(dMa5.arr.length === dBars.length, `日线均线与 K 线等长（${dMa5.arr.length} vs ${dBars.length}）`);
+  assert(dMa5.approx === false && dMa5.note === '', '日线均线是精确值（不标 ≈、无 note）');
+  assert(dMa5.window === 5 && dMa5.nominal === 5, `日线窗口 = 名义周期（${dMa5.window}/${dMa5.nominal}）`);
+  const want5 = (dBars[15].close + dBars[14].close + dBars[13].close + dBars[12].close + dBars[11].close) / 5;
+  assert(Math.abs(dMa5.arr[15] - want5) < 1e-12, `日线 MA5 末根 = 最近 5 根收盘均价（${dMa5.arr[15].toFixed(4)}）`);
+  assert(dMa5.arr[3] === null && dMa5.arr[4] !== null, '日线第 5 根才开始有 MA5');
+  // 日线只画 120 根，MA120 恰好末根有值、MA250 整条空
+  api.setDayBars(STOCK, long);
+  api.setState(stLong);
+  api.setChartMode('day');
+  const mLong = stLong.markets[0];
+  const dMa120 = api.klineMaOf(mLong, 120);
+  const dMa250 = api.klineMaOf(mLong, 250);
+  assert(dMa120.arr[119] !== null && dMa120.arr[118] === null, '日线 120 根时 MA120 只有末根有值');
+  assert(dMa250.arr.every((v) => v === null), '日线 120 根时 MA250 全空（样本不够，不硬凑）');
+
+  // ---- 周线：展开成交易日平滑，窗口被截短时标 ≈ 并写明实际/名义窗口 ----
+  api.setChartMode('week');
+  const wBars = api.klineSeriesOf(mLong); // 260 天 → 38 根周线
+  assert(wBars.length === 38, `周线 38 根（${wBars.length}）`);
+  const wMa250 = api.klineMaOf(mLong, 250);
+  // 名义 250 周 = 1750 个交易日，只有 260 根 → 截到全量 260
+  assert(wMa250.nominal === 1750, `周线 MA250 名义窗口 = 250×7 = 1750（${wMa250.nominal}）`);
+  assert(wMa250.window === 260, `周线 MA250 实际窗口截到全量日线 260（${wMa250.window}）`);
+  assert(wMa250.approx === true, '周线 MA250 样本不足 → 标 ≈');
+  assert(/按 260 个交易日计（名义 1750）/.test(wMa250.note), `周线 MA250 写明实际窗口（${wMa250.note}）`);
+  assert(wMa250.arr.length === 38, `周线 MA250 与 K 线等长（${wMa250.arr.length}）`);
+  const allCloses = long.map((b) => b.close);
+  const meanAll = allCloses.reduce((s, x) => s + x, 0) / allCloses.length;
+  assert(Math.abs(wMa250.arr[37] - meanAll) < 1e-9,
+    `周线 MA250 末根 = 全量 260 日均价（${wMa250.arr[37].toFixed(4)} vs ${meanAll.toFixed(4)}）`);
+  // MA20(周)：38 根周线够 20 根 → 走严格并期（比日线平滑准），窗口就是名义的 20 期
+  const wMa20 = api.klineMaOf(mLong, 20);
+  assert(wMa20.nominal === 140, `周线 MA20 名义 = 20×7 = 140 个交易日（${wMa20.nominal}）`);
+  assert(wMa20.window === 20 && wMa20.approx === false,
+    `周线 MA20 样本够 20 期 → 严格并期、不标 ≈（window ${wMa20.window}）`);
+  assert(wMa20.arr[37] !== null && wMa20.arr[18] === null && wMa20.arr[19] !== null,
+    '周线 MA20 从第 20 根起才有值');
+  const wStrict20 = api.movingAvg(wBars, 20);
+  assert(Math.abs(wMa20.arr[37] - wStrict20[37]) < 1e-12,
+    `周线 MA20 末根 = 严格并期（${wMa20.arr[37].toFixed(4)}）`);
+  // 5 周 = 35 个交易日，38 根周线够 → 同样是严格并期
+  const wMa5 = api.klineMaOf(mLong, 5);
+  assert(wMa5.window === 5 && wMa5.approx === false, `周线 MA5 走严格并期（window ${wMa5.window}）`);
+  assert(wMa5.arr[37] !== null && wMa5.arr[36] !== null, '周线 MA5 尾部两根都有值');
+  assert(wMa5.arr[3] === null && wMa5.arr[4] !== null, '周线第 5 根才开始有 MA5');
+
+  // ---- 月线：4 周一期，MA20 名义 560 天 > 260，一律 ≈ ----
+  api.setChartMode('month');
+  const moBars = api.klineSeriesOf(mLong);
+  assert(moBars.length === 10, `260 天并 10 根月线（${moBars.length}）`);
+  const moMa20 = api.klineMaOf(mLong, 20);
+  assert(moMa20.nominal === 560, `月线 MA20 名义 = 20×28 = 560（${moMa20.nominal}）`);
+  assert(moMa20.arr.length === moBars.length, `月线均线与 K 线等长（${moMa20.arr.length} vs ${moBars.length}）`);
+  // 10 根月线算不出真 MA20（要 20 期）；退回日线窗口 → 实际只有 260 天，必须标 ≈ 并写明
+  assert(moMa20.approx === true && moMa20.window === 260, `月线 MA20 用 260 个交易日、标 ≈（window ${moMa20.window}）`);
+  assert(moMa20.note === '按 260 个交易日计（名义 560）', `月线 MA20 写明实际/名义窗口（${moMa20.note}）`);
+  assert(moMa20.arr[9] !== null, '月线 MA20 末根有值（否则图例里这条线等于不存在）');
+  // 月线 MA5：10 根够 5 期 → 严格并期
+  const moMa5 = api.klineMaOf(mLong, 5);
+  assert(moMa5.approx === false && moMa5.window === 5 && moMa5.arr[9] !== null,
+    `月线 MA5 走严格并期（window ${moMa5.window}）`);
+
+  // ---- 七条均线都进得了绘制流程（桩画布是 noop，只要求不抛异常、能跑到最后）----
+  api.setChartMode('week');
+  api.renderChartMode();
+  let drew = false;
+  try {
+    api.drawChart();
+    drew = true;
+  } catch (e) {
+    drew = false;
+    console.log('    周线绘制抛异常：' + e.message);
+  }
+  assert(drew, '周线七条均线能画完（不抛异常）');
+  assert(/MA5\/10\/20\/30\/60\/120\/250/.test(api.el('chartSub').textContent),
+    `副标题列出全部均线（${api.el('chartSub').textContent}）`);
+
+  // ---- 十字光标：均线一行按 class 上色（CSP 禁内联 style）----
+  api.setChartMode('day');
+  api.setState(stLong);
+  api.dayCrosshair(mLong, { width: 900, height: 320, left: 0, top: 0 }, 400, 100);
+  const tipHtml = api.crosshairHtml();
+  assert(/ma-c5|ma-c\d+/.test(tipHtml), `十字光标带上均线一行（${tipHtml.slice(-160)}）`);
+  assert(!/style=/.test(tipHtml), '均线颜色走 class，不用内联 style（CSP style-src self）');
+
   api.setChartMode('minute');
+  api.setDayBars(STOCK, dayBars);
+  api.setState(stMa);
 }
 
 // ---- 券商 UI：卡片墙 / 我的券商卡 / 席位 / 追保预警 / 提前消息 ----

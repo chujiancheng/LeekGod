@@ -2015,7 +2015,7 @@
       // 周/月线由日线聚合（周 = 每 N 个交易日、月 = 每 4 周），副标题说清口径
       const label = chartMode === 'week' ? '周线' : chartMode === 'month' ? '月线' : '日线';
       const unit = chartMode === 'week' ? ` · 每 ${weekPer()} 个交易日` : chartMode === 'month' ? ' · 每 4 周' : '';
-      sub.textContent = `${m.isIndex ? '大盘指数' : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)`;
+      sub.textContent = `${m.isIndex ? '大盘指数' : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)`;
       return;
     }
     const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
@@ -4988,17 +4988,110 @@
     };
   }
 
-  /** 收盘价均线（MA），不足周期的点返回 null（不画） */
+  /** 收盘价均线（MA），与 bars 逐根对齐，不足周期的点返回 null（不画）。
+   *  period 先取整：调用方算出小数窗口时 `i >= period` 永远不成立，整条线会静默消失 */
   function movingAvg(bars, period) {
+    const p = Math.max(1, Math.round(period));
     const out = new Array(bars.length).fill(null);
     let sum = 0;
     for (let i = 0; i < bars.length; i++) {
       sum += bars[i].close;
-      if (i >= period) sum -= bars[i - period].close;
-      if (i >= period - 1) out[i] = sum / period;
+      if (i >= p) sum -= bars[i - p].close;
+      if (i >= p - 1) out[i] = sum / p;
     }
     return out;
   }
+
+  // K 线均线组：日/周/月线共用（5/10/20/30/60/120/250）。
+  // 颜色避开 K 线自身的红绿（涨跌），免得长均线被误读成方向信号；周期越大线越粗，
+  // 长均线画在最上层不被短均线盖住。与 style.css 的 .ma-c* 一一对应
+  const KLINE_MAS = [
+    { period: 5,   color: '#f0b429' },             // 金
+    { period: 10,  color: '#4c8dff' },             // 蓝
+    { period: 20,  color: '#e879c8' },             // 粉
+    { period: 30,  color: '#a78bfa' },             // 紫
+    { period: 60,  color: '#2ec4b6' },             // 青
+    { period: 120, color: '#9aa7bd' },             // 灰蓝
+    { period: 250, color: '#c0c8d8', width: 1.8 }, // 浅灰
+  ];
+  /** 均线配色 class（十字光标用）：CSP 禁内联 style，颜色只能走样式表 */
+  const maCls = (period) => 'ma-c' + period;
+
+  /**
+   * 周/月线尾部「还没并进任何一期」的日线根数。
+   *
+   * 现在的 `klineSeriesOf` 是把当日也算进当期（当期 K 线带 live 标记），所以这里
+   * 正常返回空数组；留着它是给「未走完的期要不要丢」留口子——真改了那条口径，
+   * 均线窗口必须同步剔除这几根，否则末几根 K 线的均线会取到错位的日线。
+   */
+  function klineLeadBars(m) {
+    if (chartMode === 'day') return [];
+    const all = daySeriesOf(m); // 周/月线模式吃全量日线
+    if (!all.length) return [];
+    const lastPeriodDay = klineSeriesOf(m).reduce((mx, b) => Math.max(mx, b.dayTo || 0), 0);
+    return lastPeriodDay ? all.filter((b) => b.day > lastPeriodDay) : [];
+  }
+
+  /**
+   * K 线某一周期的均线，返回值与 `klineSeriesOf(m)` **按下标对齐**（null = 该根还没有均线）。
+   *
+   * 日线直接按根算。周/月线**在日线上平滑**：MA20(周) = 最近 100 个交易日的收盘均价
+   *（即按交易日平滑的 100 日均线）。理由：周线 MA250 名义要 1750 个交易日、月线 MA120
+   * 要 3360 个，而服务端只存 260 根日线（dailyBarsKeep），严格并期永远算不出来；
+   * 展开成交易日算，价位仍落在价格带上，只是样本比名义周期短（note 写明实际窗口）。
+   * 与严格并期（每期等权）的差别只在期内收盘分布不均时有微差，差得出来（>0.2%）
+   * 或窗口被截短时标 `approx`，图例/光标写 `MA20≈`，不冒充精确值。
+   * @returns {{arr:Array<number|null>, approx:boolean, note:string, window:number, nominal:number}}
+   */
+  function klineMaOf(m, period) {
+    const bars = klineSeriesOf(m);
+    if (chartMode === 'day') {
+      return { arr: movingAvg(bars, period), approx: false, note: '', window: period, nominal: period };
+    }
+    const span = chartMode === 'week' ? weekPer() : weekPer() * 4;
+    const want = Math.max(1, period * span);
+    // 严格并期算得出来（K 线根数够）就用它：每期等权，最贴近「MA20 周线」的本义。
+    // 只有样本不够时才退回日线窗口平滑——否则会被平滑的偏差误标 ≈，白丢精度
+    const strict = movingAvg(bars, period);
+    const strictOk = bars.length >= period && strict[strict.length - 1] != null;
+    // K 线少到画不出趋势（不足 5 根）时一律留空：这时候连「一条线」都不成立，
+    // 用日线平滑硬凑只会给出一根冒充长均线的假线
+    if (bars.length < 5) {
+      return {
+        arr: new Array(bars.length).fill(null),
+        approx: false,
+        note: `需 5 根 K 线，现有 ${bars.length} 根`,
+        window: 0,
+        nominal: want,
+      };
+    }
+    // 预热用全量日线（日线模式下 daySeriesOf 只给 120 根，长均线得靠这里的全量）
+    const raw = dayBars.get(m.stockId) || [];
+    const seq = raw.length ? raw : daySeriesOf(m);
+    const lead = klineLeadBars(m);
+    // 窗口在「已成期的日线」上取：尾部还没并进任何一期的日线不参与，
+    // 否则窗口会吃掉末尾的 lead 根，最后几根 K 线的均线被挤成 null（看着像整条断掉）
+    const body = lead.length ? seq.slice(0, seq.length - lead.length) : seq;
+    const kept = Math.max(1, Math.min(want, body.length));
+    const smooth = movingAvg(body, kept);          // 与 body 同长（日线下标）
+    // 把日线下标的均线映射到 K 线下标：第 k 根 K 线取它那一期最后一根日线的值。
+    // 直接 slice(skip) 是错的——skip 是「未成期的根数」，不是 K 线下标偏移
+    const smoothArr = bars.map((b) => {
+      const iDay = Math.min(body.length - 1, Math.max(0, (b.dayTo || b.day) - 1));
+      const v = smooth[iDay];
+      return v == null ? null : v;
+    });
+    const arr = strictOk ? strict : smoothArr;
+    // 平滑值才有「近似」一说；严格并期永远是精确值
+    const a = strict[strict.length - 1];
+    const b = smoothArr[smoothArr.length - 1];
+    const approx = !strictOk && (kept < want || (a != null && b != null && Math.abs(a - b) > Math.abs(a) * 0.002));
+    // note 说清「实际用了多少个交易日的窗口」，图例/光标据此写 ≈
+    const note = !strictOk && kept < want ? `按 ${kept} 个交易日计（名义 ${want}）` : '';
+    return { arr, approx, note, window: strictOk ? period : kept, nominal: want };
+  }
+
+
 
   /**
    * K 线的 MACD：直接现算，**不做缓存**。
@@ -5012,7 +5105,7 @@
   }
 
   /**
-   * K 线图（日/周/月）：蜡烛 + 成交量 + MA5/MA10 + MACD(12,26,9)。
+   * K 线图（日/周/月）：蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)。
    * 蜡烛按「收 ≥ 开」上色，与分时图同一套 A 股配色（涨红跌绿）；
    * 最后一根是「正在走」的当期 K 线时，在收盘价上点一个空心圈作标记。
    */
@@ -5095,10 +5188,9 @@
       }
     }
 
-    // MA5 / MA10
-    const ma5 = movingAvg(bars, 5);
-    const ma10 = movingAvg(bars, 10);
-    const drawMa = (arr, color) => {
+    // 均线组 MA5/10/20/30/60/120/250（周/月线的长周期转成日线窗口，见 klineMaOf）
+    const maSeries = KLINE_MAS.map((ma) => ({ ...ma, ...klineMaOf(m, ma.period) }));
+    const drawMa = (arr, color, width) => {
       ctx.beginPath();
       let started = false;
       for (let i = 0; i < n; i++) {
@@ -5112,11 +5204,10 @@
       }
       if (!started) return;
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = width || 1.2;
       ctx.stroke();
     };
-    drawMa(ma5, themeC.gold);
-    drawMa(ma10, themeC.blue);
+    for (const ma of maSeries) drawMa(ma.arr, ma.color, ma.width);
 
     // 当期未收盘的标记
     const last = bars[n - 1];
@@ -5174,15 +5265,31 @@
     ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
     ctx.fillStyle = themeC.muted;
     let lx = L.PAD_L + 4;
-    const maV = (arr) => (arr[n - 1] == null ? '--' : arr[n - 1].toFixed(2));
     const head = `${modeLabel} · 共 ${n} 根${last.live ? '（含当期未收盘）' : ''}`;
     ctx.fillText(head, lx, L.PAD_T - 3);
     lx += ctx.measureText(head).width + 12;
-    ctx.fillStyle = themeC.gold;
-    ctx.fillText('MA5 ' + maV(ma5), lx, L.PAD_T - 3);
-    lx += ctx.measureText('MA5 ' + maV(ma5)).width + 12;
-    ctx.fillStyle = themeC.blue;
-    ctx.fillText('MA10 ' + maV(ma10), lx, L.PAD_T - 3);
+    // 只列画得出线的均线：根数不够的那几条不占位置（否则周/月线上半屏全是 --），
+    // 但要说清「有几条没画出来」，别让玩家以为指标漏了
+    let hiddenMa = 0;
+    for (const ma of maSeries) {
+      if (ma.arr[n - 1] == null) {
+        hiddenMa += 1;
+        continue;
+      }
+      const txt = 'MA' + ma.period + (ma.approx ? '≈' : ' ') + ma.arr[n - 1].toFixed(2);
+      const tw = ctx.measureText(txt).width;
+      if (lx + tw > W - L.PAD_R) break; // 排不下就不画，免得溢出右边界
+      ctx.fillStyle = ma.color;
+      ctx.fillText(txt, lx, L.PAD_T - 3);
+      lx += tw + 12;
+    }
+    if (hiddenMa > 0) {
+      const more = `+${hiddenMa} 条样本不足`;
+      if (lx + ctx.measureText(more).width <= W - L.PAD_R) {
+        ctx.fillStyle = themeC.muted;
+        ctx.fillText(more, lx, L.PAD_T - 3);
+      }
+    }
     // MACD 图例（与分时同款，标在 MACD 带左上角）。
     // **根数不足 MACD_MIN_BARS 时不报 DIF/DEA 数值**：那时 EMA26/EMA9 还没收敛，
     // 写出来的数字只是初始化残差（月线只有 4 根时尤其离谱），改标「未预热」。
@@ -5232,6 +5339,19 @@
     const deaV = md.dea[i] || 0;
     // 根数不到预热门槛时给个明确提示：此时 DIF/DEA 是初始化残差，不是 MACD
     const macdWarn = bars.length < MACD_MIN_BARS ? ` <span class="t">（样本 ${bars.length} 根，未预热）</span>` : '';
+    // 均线那一行只列该根有值的（前几根短均线还没值，长均线更是整条没起来）。
+    // 周/月线的均线是日线平滑出来的，窗口被截短时标 ≈（与图例同口径）
+    const maCells = KLINE_MAS.map((ma) => {
+      const got = klineMaOf(m, ma.period);
+      const v = got.arr[i];
+      if (v == null) return '';
+      return `MA${ma.period}${got.approx ? '≈' : ''} <span class="${maCls(ma.period)}">${v.toFixed(2)}</span>`;
+    }).filter(Boolean);
+    const maLine = maCells.length
+      ? `<span class="t">均线</span> ${maCells.join(' ')}` +
+        (maCells.length < KLINE_MAS.length ? ' <span class="t">（其余样本不足）</span>' : '') +
+        '<br>'
+      : '';
     tip.innerHTML =
       `<span class="t">${esc(title)}</span><br>` +
       `开 <b>${fmtP(b.open)}</b> 高 <b>${fmtP(b.high)}</b><br>` +
@@ -5240,11 +5360,14 @@
       `<span class="t">成交量</span> ${fmtVol(b.volume || 0)}<br>` +
       `<span class="t">成交额</span> ${fmtAmount(b.turnover || 0)} · <span class="t">净流入</span> ` +
       `<b class="${cls(b.net)}">${(b.net >= 0 ? '+' : '-') + fmtAmount(Math.abs(b.net || 0))}</b><br>` +
+      maLine +
       `<span class="t">MACD</span> DIF <b class="${cls(difV)}">${difV.toFixed(3)}</b> DEA <b class="${cls(deaV)}">${deaV.toFixed(3)}</b>${macdWarn}`;
     tip.hidden = false;
     const tw = tip.offsetWidth;
-    tip.style.left = Math.min(mx + 14, rect.width - tw - 6) + 'px';
-    tip.style.top = Math.min(my + 14, rect.height - 120) + 'px';
+    // 多了一行均线，提示框可能比画布还高：上下都夹在画布内，别被裁掉半截
+    const th = tip.offsetHeight;
+    tip.style.left = Math.min(mx + 14, Math.max(0, rect.width - tw - 6)) + 'px';
+    tip.style.top = Math.max(4, Math.min(my + 14, rect.height - th - 6)) + 'px';
   }
 
   /** MACD(12,26,9)：DIF=EMA12−EMA26，DEA=DIF 的 EMA9，柱=2×(DIF−DEA) */

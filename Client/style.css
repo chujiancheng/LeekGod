@@ -680,8 +680,18 @@ input { font: inherit; color: inherit; }
   padding: 6px 9px; border-radius: 6px; font-size: 11px;
   font-variant-numeric: tabular-nums; white-space: nowrap; z-index: 5;
   box-shadow: var(--shadow);
+  /* 日线十字光标要多显示一行 7 条均线，允许折行；否则会顶出画布 */
+  max-width: 280px; white-space: normal; line-height: 1.5;
 }
 .chart-tip .t { color: var(--muted); }
+/* 十字光标里的均线数值：与画布上的线同色（画布颜色写在 app.js 的 KLINE_MAS 里，两边要一致） */
+.chart-tip .ma-c5   { color: #f0b429; }
+.chart-tip .ma-c10  { color: #4c8dff; }
+.chart-tip .ma-c20  { color: #e879c8; }
+.chart-tip .ma-c30  { color: #a78bfa; }
+.chart-tip .ma-c60  { color: #2ec4b6; }
+.chart-tip .ma-c120 { color: #9aa7bd; }
+.chart-tip .ma-c250 { color: #c0c8d8; }
 
 /* 分时 / 日线切换：放在图表标题左侧，取代原来的「分时走势」标题 */
 .chart-modes {
