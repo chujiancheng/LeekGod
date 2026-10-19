@@ -1246,6 +1246,8 @@ input { font: inherit; color: inherit; }
 .quote-table .q-code { color: var(--muted); font-size: 12px; letter-spacing: .5px; }
 .quote-table .q-name { font-weight: 600; }
 .quote-table .q-last { font-weight: 700; font-size: 13.5px; }
+/* 市值列：量级数（亿/万亿），用等宽数字对齐，颜色比现价淡一档 */
+.quote-table .q-cap { color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .quote-table .q-act {
   color: var(--blue); font-size: 12px; opacity: 0;
   transition: opacity .15s;

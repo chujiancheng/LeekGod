@@ -352,6 +352,18 @@
     if (v >= 1e4) return (v / 1e4).toFixed(2) + '万元';
     return v.toFixed(2) + '元';
   }
+  /**
+   * 市值（流通市值 / 总市值）：带「万亿」这一档，且**不带「元」后缀**——
+   * 行情表一列里 "20.00亿" 比 "20.00亿元" 省地方，表头已经写明是市值。
+   * 个股流通市值量级 20~45 亿，指数总市值约 290 亿，万亿档是给长牛局留的余量。
+   */
+  function fmtCap(v) {
+    const n = Number(v) || 0;
+    if (n >= 1e12) return (n / 1e12).toFixed(2) + '万亿';
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (n >= 1e4) return (n / 1e4).toFixed(2) + '万';
+    return n.toFixed(0) + '元';
+  }
   function fmtTime(ts, withDate) {
     const d = new Date(ts);
     const p = (n) => String(n).padStart(2, '0');
@@ -1457,12 +1469,28 @@
     $('companyTitle').textContent = lore.title;
     $('companyIntro').textContent = lore.intro;
     const ch = cls(m.change);
+    // 公司资料四件套：发行价 / 流通股本 / 流通市值 / 较发行价。
+    // 全部来自服务端快照（initPrice / floatShares / marketCap），客户端不做二次口径；
+    // 老服务端缺字段时这几格显示 --，不会因为 NaN 把整张卡画崩
+    const float = Number(m.floatShares) || 0;
+    const issue = Number(m.initPrice) || 0;
+    const capNow = m.marketCap != null ? m.marketCap : float * (Number(m.last) || 0);
+    const vsIssue = issue > 0 ? (Number(m.last) / issue - 1) * 100 : null;
     $('companyStats').innerHTML =
       '<div class="cs-item"><label>最新价</label><b class="' + ch + '">' + esc(fmtP(m.last)) + '</b></div>' +
       '<div class="cs-item"><label>涨跌幅</label><b class="' + ch + '">' +
         (m.changePct >= 0 ? '+' : '') + esc(m.changePct.toFixed(2)) + '%</b></div>' +
       '<div class="cs-item"><label>成交量</label><b>' + esc(fmtVol(m.volume)) + '</b></div>' +
-      '<div class="cs-item"><label>成交额</label><b>' + esc(fmtAmount(m.turnover)) + '</b></div>';
+      '<div class="cs-item"><label>成交额</label><b>' + esc(fmtAmount(m.turnover)) + '</b></div>' +
+      '<div class="cs-item"><label title="发行价（开服定价，也是指数基期的分母口径）">发行价</label><b>' +
+        (issue > 0 ? esc(fmtP(issue)) : '--') + '</b></div>' +
+      '<div class="cs-item"><label title="全部登记在 NPC 名下的可交易股本">流通股本</label><b>' +
+        (float > 0 ? esc(fmtVol(float)) : '--') + '</b></div>' +
+      '<div class="cs-item"><label title="流通股本 × 现价，随行情实时变化">流通市值</label><b>' +
+        esc(fmtCap(capNow)) + '</b></div>' +
+      '<div class="cs-item"><label title="现价相对发行价（开服定价）的涨跌幅">较发行价</label><b class="' +
+        (vsIssue == null ? '' : cls(vsIssue)) + '">' +
+        (vsIssue == null ? '--' : (vsIssue >= 0 ? '+' : '') + esc(vsIssue.toFixed(2)) + '%') + '</b></div>';
     $('companyOverlay').classList.remove('hidden');
   }
 
@@ -1871,6 +1899,14 @@
     } else {
       $('bandStat').hidden = true;
     }
+    // 市值：个股是流通市值（流通股 × 现价），指数是成分股合计的总市值。
+    // 老服务端没有 marketCap 时保持 --（不拿 volume 之类瞎凑）
+    $('stCapLabel').textContent = m.isIndex ? '总市值' : '流通市值';
+    $('stCap').textContent = m.marketCap == null ? '--' : fmtCap(m.marketCap);
+    $('stCap').title = m.isIndex
+      ? '全部成分股流通市值合计（成分股现价 × 流通股）'
+      : `流通股 ${fmtVol(m.floatShares)} × 现价 ${fmtP(m.last)}` +
+        (m.initPrice ? `；发行价 ${fmtP(m.initPrice)}，发行市值 ${fmtCap(m.issueCap)}` : '');
     renderClock();
     $('onlineCount').textContent = '在线 ' + (state.online || 0) + ' 人';
   }
@@ -3037,6 +3073,7 @@
         <div class="mcell"><label>成分</label><span>${comps.length}</span></div>
         <div class="mcell"><label>上涨</label><span class="up">${up}</span></div>
         <div class="mcell"><label>下跌</label><span class="down">${down}</span></div>
+        <div class="mcell"><label>总市值</label><span>${fmtCap(idx.marketCap)}</span></div>
         <div class="mcell"><label>成交额</label><span>${fmtAmount(idx.turnover)}</span></div>
       </div>
       <div class="idx-hint">点击查看大盘分时与成分股</div>
@@ -3709,12 +3746,14 @@
     let flat = 0;
     let turnover = 0;
     let volume = 0;
+    let cap = 0;
     for (const m of markets) {
       if (m.change > 0) up += 1;
       else if (m.change < 0) down += 1;
       else flat += 1;
       turnover += m.turnover || 0;
       volume += m.volume || 0;
+      cap += m.marketCap || 0;
     }
     $('homeMarketStats').innerHTML = `
       <div class="mcell"><label>上市股票</label><span>${markets.length}</span></div>
@@ -3723,7 +3762,7 @@
       <div class="mcell"><label>平盘</label><span>${flat}</span></div>
     `;
     $('homeMarketSub').innerHTML =
-      `总成交额 <b>${fmtAmount(turnover)}</b> · 总成交量 <b>${fmtVol(volume)}</b><br>` +
+      `总市值 <b>${fmtCap(cap)}</b> · 总成交额 <b>${fmtAmount(turnover)}</b> · 总成交量 <b>${fmtVol(volume)}</b><br>` +
       `在线 <b>${state.online || 0}</b> 人 · 共 <b>${players.length}</b> 位玩家`;
 
     $('homeSub').innerHTML = [
@@ -3744,6 +3783,7 @@
             <td class="q-last ${cls(idx.change)}">${fmtP(idx.last)}</td>
             <td class="${cls(idx.change)}">${idx.change >= 0 ? '+' : ''}${fmtP(idx.change)}</td>
             <td class="${cls(idx.change)}">${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}%</td>
+            <td class="q-cap" title="成分股总流通市值">${fmtCap(idx.marketCap)}</td>
             <td>${fmtVol(idx.volume)}</td>
             <td>${fmtAmount(idx.turnover)}</td>
             <td class="q-act">查看</td>
@@ -3762,12 +3802,13 @@
             <td class="q-last ${c}">${fmtP(m.last)}</td>
             <td class="${c}">${m.change >= 0 ? '+' : ''}${fmtP(m.change)}</td>
             <td class="${c}">${m.changePct >= 0 ? '+' : ''}${m.changePct.toFixed(2)}%</td>
+            <td class="q-cap" title="流通股 ${fmtVol(m.floatShares)} × 现价 ${fmtP(m.last)}">${fmtCap(m.marketCap)}</td>
             <td>${fmtVol(m.volume)}</td>
             <td>${fmtAmount(m.turnover)}</td>
             <td class="q-act">交易</td>
           </tr>`;
         })
-        .join('') || '<tr><td colspan="9" class="empty">暂无行情</td></tr>');
+        .join('') || '<tr><td colspan="10" class="empty">暂无行情</td></tr>');
 
     const initialCash = state.rules.initialCash || 0;
     const retPct = initialCash > 0 ? ((a.equity - initialCash) / initialCash) * 100 : 0;

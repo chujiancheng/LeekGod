@@ -2013,6 +2013,12 @@ class Market {
       flow: flow.flowSnapshot(this),
       lotSize: this.stock.lotSize,
       floatShares: this.stock.floatShares,
+      // 公司资料（公开信息，客户端档案卡 / 行情列表 / 顶栏直接用）：
+      // initPrice 是发行价（= 开服开盘价，也是指数基期的分母口径），
+      // marketCap 是**实时**流通市值 = 流通股 × 最新价，随行情每帧变
+      initPrice: this.stock.initPrice,
+      marketCap: this.stock.floatShares * this.lastPrice,
+      issueCap: this.stock.floatShares * this.stock.initPrice,
       depth,
       trades: this.trades.slice(0, 30),
       band: this.band(),

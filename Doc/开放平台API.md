@@ -901,6 +901,10 @@ Access-Control-Max-Age: 600
 | `volume` | int | 股 | 当日累计成交量 |
 | `turnover` | number | 元 | 当日累计成交额 |
 | `lotSize` | int | 股 | 一手股数 |
+| `floatShares` | int | 股 | 流通股本（固定，开服全登记在 NPC 名下） |
+| `initPrice` | number | 元 | 发行价（= 开服定价，也是指数基期分母的口径） |
+| `marketCap` | number | 元 | **实时**流通市值 = `floatShares × last`，随行情变 |
+| `issueCap` | number | 元 | 发行市值 = `floatShares × initPrice`（恒定） |
 | `band` | object/null | 元 | `{up, down}` 涨跌停价；无交易日时钟或关闭涨跌停时为 `null` |
 | `auction` | object/null | — | 集合竞价快照，见下 |
 | `flow` | object | — | 当日内外盘，见下 |

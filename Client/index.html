@@ -106,6 +106,7 @@
         <div class="stat"><label>成交量</label><span id="stVol">--</span></div>
         <div class="stat"><label>成交额</label><span id="stAmount">--</span></div>
         <div class="stat" id="bandStat" hidden><label>涨跌停</label><span id="stBand">--</span></div>
+        <div class="stat" id="capStat"><label id="stCapLabel">流通市值</label><span id="stCap">--</span></div>
       </div>
       <div class="top-right">
         <span class="conn-dot" id="connDot" title="连接状态"></span>
@@ -209,7 +210,7 @@
               <thead>
                 <tr>
                   <th>代码</th><th>名称</th><th>走势</th><th>现价</th>
-                  <th>涨跌</th><th>涨跌幅</th><th>成交量</th><th>成交额</th><th></th>
+                  <th>涨跌</th><th>涨跌幅</th><th title="流通股 × 现价（指数行是成分股总市值）">流通市值</th><th>成交量</th><th>成交额</th><th></th>
                 </tr>
               </thead>
               <tbody id="homeQuoteBody"></tbody>

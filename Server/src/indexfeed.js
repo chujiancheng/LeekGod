@@ -24,6 +24,9 @@ class IndexFeed {
     this.stocks = stocks;
     // 开服总流通市值：分母恒定，指数的涨跌幅全部来自分子
     this.baseCap = stocks.reduce((a, s) => a + s.floatShares * s.initPrice, 0);
+    // 成分股合计的**实时**流通市值（= 指数分子 cap），随每 tick 重算；
+    // 顶部展示「总市值」，与个股的 snapshot().marketCap 同口径
+    this.marketCap = this.baseCap;
     this.base = cfg.base;
 
     this.lastPrice = cfg.base;
@@ -112,6 +115,7 @@ class IndexFeed {
     this.innerAmt = innerAmt;
 
     const v = this.roundPrice((this.base * cap) / this.baseCap);
+    this.marketCap = cap; // 总流通市值（成分股现价 × 流通股之和）
     this.lastPrice = v;
     if (v > this.high) this.high = v;
     if (v < this.low) this.low = v;
@@ -168,6 +172,11 @@ class IndexFeed {
       turnover: this.turnover,
       // 全部成分股加总的内外盘与净流入（指数自己没有成交）
       flow: flow.flowSnapshot(this),
+      // 指数没有自己的股本：marketCap / issueCap 都是**成分股合计**（总市值）
+      floatShares: 0,
+      initPrice: 0,
+      marketCap: this.marketCap,
+      issueCap: this.baseCap,
       depth: { bids: [], asks: [] },
       trades: [],
       band: null,
