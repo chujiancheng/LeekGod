@@ -1092,12 +1092,14 @@ input { font: inherit; color: inherit; }
     var(--panel);
 }
 .hero-left { flex: 1; min-width: 0; }
-/* 吉祥物立绘：插在问候语和市场概览之间，二次元主题专属（其余主题 hidden） */
+/* 吉祥物立绘：站问候语与市场概览之间的空档、脚踩面板下边缘（负 bottom margin 抵掉面板下内边距，
+   配合 .panel 的 overflow:hidden 正好齐边不溢出），二次元主题专属（其余主题 hidden） */
 .hero-mascot {
   flex: none;
-  height: 120px;
+  height: 128px;
   align-self: flex-end;
-  border-radius: 12px;
+  margin-bottom: -18px;
+  filter: drop-shadow(0 4px 10px rgba(2, 8, 20, .16));
   pointer-events: none;
   user-select: none;
 }
@@ -1478,6 +1480,13 @@ input { font: inherit; color: inherit; }
 
   /* 市场概览：两列小格 */
   .hero-market { width: 100%; }
+  /* 吉祥物：绝对定位钉在面板左下角、脚踩下边缘，与右侧统计副行共用底部区域，
+     不再自己占一行；统计副行让开左侧 120px 防止文字钻到她身后 */
+  .hero-panel { position: relative; }
+  .hero-mascot { position: absolute; left: 14px; right: auto; bottom: 0; height: 84px; margin: 0; }
+  /* 统计格抬一点：她 84px 的身高不会顶到「上市股票」格 */
+  .market-stats { margin-bottom: 26px; }
+  .market-sub { padding-left: 120px; }
   .market-head { text-align: left; }
   .market-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
   .market-stats .mcell { padding: 8px 2px; }
