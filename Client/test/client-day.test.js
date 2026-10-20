@@ -59,7 +59,14 @@ function mkEl(id) {
     disabled: false,
     title: '',
     value: '',
-    style: {},
+    // CSSOM 桩：代码里一律走 `el.style.x = …` 或 `setProperty`（CSP 禁内联 style 属性），
+    // 两个入口都得能跑，否则 `--rtone` 这类 CSS 变量在测试里就会抛「not a function」
+    style: {
+      _vars: {},
+      setProperty(k, v) { this._vars[k] = String(v); },
+      getPropertyValue(k) { return this._vars[k] || ''; },
+      removeProperty(k) { delete this._vars[k]; },
+    },
     dataset: {},
     classList: {
       add: (c) => cls.add(c),
@@ -174,10 +181,12 @@ src = src.replace(
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall, renderLending,
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
+    renderRealmChip, rulesRealmHtml,
     setIdentity, resetEggStream,
     eggState: () => ({ lastSeq: lastEggSeq, queued: eggQueue.length, busy: eggBusy }),
     eggTimerInfo: () => (eggTimer == null ? null : __timers.get(eggTimer) || null),
     setState: (v) => { state = v; },
+    setRealmLadder: (v) => { realmLadder = v; },
     setBrokers: (m) => { brokerMeta = m; },
     setPicked: (k) => { pickedBroker = k; },
     brokerKeys,
@@ -1293,9 +1302,12 @@ console.log('\n[15] 彩蛋：toast / 横幅 / 队列 / seq 去重与进度卡');
   api.pumpEggs(mkEggs(13, [ev('A03', 13, 'L2', 'common', 'wealth')]));
   assert(api.eggState().queued === 0 && api.el('eggBanner').hidden === true, 'seq 不大于水位的事件被丢弃');
 
-  // ---- 进度卡 ----
+  // ---- 主页卡：主徽章只有一个——境界；彩蛋称号降级成 chips（Doc/头衔方案.md §6.2）----
   const st = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
-  st.rules = Object.assign(st.rules, { milestones: { enabled: true, tone: 'savage' } });
+  st.rules = Object.assign(st.rules, {
+    milestones: { enabled: true, tone: 'savage' },
+    realm: { enabled: true },
+  });
   st.account = Object.assign(st.account, {
     events: mkEggs(13, [], {
       count: 3,
@@ -1309,35 +1321,153 @@ console.log('\n[15] 彩蛋：toast / 横幅 / 队列 / seq 去重与进度卡');
       maxDrawdown: 0.18,
       progress: { id: 'A06', title: '八百万', equity: 8000000, from: 5000000, need: 2770000, pct: 0.0733, reached: false },
     }),
+    realm: {
+      idx: 16,
+      name: '结丹后期',
+      short: '千万身家',
+      honor: '金丹真人',
+      group: 'jindan',
+      equity: 10320000,
+      total: 38,
+      peak: { idx: 17, name: '结丹圆满' },
+      // 峰值权益跟境界段走（彩蛋段那个 peakEquity 是彩蛋自己的水位，两套数互不相干）
+      peakEquity: 13000000,
+      next: { idx: 17, name: '结丹圆满', equity: 13000000, need: 2680000, pct: 0.83 },
+      pct: 0.83,
+      pending: false,
+      dropping: false,
+      changedDay: 12,
+    },
   });
   api.setState(st);
   api.renderEggCard();
   const card = api.el('eggCard');
-  assert(card.hidden === false, '有彩蛋段时卡片显示');
+  assert(card.hidden === false, '有境界段时卡片显示');
   const html = card.innerHTML;
-  assert(html.indexOf('半个千万') >= 0 && html.indexOf('当前称号') >= 0, '展示当前称号（取稀有度最高）');
-  assert(html.indexOf('八百万') >= 0 && html.indexOf('277.00万元') >= 0, '展示下一档与还差多少');
-  assert(html.indexOf('520.00万元') >= 0, '展示峰值权益（水位线）');
+  assert(html.indexOf('结丹后期') >= 0 && html.indexOf('金丹真人') >= 0, '主徽章是境界 + 尊号');
+  assert(html.indexOf('距「结丹圆满」') >= 0 && html.indexOf('268.00万元') >= 0, '修为条展示下一境界与还差多少');
+  assert(html.indexOf('历史最高 · 结丹圆满') >= 0, '展示历史最高境界（名号不跌）');
+  assert(html.indexOf('1300.00万元') >= 0, '展示峰值权益（水位线，吃 realm.peakEquity）');
   assert(html.indexOf('6.2%') >= 0 && html.indexOf('18.0%') >= 0, '展示当前回撤与历史最大回撤');
-  assert(html.indexOf('保本出关') >= 0, '已获得的称号都列出来');
-  assert(html.indexOf('data-w="7"') >= 0, '进度条宽度走 data-w（CSP 禁内联 style）');
+  assert(html.indexOf('里程碑称号') >= 0 && html.indexOf('保本出关') >= 0, 'A 族称号降级为 chips 但仍列出');
+  assert(html.indexOf('data-w="83"') >= 0, '修为条宽度走 data-w（CSP 禁内联 style）');
+  assert(card.style.getPropertyValue('--rtone').indexOf('jindan') >= 0, '境界色走 CSS 变量（CSSOM 不受 CSP 限制）');
 
   // 门槛已达：文案切换成「等收盘确认」
   const st2 = JSON.parse(JSON.stringify(st));
-  st2.account.events.progress = { id: 'A06', title: '八百万', equity: 8000000, from: 5000000, need: 0, pct: 1, reached: true };
+  st2.account.realm.pending = true;
   api.setState(st2);
   api.renderEggCard();
   assert(api.el('eggCard').innerHTML.indexOf('等收盘结算确认') >= 0, '已越过门槛时提示等收盘确认');
 
-  // 服务端关掉彩蛋 / 老服务端没有这个段：卡片隐藏且不报错
+  // 跌境缓冲带：卡片给出"今晚会跌境"的预告
+  const st2b = JSON.parse(JSON.stringify(st));
+  st2b.account.realm.dropping = true;
+  api.setState(st2b);
+  api.renderEggCard();
+  assert(api.el('eggCard').innerHTML.indexOf('道基不稳') >= 0, '踩进缓冲带时提示「道基不稳」');
+
+  // 服务端关掉彩蛋 / 老服务端没有这两个段：卡片隐藏且不报错
   api.setState(mkState(AUCTION_DAY, null));
   api.renderEggCard();
-  assert(api.el('eggCard').hidden === true, '没有 account.events 段（老服务端）时卡片隐藏');
+  assert(api.el('eggCard').hidden === true, '两个段都没有时卡片隐藏');
   const st3 = JSON.parse(JSON.stringify(st));
   st3.rules.milestones = { enabled: false };
+  st3.rules.realm = { enabled: false };
   api.setState(st3);
   api.renderEggCard();
-  assert(api.el('eggCard').hidden === true, '服务端关掉彩蛋时卡片隐藏');
+  assert(api.el('eggCard').hidden === true, '服务端同时关掉彩蛋与境界时卡片隐藏');
+
+  // 老服务端（只有 events、没有 realm）：退回纯彩蛋卡，不报错
+  const st4 = JSON.parse(JSON.stringify(st));
+  delete st4.account.realm;
+  st4.rules.realm = undefined;
+  api.setState(st4);
+  api.renderEggCard();
+  assert(api.el('eggCard').hidden === false && api.el('eggCard').innerHTML.indexOf('当前称号') >= 0, '老服务端退回纯彩蛋卡');
+
+  // 彩蛋关掉、境界开着：称号段与回撤列**整段不渲染**——否则会显示「已获称号 0 个」
+  // 「还没有称号」「回撤 0.0%」，把"功能没开"说成"你一个成就都没拿到、一次都没回撤"
+  const st5 = JSON.parse(JSON.stringify(st));
+  st5.rules.milestones = { enabled: false };
+  delete st5.account.events;
+  api.setState(st5);
+  api.renderEggCard();
+  const h5 = api.el('eggCard').innerHTML;
+  assert(h5.indexOf('结丹后期') >= 0, '彩蛋关掉后境界段照常显示');
+  assert(h5.indexOf('已获称号') < 0 && h5.indexOf('还没有称号') < 0, '彩蛋关掉后不显示称号计数与空态');
+  assert(h5.indexOf('回撤') < 0, '彩蛋关掉后不显示回撤（那两个数来自彩蛋段）');
+  assert(h5.indexOf('峰值') >= 0 && h5.indexOf('1300.00万元') >= 0, '峰值改吃 account.realm.peakEquity');
+
+  // ---- 顶栏境界徽标：只显示已确认境界，pending / dropping 只换样式 ----
+  api.setState(st);
+  api.renderRealmChip();
+  const chip = api.el('whoRealm');
+  assert(chip.hidden === false && chip.innerHTML.indexOf('结丹后期') >= 0, '顶栏徽标显示境界名');
+  assert(chip.className.indexOf('g-jindan') >= 0, '徽标带大境界配色类');
+  assert(chip.title.indexOf('距结丹圆满') >= 0, 'hover 出下一境界差额');
+  api.setState(st2);
+  api.renderRealmChip();
+  assert(api.el('whoRealm').className.indexOf('pending') >= 0, '越过门槛时徽标加 pending 光晕');
+  api.setState(st2b);
+  api.renderRealmChip();
+  assert(api.el('whoRealm').className.indexOf('dropping') >= 0, '缓冲带里徽标换虚线边');
+  api.setState(mkState(AUCTION_DAY, null));
+  api.renderRealmChip();
+  assert(api.el('whoRealm').hidden === true, '没有境界段时徽标隐藏');
+
+  // 外观没变但权益变了：hover 文案必须跟着刷新（不能为了省 DOM 把 title 一起冻住）
+  api.setState(st);
+  api.renderRealmChip();
+  const st6 = JSON.parse(JSON.stringify(st));
+  st6.account.realm.equity = 11000000;
+  st6.account.realm.next.need = 2000000;
+  api.setState(st6);
+  api.renderRealmChip();
+  assert(api.el('whoRealm').title.indexOf('1100.00万元') >= 0, '权益变了、外观没变时 hover 文案照样刷新');
+  assert(api.el('whoRealm').className.indexOf('g-jindan') >= 0, '外观没被反复重写（类名保持）');
+
+  // ---- CSS 接线：`--rtone` 由 app.js 写、样式表必须真的读 ----
+  // 上一版的坑：JS 老老实实 setProperty('--rtone', …)，CSS 里却一条 var(--rtone) 都没有，
+  // DOM 断言全绿、真机上卡片一点境界色都没有。这类"写了没人读"只能靠读样式表拦
+  const cssRealm = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  assert(/\.realm-name\s*\{[^}]*var\(--rtone/.test(cssRealm), '境界名消费 --rtone');
+  assert(/\.realm-honor\s*\{[^}]*var\(--rtone/.test(cssRealm), '尊号消费 --rtone');
+  assert(/\.realm-bar \.mb-bar b\s*\{[^}]*var\(--rtone/.test(cssRealm), '修为条消费 --rtone');
+  assert(/\.egg-banner\.realm\s*\{[^}]*var\(--rtone/.test(cssRealm), '破境横幅左边线消费 --rtone');
+  for (const g of ['mortal', 'lianqi', 'zhuji', 'jindan', 'yuanying', 'huashen', 'lianxu', 'heti', 'dacheng', 'dujie']) {
+    assert(cssRealm.indexOf('.realm-chip.g-' + g + ' {') >= 0, `徽标配色类 g-${g} 有样式`);
+    assert(cssRealm.indexOf('--realm-' + g + ':') >= 0, `token --realm-${g} 已定义`);
+  }
+  assert(!/--realm-[a-z]+:\s*var\(--(red|green)/.test(cssRealm), '境界色不借用涨跌 token（--red / --green）');
+
+  // ---- 规则面板「境界」页：整表吃服务端下发的 rules.realm，一个数字都不写死 ----
+  api.setState(st);
+  api.setRealmLadder({
+    mortal: { key: 'mortal', name: '凡骨', honor: '凡骨', tone: 'mortal' },
+    // 说明文字里的三个数也走服务端下发：改了配置，规则页不许继续说旧值
+    demoteBuffer: 0.05,
+    demoteMaxPerDay: 2,
+    depositCap: 100000000,
+    depositCapTier: '化神圆满',
+    groups: [
+      { key: 'lianqi', name: '炼气期', honor: '炼气士', tone: 'lianqi' },
+      { key: 'jindan', name: '结丹期', honor: '金丹真人', tone: 'jindan' },
+    ],
+    ladder: [
+      { i: 1, group: 'lianqi', name: '炼气一层', short: '初入山门', equity: 900000 },
+      { i: 2, group: 'lianqi', name: '炼气二层', short: '持牌散修', equity: 1000000 },
+      { i: 16, group: 'jindan', name: '结丹后期', short: '千万身家', equity: 10000000 },
+    ],
+  });
+  const rulesHtml = api.rulesRealmHtml();
+  assert(rulesHtml.indexOf('炼气一层') >= 0 && rulesHtml.indexOf('90.00万元') >= 0, '规则页列出境界与门槛');
+  assert(rulesHtml.indexOf('你在这里') >= 0, '当前境界高亮「你在这里」');
+  assert(rulesHtml.indexOf('凡骨') >= 0, '凡骨作为门槛之下的状态单独一行');
+  assert(rulesHtml.indexOf('5%') >= 0 && rulesHtml.indexOf('最多降 2 档') >= 0, '跌境缓冲与降幅上限吃下发值（不写死 3% / 3 档）');
+  assert(rulesHtml.indexOf('1.00亿元') >= 0 && rulesHtml.indexOf('化神圆满') >= 0, '加钱上限与对应档位吃下发值（不写死 1 亿）');
+  api.setRealmLadder(null);
+  assert(api.rulesRealmHtml().indexOf('刷新页面') >= 0, '整表没拉到时给提示而不是空白/报错');
 
   // ---- 横幅与 toast 的落点：两类 fixed 元素撞同一块位置，横幅 z-index 更高 ----
   // 不让位的话，第一条 toast 会被完全盖住——而那正是 pumpEggQueue 刚 toast 出来的 L1 事件，
@@ -2105,6 +2235,16 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
         weekly: { daysPerWeek: 7, feeMul: 0.5, financeBonus: 0.5 },
       },
       milestones: { enabled: true, tone: 'savage' },
+      // 境界整表（首屏才下发）：规则页「境界」靠它渲染，一个门槛数字都不写死
+      realm: {
+        enabled: true,
+        mortal: { key: 'mortal', name: '凡骨', honor: '凡骨', tone: 'mortal' },
+        groups: [{ key: 'lianqi', name: '炼气期', honor: '炼气士', tone: 'lianqi' }],
+        ladder: [
+          { i: 1, group: 'lianqi', name: '炼气一层', short: '初入山门', equity: 900000 },
+          { i: 2, group: 'lianqi', name: '炼气二层', short: '持牌散修', equity: 1000000 },
+        ],
+      },
     });
     rich.account = Object.assign({}, rich.account, { broker: { key: 'huatai', name: '华泰证券' } });
     rich.day = AUCTION_DAY;
@@ -2132,8 +2272,8 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     assert(api.rulesTabOf() === 'start', `默认停在快速上手（实际 ${api.rulesTabOf()}）`);
     assert(/三步上手/.test(body()) && /一份本金/.test(body()), '快速上手讲清了目标与底层设定');
     assert(/10 分 20 秒/.test(body()), '一天时长取 rules.day.totalMs（10 分 20 秒）');
-    assert(api.rulesTabs().length === 7, `七个分类（实际 ${api.rulesTabs().length}）`);
-    assert((api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 7, '分类栏渲染出七个按钮');
+    assert(api.rulesTabs().length === 8, `八个分类（实际 ${api.rulesTabs().length}）`);
+    assert((api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 8, '分类栏渲染出八个按钮');
     assert(/rules-tab on"[^>]*>快速上手/.test(api.rulesNavHtml()), '当前分类高亮');
 
     // ---- 交易规则：手续费 / 冷却 / 锁仓全部跟着 rules 走 ----
@@ -2182,7 +2322,7 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     rich.rules.milestones = { enabled: false };
     api.setState(rich);
     api.renderRules();
-    assert(api.rulesTabs().length === 7 && (api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 6, '关掉彩蛋后「称号」分类自动消失');
+    assert(api.rulesTabs().length === 8 && (api.rulesNavHtml().match(/class="rules-tab/g) || []).length === 7, '关掉彩蛋后「称号」分类自动消失（「境界」仍在）');
     assert(api.rulesTabOf() === 'start', '当前分类失效时回落到第一栏，不留空白页');
 
     // ---- 关闭 ----

@@ -1687,6 +1687,81 @@ input { font: inherit; color: inherit; }
 /* 稀有度四档配色：普通(灰) / 稀有(蓝) / 史诗(紫) / 传说(金)。一条规则管横幅与称号 chip */
 :root { --epic: #a970ff; }
 
+/* ---------- 修仙境界（头衔，Doc/头衔方案.md） ----------
+   九个境界各一条色 token，**一律 color-mix 到 --ink**：深色主题变亮、浅色主题压深，
+   一套值两套主题都读得清（不必给 7 套主题各写 9 条）。
+   **禁用 --red / --green**：这两个是本项目的涨跌语义，拿来当境界色会被读成"这人在涨还是跌"，
+   而境界跟今天是涨是跌毫无关系。 */
+:root {
+  --realm-mortal: color-mix(in srgb, #8a8f98 72%, var(--ink));
+  --realm-lianqi: color-mix(in srgb, #3fae9c 72%, var(--ink));
+  --realm-zhuji: color-mix(in srgb, #4c8dff 68%, var(--ink));
+  --realm-jindan: color-mix(in srgb, #e0a52b 72%, var(--ink));
+  --realm-yuanying: color-mix(in srgb, #a970ff 72%, var(--ink));
+  --realm-huashen: color-mix(in srgb, #e2793a 72%, var(--ink));
+  --realm-lianxu: color-mix(in srgb, #4fc0d8 72%, var(--ink));
+  --realm-heti: color-mix(in srgb, #b9c2d4 72%, var(--ink));
+  --realm-dacheng: color-mix(in srgb, #d2a3ff 72%, var(--ink));
+  --realm-dujie: color-mix(in srgb, color-mix(in srgb, #f0b429 55%, #a970ff) 74%, var(--ink));
+}
+
+/* 顶栏徽标：宽度锁死，否则境界变化会把整行挤得跳一下（同"顶栏数值锁宽"那条坑） */
+.realm-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex: none; min-width: 64px; justify-content: center;
+  font-size: 11.5px; line-height: 1; padding: 4px 8px;
+  border-radius: 999px; border: 0.5px solid currentColor;
+  color: var(--realm-mortal); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.realm-chip[hidden] { display: none; }
+/* 榜单里的小号版：只留短称，跟在名字后面不换行 */
+.realm-chip.sm { min-width: 0; padding: 2px 6px; font-size: 10.5px; margin-left: 6px; vertical-align: 1px; }
+.realm-chip.sm::before { width: 4px; height: 4px; }
+.realm-chip::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor; flex: none;
+}
+/* 盘中已越过下一档：只加一圈光晕，境界本身等收盘确认（跟着 tick 跳会闪成刷屏） */
+.realm-chip.pending { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 20%, transparent); }
+/* 已踩进跌境缓冲带：虚线边 + 压一档亮度，提示"今晚可能掉境" */
+.realm-chip.dropping { border-style: dashed; opacity: .8; }
+.realm-chip.g-mortal { color: var(--realm-mortal); }
+.realm-chip.g-lianqi { color: var(--realm-lianqi); }
+.realm-chip.g-zhuji { color: var(--realm-zhuji); }
+.realm-chip.g-jindan { color: var(--realm-jindan); }
+.realm-chip.g-yuanying { color: var(--realm-yuanying); }
+.realm-chip.g-huashen { color: var(--realm-huashen); }
+.realm-chip.g-lianxu { color: var(--realm-lianxu); }
+.realm-chip.g-heti { color: var(--realm-heti); }
+.realm-chip.g-dacheng { color: var(--realm-dacheng); }
+.realm-chip.g-dujie { color: var(--realm-dujie); }
+/* 窄屏只留大境界一个字（炼/筑/结/元/神/虚/合/乘/劫），否则顶栏放不下 */
+.realm-chip .rc-mini { display: none; }
+@media (max-width: 860px) {
+  .realm-chip { min-width: 0; padding: 4px 6px; }
+  .realm-chip .rc-full { display: none; }
+  .realm-chip .rc-mini { display: inline; }
+}
+
+/* 主页境界卡（改造自彩蛋卡，主徽章只有一个：境界）
+   `--rtone` 由 app.js 用 CSSOM 写在卡片元素上（CSP 禁内联 style 属性）：
+   **这里必须真的消费它**，否则「境界色」只是个写了没人读的变量，卡片永远是 --ink。 */
+.realm-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.realm-name { font-size: 20px; font-weight: 700; letter-spacing: .5px; color: var(--rtone, var(--ink)); }
+.realm-honor {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 0.5px solid currentColor; color: var(--rtone, inherit); opacity: .9;
+}
+.realm-bar { display: flex; align-items: center; gap: 10px; }
+.realm-bar label { flex: none; font-size: 11.5px; color: var(--muted); }
+.realm-bar .realm-need { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.realm-bar .mb-bar b { background: var(--rtone, var(--gold)); }
+.realm-meta { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px; }
+.realm-meta b { color: var(--ink); font-weight: 500; }
+.realm-sub-title { font-size: 11px; color: var(--muted); letter-spacing: .5px; }
+
+
 /* L2 演出横幅：固定定位滑入，不参与文档流（否则它一出现整个页面会往下跳一下） */
 .egg-banner {
   position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
@@ -1725,6 +1800,10 @@ input { font: inherit; color: inherit; }
 .egg-banner.crash .egg-avatar { filter: saturate(.75) brightness(.92); }
 .egg-banner.liquidation .egg-avatar { filter: grayscale(.35); }
 .egg-banner.legend .egg-avatar { border-color: color-mix(in srgb, var(--gold) 60%, transparent); }
+/* 破境 / 跌境横幅：左边线与大境界同色（`--rtone` 由 showEggBanner 用 CSSOM 写上）。
+   缺省回落到 --gold，老客户端或没有该字段的事件也不会变成无色边 */
+.egg-banner.realm { border-left-color: var(--rtone, var(--gold)); }
+.egg-banner.realm .egg-head { color: var(--rtone, var(--gold)); }
 
 /* L1 的 toast 加一档配色（与 ok/err/info 同级）。文字不写死淡金：
    樱花主题的 toast 底色是近白的 --float-bg，淡金压上去等于看不见 */

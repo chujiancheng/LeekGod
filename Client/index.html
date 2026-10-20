@@ -120,6 +120,9 @@
         <span class="clock" id="clock">--:--:--</span>
         <!-- 身份：给人看的是昵称，账号放在 title 里（账号才是登录凭据） -->
         <span class="who" id="whoName" title="账号">--</span>
+        <!-- 修仙境界徽标（Doc/头衔方案.md §6.1）：只显示**收盘已确认**的境界，
+             盘中越过下一档只用光晕提示，不在这里跳 -->
+        <span class="realm-chip" id="whoRealm" hidden></span>
         <button class="ghost-btn" id="nickBtn" title="改昵称">改昵称</button>
         <button class="ghost-btn" id="themeBtn" title="切换主题">主题 · 深夜终端</button>
         <button class="ghost-btn" id="switchBtn" title="切换账号">换号</button>

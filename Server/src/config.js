@@ -1184,6 +1184,121 @@ const config = {
   },
 
   // ------------------------------------------------------------------
+  // 修仙境界（头衔）—— 设计见 Doc/头衔方案.md
+  //
+  // 定位：**观测层的第二块屏幕**。彩蛋回答"你刚做成了什么"（瞬时事件），
+  // 境界回答"你现在是谁"（持续身份）。零数值特权，不回写任何交易状态。
+  //
+  // 三条硬约束：
+  // ① 门槛一律是**收盘权益**（与彩蛋同函数同取整）——两边各算一遍必然差几毛；
+  // ② 判定只在收盘，盘中只做视觉提示（`pending`），否则门槛上横盘会天天闪；
+  // ③ 境界事件**不进 `fired`**（跌境后重新破境是正常玩法，同 id 必须能再播）。
+  realm: {
+    enabled: true,
+    // 跌破门槛的 3% 才算跌境：没有缓冲的话，在门槛上横盘（499.8 万 ↔ 500.2 万）
+    // 会天天跌境/升境来回播
+    demoteBuffer: 0.03,
+    // 单日最多降 3 档：从结丹圆满一天崩到炼气会跨 12 级，徽标一次跳 12 级像 bug；
+    // 限速之后是"一路跌境"的连续剧
+    demoteMaxPerDay: 3,
+    // **自检锚点，不参与判定**：开户即得的那一档（炼气二层 = 初始资金 100 万）。
+    // 首档 90 万压在开户线下，亏一个板也还是修士；`realm.test.js` 断言
+    // `idxOf(account.initialCash) === startIdx`——改了初始资金或阶梯，测试会先拦下来
+    startIdx: 2,
+
+    // 九大境界：尊号 + 配色 token。`tone` 只给前端上色用，与涨跌色无关（禁 --red/--green）
+    groups: [
+      { key: 'lianqi', name: '炼气期', honor: '炼气士', tone: 'lianqi' },
+      { key: 'zhuji', name: '筑基期', honor: '筑基修士', tone: 'zhuji' },
+      { key: 'jindan', name: '结丹期', honor: '金丹真人', tone: 'jindan' },
+      { key: 'yuanying', name: '元婴期', honor: '元婴老祖', tone: 'yuanying' },
+      { key: 'huashen', name: '化神期', honor: '化神大能', tone: 'huashen' },
+      { key: 'lianxu', name: '炼虚期', honor: '炼虚尊者', tone: 'lianxu' },
+      { key: 'heti', name: '合体期', honor: '合体真君', tone: 'heti' },
+      { key: 'dacheng', name: '大乘期', honor: '大乘天尊', tone: 'dacheng' },
+      { key: 'dujie', name: '渡劫期', honor: '渡劫仙人', tone: 'dujie' },
+    ],
+
+    // 38 档，**严格升序**（realm.js 在 require 时校验，配错直接启动失败）。
+    // 档距刻意前密后疏：100 万→225 万 塞 8 档（一档 8~12%，一个正常交易日够跨一档），
+    // 1000 万以上拉到 25~50%（跨一档要一段像样的行情）。
+    // `egg` = 与 A 族发家线**门槛相等**的彩蛋 id：同一天命中时只播境界那条，
+    // 彩蛋仍记 fired 与称号（不丢成就），只是不再单独发一条横幅（§3.2 合并播报）
+    ladder: [
+      { group: 'lianqi', name: '炼气一层', short: '初入山门', equity: 900000 },
+      { group: 'lianqi', name: '炼气二层', short: '持牌散修', equity: 1000000 },
+      { group: 'lianqi', name: '炼气三层', short: '保本出关', equity: 1100000, egg: 'A01' },
+      { group: 'lianqi', name: '炼气四层', short: '小有积蓄', equity: 1220000 },
+      { group: 'lianqi', name: '炼气五层', short: '略懂盘感', equity: 1360000 },
+      { group: 'lianqi', name: '炼气六层', short: '敢上杠杆', equity: 1520000 },
+      { group: 'lianqi', name: '炼气七层', short: '浮盈成习', equity: 1720000 },
+      { group: 'lianqi', name: '炼气八层', short: '翻倍修士', equity: 2000000, egg: 'A03' },
+      { group: 'lianqi', name: '炼气九层', short: '半步筑基', equity: 2250000 },
+      { group: 'zhuji', name: '筑基初期', short: '本金立住', equity: 2600000 },
+      { group: 'zhuji', name: '筑基中期', short: '有人求代码', equity: 3200000 },
+      { group: 'zhuji', name: '筑基后期', short: '三百万俱往', equity: 4000000 },
+      { group: 'zhuji', name: '筑基圆满', short: '半个千万', equity: 5000000, egg: 'A05' },
+      { group: 'jindan', name: '结丹初期', short: '初结金丹', equity: 6500000 },
+      { group: 'jindan', name: '结丹中期', short: '丹成三品', equity: 8200000 },
+      { group: 'jindan', name: '结丹后期', short: '千万身家', equity: 10000000, egg: 'A07' },
+      { group: 'jindan', name: '结丹圆满', short: '金丹大成', equity: 13000000 },
+      { group: 'yuanying', name: '元婴初期', short: '元婴出窍', equity: 20000000, egg: 'A08' },
+      { group: 'yuanying', name: '元婴中期', short: '持股过夜', equity: 26000000 },
+      { group: 'yuanying', name: '元婴后期', short: '不看盘也赚', equity: 34000000 },
+      { group: 'yuanying', name: '元婴圆满', short: '半个小目标', equity: 45000000 },
+      { group: 'huashen', name: '化神初期', short: '神识铺开', equity: 50000000, egg: 'A09' },
+      { group: 'huashen', name: '化神中期', short: '加钱已无用', equity: 65000000 },
+      { group: 'huashen', name: '化神后期', short: '市场记得你', equity: 80000000 },
+      // 1 亿 = 加钱终身上限（`account.deposit.maxLifetime`）：化神之上，钱买不到
+      { group: 'huashen', name: '化神圆满', short: '一个小目标', equity: 100000000, egg: 'A10' },
+      { group: 'lianxu', name: '炼虚初期', short: '气机外溢', equity: 130000000 },
+      { group: 'lianxu', name: '炼虚中期', short: '隔空取物', equity: 180000000 },
+      { group: 'lianxu', name: '炼虚后期', short: '能压盘口', equity: 300000000, egg: 'A11' },
+      { group: 'lianxu', name: '炼虚圆满', short: '一人成军', equity: 450000000 },
+      { group: 'heti', name: '合体初期', short: '人市合一', equity: 600000000 },
+      { group: 'heti', name: '合体中期', short: '半个市场', equity: 800000000 },
+      { group: 'heti', name: '合体后期', short: '能压指数', equity: 1000000000, egg: 'A12' },
+      { group: 'heti', name: '合体圆满', short: '一己之力', equity: 1500000000 },
+      { group: 'dacheng', name: '大乘初期', short: '举目无敌', equity: 2000000000 },
+      { group: 'dacheng', name: '大乘中期', short: '定义行情', equity: 3000000000 },
+      { group: 'dacheng', name: '大乘后期', short: '你就是庄', equity: 4500000000 },
+      { group: 'dacheng', name: '大乘圆满', short: '无需看盘', equity: 6500000000 },
+      // 90 亿 ≈ 全市场流通市值的 31%：理论存在、实际不会有的终点
+      { group: 'dujie', name: '渡劫', short: '一步登天', equity: 9000000000 },
+    ],
+
+    // 破境 / 跌境台词。缺省档位走通用模板（realm.js 里拼，含权益数字）。
+    // 与彩蛋共用 `milestones.tone` 三档基调 + `gentleBelowEquity` 软着陆规则
+    text: {
+      up: {
+        3: '一百一十万。你终于证明这行饭不是纯靠运气——只证明了一部分。',
+        8: '翻倍。翻倍之后最常见的一句话是"我本来还能赚更多"。',
+        10: '筑基了。你的本金第一次不需要向任何人解释。',
+        13: '五百万。半个千万。听起来已经很像个人物了。',
+        14: '金丹成形。从今天起，亏钱也要亏得有排面。',
+        16: '一千万。这个数能让你在饭桌上被问"最近买什么"。',
+        18: '元婴出窍。理论上你可以不看盘了——实际上你一秒看三次。',
+        22: '五千万。加钱已经追不上你了。',
+        25: '一个小目标。猫跪着说的：你就是股神。',
+        28: '三个小目标。你的仓位已经能左右别人的止损线了。',
+        31: '八个亿。全市场十只票，你一个人能买下其中一只的三成。',
+        32: '十个亿。服务器装不下你了。',
+        34: '二十亿。这个数字在本服只存在于理论上，而你把它变成了事实。',
+        38: '九十亿。渡劫成功，或者说——这个市场已经没有你的对手了。',
+      },
+      down: {
+        one: '跌境了。从{from}退回{to}，修为没有白练，钱是真的没了。',
+        many: '一日跌{n}境。修仙界管这叫走火入魔，交易界管这叫加杠杆。',
+        // {equity} 自带单位（万 / 亿 / 元），后面**不要再写"元"**
+        mortal: '道基已碎。你从{from}一路跌回凡骨，还剩 {equity}。',
+      },
+      // 倒欠券商时替换掉"还剩 N 元"（{debt} 是绝对值，负号加了会读成"倒欠 -5 万"）。
+      // 这一条优先于 gentle 软着陆：对倒欠的人说"本金还有机会长出来"是假话
+      mortalDebt: '道基已碎。你从{from}跌成凡骨，还倒欠券商 {debt}。',
+    },
+  },
+
+  // ------------------------------------------------------------------
   // 券商（出身门派）
   //
   // 设计见 Doc/券商方案.md。三条硬约束写在代码里：

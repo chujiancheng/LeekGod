@@ -631,6 +631,10 @@
     if (txt) txt.textContent = ev.text;
     // 稀有度 + 族决定配色（CSS 类，不用内联 style —— CSP 禁内联）
     el.className = 'egg-banner ' + (ev.rarity || 'common') + ' ' + (ev.kind || 'wealth');
+    // 破境 / 跌境横幅按大境界上色（左边线 + 标题）。CSSOM 写变量，不受 CSP 限制；
+    // 非境界事件必须**清掉**上一次留下的 --rtone，否则彩蛋横幅会沿用上一个境界色
+    if (ev.realmGroup) el.style.setProperty('--rtone', 'var(--realm-' + ev.realmGroup + ')');
+    else el.style.removeProperty('--rtone');
     // 位置同样走 CSSOM：横幅让开状态横幅，toast 再让到横幅下沿之外
     // （否则第一条 toast 会被完全盖住——包括 pumpEggQueue 刚 toast 的 L1 事件
     //   和玩家的成交 / 爆仓提醒）
@@ -658,57 +662,110 @@
   }
 
   /** 主页「股神里程碑」卡：当前称号 + 下一档进度条 + 已获得称号 */
+  /**
+   * 主页「境界 · 称号」卡（Doc/头衔方案.md §6.2）：**主徽章只有一个——境界**。
+   * 彩蛋（A 族发家线）的称号降级成下面的 chips：两套称号并排，玩家会看懵
+   * （"我到底是保本出关还是结丹后期？"）。A 族的"下一档还差多少"挪去规则面板讲，
+   * 卡片上只留一个进度条——修为条。
+   *
+   * 老服务端（只有 account.events、没有 account.realm）时退回纯彩蛋卡，不报错。
+   */
   function renderEggCard() {
     const el = $('eggCard');
     if (!el) return;
-    const eggs = state && state.account && state.account.events;
-    const on = !!(state && state.rules && state.rules.milestones && state.rules.milestones.enabled);
-    if (!eggs || !on) {
+    const a = state && state.account;
+    const r = a && a.realm;
+    const eggs = a && a.events;
+    const realmOn = !!(state && state.rules && state.rules.realm && state.rules.realm.enabled);
+    const eggsOn = !!(state && state.rules && state.rules.milestones && state.rules.milestones.enabled);
+    const showRealm = !!(r && r.name && realmOn);
+    const showEggs = !!(eggs && eggsOn);
+    if (!showRealm && !showEggs) {
       el.hidden = true;
       return;
     }
     el.hidden = false;
-    const titles = eggs.titles || [];
-    const cur = eggs.title;
-    const pr = eggs.progress;
-    const rar = { common: '普通', rare: '稀有', epic: '史诗', legend: '传说' };
+    // 境界色走 CSS 变量（CSP 禁内联 style 属性，CSSOM 的 setProperty 不受限）
+    el.style.setProperty('--rtone', 'var(--realm-' + (r && r.group ? r.group : 'mortal') + ')');
 
-    let progressHtml = '<div class="egg-note">十二档全部达成——你已经封神。</div>';
-    if (pr) {
-      const pct = Math.max(2, Math.min(100, Math.round((pr.pct || 0) * 100)));
-      progressHtml = `
-        <div class="egg-goal">
-          <label>下一档「${esc(pr.title)}」 <span class="pfull">${fmtAmount(pr.equity)}</span></label>
-          <i class="mb-bar"><b data-w="${pct}"></b></i>
-          <span class="egg-need">${
-            pr.reached ? '已达门槛，等收盘结算确认' : `还差 ${fmtAmount(pr.need)}`
-          }</span>
+    const rar = { common: '普通', rare: '稀有', epic: '史诗', legend: '传说' };
+    const titles = (eggs && eggs.titles) || [];
+    const dd = eggs ? (Math.max(0, eggs.drawdown || 0) * 100).toFixed(1) : '0.0';
+    const ddm = eggs ? (Math.max(0, eggs.maxDrawdown || 0) * 100).toFixed(1) : '0.0';
+
+    // ---- 境界块 ----
+    let realmHtml = '';
+    if (showRealm) {
+      let barHtml;
+      if (r.next) {
+        const pct = Math.max(2, Math.min(100, Math.round((r.pct || 0) * 100)));
+        const needText = r.pending
+          ? '已达门槛，等收盘结算确认'
+          : `还差 ${fmtAmount(r.next.need)}`;
+        barHtml = `
+          <div class="realm-bar">
+            <label>修为 · 距「${esc(r.next.name)}」</label>
+            <i class="mb-bar"><b data-w="${pct}"></b></i>
+            <span class="realm-need">${needText}</span>
+          </div>`;
+      } else {
+        barHtml = '<div class="egg-note">此界已至尽头——再往上没有境界，只有传说。</div>';
+      }
+      const peakText =
+        r.peak && r.peak.idx > r.idx ? `历史最高 · ${esc(r.peak.name)}` : '已是历史最高';
+      realmHtml = `
+        <div class="realm-top">
+          <span class="realm-name">${esc(r.name)}</span>
+          <span class="realm-honor">${esc(r.honor || '')}</span>
+          <span class="egg-cur-sub">${peakText}</span>
+        </div>
+        ${barHtml}
+        <div class="realm-meta">
+          <span>权益 <b>${fmtAmount(r.equity || 0)}</b></span>
+          <span>峰值 <b>${fmtAmount(r.peakEquity == null ? r.equity || 0 : r.peakEquity)}</b></span>
+          ${showEggs ? `<span>已获称号 <b>${titles.length}</b> 个</span>` : ''}
+          ${r.dropping ? '<span>道基不稳：今晚若还在这儿会跌境</span>' : ''}
+        </div>`;
+    } else if (eggs) {
+      // 老服务端：退回原来的"当前称号"一行
+      const cur = eggs.title;
+      realmHtml = `
+        <div class="egg-top">
+          ${
+            cur
+              ? `<span class="egg-cur ${esc(cur.rarity || 'common')}">${esc(cur.title)}</span>
+                 <span class="egg-cur-sub">当前称号 · ${esc(rar[cur.rarity] || '普通')}</span>`
+              : '<span class="egg-cur-sub">暂无称号</span>'
+          }
         </div>`;
     }
-    const chips = titles.length
-      ? titles
-          .slice()
-          .reverse()
-          .map((t) => `<span class="egg-chip ${esc(t.rarity || 'common')}">${esc(t.title)}</span>`)
-          .join('')
-      : '<span class="empty">还没有称号——先活过今天收盘。</span>';
+
+    // ---- 称号 chips ----
+    // 彩蛋整体关掉时**整段不渲染**：否则会显示"已获称号 0 个 / 还没有称号"，
+    // 像是在说玩家一个成就都没拿到，实际是这个功能没开
+    let chipsHtml = '';
+    if (showEggs) {
+      const chips = titles.length
+        ? titles
+            .slice()
+            .reverse()
+            .map((t) => `<span class="egg-chip ${esc(t.rarity || 'common')}">${esc(t.title)}</span>`)
+            .join('')
+        : '<span class="empty">还没有称号——先活过今天收盘。</span>';
+      chipsHtml = `<div class="realm-sub-title">里程碑称号</div><div class="egg-titles">${chips}</div>`;
+    }
 
     el.innerHTML = `
       <div class="panel-title">
-        <span>股神里程碑</span>
-        <span class="panel-sub">回撤 <b>${(Math.max(0, eggs.drawdown || 0) * 100).toFixed(1)}%</b> · 历史最大 <b>${(Math.max(0, eggs.maxDrawdown || 0) * 100).toFixed(1)}%</b></span>
-      </div>
-      <div class="egg-top">
+        <span>境界 · 称号</span>
         ${
-          cur
-            ? `<span class="egg-cur ${esc(cur.rarity || 'common')}">${esc(cur.title)}</span>
-               <span class="egg-cur-sub">当前称号 · ${esc(rar[cur.rarity] || '普通')}</span>`
-            : '<span class="egg-cur-sub">暂无称号</span>'
+          // 回撤口径来自彩蛋段（peakEquity / maxDrawdown），彩蛋关了就没有这两个数，
+          // 不能写死 0.0%——那会显示成"从未回撤"，是假信息
+          showEggs ? `<span class="panel-sub">回撤 <b>${dd}%</b> · 历史最大 <b>${ddm}%</b></span>` : ''
         }
-        <span class="egg-cur-sub">峰值权益 ${fmtAmount(eggs.peakEquity || 0)} · 已获称号 ${titles.length} 个</span>
       </div>
-      ${progressHtml}
-      <div class="egg-titles">${chips}</div>
+      ${realmHtml}
+      ${chipsHtml}
     `;
     el.querySelectorAll('.mb-bar b[data-w]').forEach((n) => {
       n.style.width = Math.max(2, Math.min(100, Number(n.dataset.w) || 0)) + '%';
@@ -1392,6 +1449,57 @@
   }
 
   /**
+   * 顶栏境界徽标（Doc/头衔方案.md §6.1）。
+   * 只显示**收盘已确认**的境界；盘中越过下一档时加一圈光晕（`pending`），
+   * 跨进跌境缓冲带时换虚线边（`dropping`）——都不在顶栏跳数字。
+   * 窄屏只留大境界一个字，完整名进 title（靠 CSS 切换，不监听 resize）。
+   */
+  const REALM_MINI = {
+    mortal: '凡', lianqi: '炼', zhuji: '筑', jindan: '结', yuanying: '元',
+    huashen: '神', lianxu: '虚', heti: '合', dacheng: '乘', dujie: '劫',
+  };
+  let realmChipSig = '';
+  // 境界整表只在首屏 /api/state 下发（SSE 增量帧 lite 不带）：拿到一次就缓存，
+  // 规则面板从这儿读，所以**不能**直接挂在 state.rules 上——每帧都会被替换掉
+  let realmLadder = null;
+
+  function renderRealmChip() {
+    const el = $('whoRealm');
+    if (!el) return;
+    const r = state && state.account && state.account.realm;
+    const on = !!(state && state.rules && state.rules.realm && state.rules.realm.enabled);
+    if (!r || !on || !r.name) {
+      if (realmChipSig !== 'off') {
+        realmChipSig = 'off';
+        el.hidden = true;
+        el.className = 'realm-chip';
+      }
+      return;
+    }
+    // 只在真的变了才动 DOM：徽标挂在顶栏，每帧重写会拖慢整页（同 renderIdentity 的取舍）。
+    // 但 `sig` 只含"外观"（档位 / 大境界 / 两个状态位）——权益与差额每帧都在变，
+    // 把它们塞进 sig 等于每帧重写 innerHTML。所以下面分成两段：
+    // 外观走 sig 闸门，**title 每帧都拼一次**（纯字符串赋值，一行 DOM 属性，不布局）
+    const sig = [r.idx, r.group, r.pending ? 1 : 0, r.dropping ? 1 : 0].join('|');
+    const changed = sig !== realmChipSig;
+    realmChipSig = sig;
+    if (changed) {
+      el.hidden = false;
+      el.className =
+        'realm-chip g-' + (r.group || 'mortal') + (r.pending ? ' pending' : '') + (r.dropping ? ' dropping' : '');
+      const mini = REALM_MINI[r.group] || (r.name || '').slice(0, 1);
+      el.innerHTML =
+        '<span class="rc-full">' + esc(r.name) + '</span><span class="rc-mini">' + esc(mini) + '</span>';
+    }
+    const parts = [r.name, r.honor].filter(Boolean);
+    if (Number.isFinite(r.equity)) parts.push('权益 ' + fmtAmount(r.equity));
+    if (r.next) parts.push('距' + r.next.name + ' ' + fmtAmount(r.next.need));
+    else parts.push('已在最高境界');
+    if (r.pending) parts.push('已越过门槛，等收盘结算确认');
+    el.title = parts.join(' · ');
+  }
+
+  /**
    * 顶栏身份：显示**昵称**（给人看的），账号放进 title（那才是登录凭据）。
    * 排行榜/股东榜上"我在哪一行"的判定永远用账号，不能用昵称——昵称可重名、可改。
    */
@@ -1400,6 +1508,7 @@
     if (!el) return;
     el.textContent = myNick || me || '--';
     el.title = me ? `账号：${me}（登录凭据，不可改）` : '';
+    renderRealmChip();
   }
 
   /**
@@ -1755,6 +1864,11 @@
 
     state = s;
     lastStateAt = Date.now();
+    // 境界整表只在首屏下发：缓存一份给规则面板（增量帧的 rules.realm 只有 enabled）
+    if (s.rules && s.rules.realm && Array.isArray(s.rules.realm.ladder) && s.rules.realm.ladder.length) {
+      realmLadder = s.rules.realm;
+    }
+    renderRealmChip();
     // 服务端是昵称的权威（别的标签页改过名 / 改名请求刚回来）：跟着它同步顶栏
     if (s.account && s.account.nick && s.account.nick !== myNick) {
       myNick = s.account.nick;
@@ -3035,7 +3149,11 @@
           const openCell = `<span class="${cls(h.change)}">${h.change > 0 ? '+' : ''}${fmtQty(h.change)} 股</span><span class="delta-sub ${cls(h.changePct)}">${h.changePct > 0 ? '+' : ''}${h.changePct.toFixed(2)}pp</span>`;
           return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.account)}" data-nick="${esc(h.name)}">
             <td>${i + 1}</td>
-            <td>${esc(h.name)}${mine ? '（我）' : ''}</td>
+            <td>${esc(h.name)}${mine ? '（我）' : ''}${
+              h.realm && h.realm.idx > 0
+                ? `<span class="realm-chip sm g-${esc(h.realm.group)}" title="${esc(h.realm.honor || '')}">${esc(h.realm.short || h.realm.name)}</span>`
+                : ''
+            }</td>
             <td><span class="tag ${roleCls}">${esc(ROLE_LABEL[h.role] || h.role)}${h.ai ? ' · AI' : ''}</span></td>
             <td>${fmtQty(h.qty)}</td>
             <td>${h.pct.toFixed(2)}%</td>
@@ -3487,9 +3605,14 @@
           ? `<td class="rank-act-cell"><button class="mini-btn rank-pos-btn" type="button"
                data-account="${esc(p.account)}" data-nick="${esc(p.name || p.account)}">持仓</button></td>`
           : '<td class="rank-act-cell"></td>';
+        // 境界只作**附加展示**：不参与排序（排序键永远是权益），也不改行的宽度口径
+        const realmTag =
+          p.realm && p.realm.idx > 0
+            ? `<span class="realm-chip sm g-${esc(p.realm.group)}" title="${esc(p.realm.honor || '')}">${esc(p.realm.short || p.realm.name)}</span>`
+            : '';
         return `<tr${mine ? ' class="row-mine"' : ''}>
           <td>${i + 1}</td>
-          <td>${esc(p.name)}${mine ? '（我）' : ''} ${tag}</td>
+          <td>${esc(p.name)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
         </tr>`;
@@ -4277,6 +4400,56 @@
     );
   }
 
+  /**
+   * 修仙境界（Doc/头衔方案.md §6.3）：整表吃服务端下发的 `rules.realm`，
+   * 前端**一个门槛数字都不写死**（与交易日六段表、券商对照表同一条规矩）。
+   * 整表只在首屏下发，缓存在 `realmLadder`（增量帧的 rules 会被整份替换掉）。
+   */
+  function rulesRealmHtml() {
+    const t = realmLadder;
+    const cur = state && state.account && state.account.realm;
+    if (!t || !Array.isArray(t.ladder) || !t.ladder.length) {
+      return '<div class="rule-lead">境界表还没拉到（首屏才下发整表）——刷新页面即可。</div>';
+    }
+    const honorOf = {};
+    for (const g of t.groups || []) honorOf[g.key] = g.honor;
+    // 说明文字里的 3% / 3 档 / 加钱上限全部吃服务端下发值：
+    // 写死的话改了 `config.realm.demoteBuffer`，规则页就开始说谎
+    const bufPct = Math.round((Number.isFinite(t.demoteBuffer) ? t.demoteBuffer : 0.03) * 100);
+    const maxDrop = Number.isFinite(t.demoteMaxPerDay) ? t.demoteMaxPerDay : 3;
+    const capText = Number.isFinite(t.depositCap)
+      ? `加钱终身上限 ${fmtAmount(t.depositCap)}${t.depositCapTier ? ' = ' + esc(t.depositCapTier) : ''}。再往上，只能靠交易赚。`
+      : '加钱有终身上限。再往上，只能靠交易赚。';
+    const rows = [];
+    const first = t.ladder[0] ? t.ladder[0].equity : 0;
+    rows.push([
+      '<b>凡骨</b>',
+      '凡骨',
+      '&lt; ' + fmtAmount(first),
+      cur && cur.idx === 0 ? '<b>你在这里</b>' : '',
+    ]);
+    for (const tier of t.ladder) {
+      const here = cur && cur.idx === tier.i;
+      rows.push([
+        here ? '<b>' + esc(tier.name) + '</b>' : esc(tier.name),
+        esc(honorOf[tier.group] || ''),
+        '<span class="rule-num">' + fmtAmount(tier.equity) + '</span>',
+        here ? '<b>你在这里</b>' : '',
+      ]);
+    }
+    return (
+      '<div class="rule-lead">境界只看<b>收盘权益</b>，与门派（券商）完全无关：转户不掉境，' +
+        '也不会因为境界高就给你更好的费率。<b>零数值特权，只有排面</b>。</div>' +
+      '<div class="rule-grid">' +
+        '<div class="rule-cell"><b>什么时候判</b><span>只在<b>收盘结算</b>那一刻判一次。盘中越过门槛只给徽标加一圈光晕，不提前宣布。</span></div>' +
+        `<div class="rule-cell"><b>跌境很慢</b><span>要跌破门槛 <b>${bufPct}%</b> 才确认（防止门槛上横盘来回播），且<b>单日最多降 ${maxDrop} 档</b>。</span></div>` +
+        '<div class="rule-cell"><b>名号不跌</b><span>跌境后「历史最高」永久留在主页卡上——修为可以跌，履历不会。</span></div>' +
+        `<div class="rule-cell"><b>钱有尽头</b><span>${capText}</span></div>` +
+      '</div>' +
+      ruleTable(['境界', '尊号', '收盘权益门槛', ''], rows)
+    );
+  }
+
   const RULES_TABS = [
     { key: 'start', label: '快速上手', html: rulesStartHtml },
     { key: 'trade', label: '交易规则', html: rulesTradeHtml },
@@ -4284,6 +4457,12 @@
     { key: 'day', label: '交易日', html: rulesDayHtml },
     { key: 'broker', label: '券商', html: rulesBrokerHtml },
     { key: 'auto', label: '自动化', html: rulesAutoHtml },
+    {
+      key: 'realm',
+      label: '境界',
+      html: rulesRealmHtml,
+      when: (S) => !!(S && S.rules && S.rules.realm && S.rules.realm.enabled),
+    },
     {
       key: 'egg',
       label: '称号',

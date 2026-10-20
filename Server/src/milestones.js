@@ -152,6 +152,10 @@ function emptyState() {
     maxDrawdown: 0,
     dayEvaluated: 0,
     liqDay: 0,
+    // 修仙境界（Doc/头衔方案.md）：与彩蛋共用同一个 JSON 列，**零 schema 变更**。
+    // `realmIdx === null` = 从没判过（新号 / 老档），首次结算时静默落位
+    realmIdx: null,
+    realmDay: 0,
   };
 }
 
@@ -168,6 +172,9 @@ function parse(json) {
   if (typeof json.maxDrawdown === 'number' && json.maxDrawdown > 0) s.maxDrawdown = json.maxDrawdown;
   if (typeof json.dayEvaluated === 'number' && json.dayEvaluated > 0) s.dayEvaluated = Math.floor(json.dayEvaluated);
   if (typeof json.liqDay === 'number' && json.liqDay > 0) s.liqDay = Math.floor(json.liqDay);
+  // 境界：老档没有这两个键 → 保持 null，首次结算静默落位（不播"你已突破"）
+  if (typeof json.realmIdx === 'number' && json.realmIdx >= 0) s.realmIdx = Math.floor(json.realmIdx);
+  if (typeof json.realmDay === 'number' && json.realmDay > 0) s.realmDay = Math.floor(json.realmDay);
   return s;
 }
 
@@ -181,6 +188,8 @@ function serialize(state) {
     maxDrawdown: state.maxDrawdown,
     dayEvaluated: state.dayEvaluated,
     liqDay: state.liqDay,
+    realmIdx: state.realmIdx == null ? null : state.realmIdx,
+    realmDay: state.realmDay || 0,
   });
 }
 
@@ -210,9 +219,24 @@ function textOf(entry, tone) {
 }
 
 /** 事件对象：客户端靠 `seq` 去重（`liquidations` 那种"比数组长度"会在 20 条截断后静默丢事件） */
-function emit(state, entry, ctx) {
-  const max = Math.max(1, (config.milestones || {}).eventQueueMax || 5);
+function emit(state, entry, ctx, opts = {}) {
   state.fired.push(entry.id);
+  if (entry.title) {
+    state.titles.push({ id: entry.id, title: entry.title, rarity: entry.rarity, level: entry.level, day: ctx.day || 0 });
+  }
+  // `quiet` = 合并播报（Doc/头衔方案.md §3.2）：成就照记（fired + 称号），
+  // 但**不占 seq、不进队列**——同一天已经有"破境 · 某某"那条横幅说这件事了
+  if (opts.quiet) return null;
+  return emitTransient(state, entry, ctx);
+}
+
+/**
+ * 只发不收：占一个 `seq` 塞进滚动队列，**不碰 `fired` / `titles`**。
+ * 修仙境界专用（Doc/头衔方案.md §4.5）：境界会跌也会升回来，同一个 id 必须能反复播，
+ * 所以它绝不能进彩蛋那套"一辈子只触发一次"的幂等集合。
+ */
+function emitTransient(state, entry, ctx) {
+  const max = Math.max(1, (config.milestones || {}).eventQueueMax || 5);
   state.seq += 1;
   const ev = {
     id: entry.id,
@@ -223,12 +247,14 @@ function emit(state, entry, ctx) {
     level: entry.level,
     rarity: entry.rarity,
     title: entry.title,
-    text: textOf(entry, toneFor(entry, ctx.equity)),
-    mascot: mascotOf(entry),
+    // 境界自带文案（台词表在 config.realm.text / realm.js 里按基调选），其余走彩蛋文案池
+    text: entry.text || textOf(entry, toneFor(entry, ctx.equity)),
+    mascot: entry.mascot || mascotOf(entry),
   };
-  if (entry.title) {
-    state.titles.push({ id: entry.id, title: entry.title, rarity: entry.rarity, level: entry.level, day: ctx.day || 0 });
-  }
+  if (entry.dir) ev.dir = entry.dir;
+  if (entry.fromIdx != null) ev.realm = { from: entry.fromIdx, to: entry.toIdx };
+  // 大境界 key：客户端据此给横幅左边线上色（用 CSSOM 写 `--rtone`，不走内联 style）
+  if (entry.realmGroup) ev.realmGroup = entry.realmGroup;
   state.events.push(ev);
   // 队列超出上限丢**旧**的：一天跨多档时留下的正好是最高的那几档
   if (state.events.length > max) state.events.splice(0, state.events.length - max);
@@ -286,8 +312,13 @@ function evaluateClose(state, ctx) {
   }
 
   if (day > 0) state.dayEvaluated = day;
+  // `quietIds`：今天已有"破境"横幅代播的 A 族彩蛋（门槛与境界档位对齐的那几个，§3.2）
+  const quiet = new Set(Array.isArray(ctx.quietIds) ? ctx.quietIds : []);
   const events = [];
-  for (const e of hit) events.push(emit(state, e, ctx));
+  for (const e of hit) {
+    const ev = emit(state, e, ctx, { quiet: quiet.has(e.id) });
+    if (ev) events.push(ev);
+  }
   return events;
 }
 
@@ -397,6 +428,8 @@ module.exports = {
   serialize,
   initPeak,
   evaluateClose,
+  emit,
+  emitTransient,
   onLiquidation,
   summary,
   progressOf,

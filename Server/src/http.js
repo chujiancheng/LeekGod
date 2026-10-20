@@ -283,7 +283,8 @@ class SseHub {
     const markets = this.game.marketSnapshots();
     const index = this.game.index.snapshot();
     for (const conn of this.conns) {
-      const state = this.game.stateFor(conn.token, { markets, index });
+      // `lite: true`：增量帧不带境界整表（首屏 /api/state 与 SSE 首帧各带一次，客户端缓存）
+      const state = this.game.stateFor(conn.token, { markets, index, lite: true });
       this.send(conn, 'state', state);
     }
   }

@@ -17,6 +17,7 @@ const { DayCycle } = require('./daycycle');
 const flow = require('./flow');
 const broker = require('./broker');
 const milestones = require('./milestones');
+const realm = require('./realm');
 const { WhaleManager } = require('./llm/whales');
 const { DanmakuSystem } = require('./danmaku');
 
@@ -916,29 +917,49 @@ class Game {
   }
 
   /**
-   * 收盘彩蛋评估：只遍历**玩家**账户（NPC 那 3160 个一个都不扫，逐 tick 标脏是项目禁忌）。
-   * 判定内核只读账户快照，不回写任何交易状态——彩蛋挂了也不能影响一次撮合。
+   * 收盘评估（彩蛋 + 修仙境界）：只遍历**玩家**账户（NPC 那 3160 个一个都不扫，
+   * 逐 tick 标脏是项目禁忌）。判定内核只读账户快照，不回写任何交易状态。
+   *
+   * **境界先判**：它决定今天哪些 A 族彩蛋要走"合并播报"（`quietIds`）——
+   * 同一天既破境又跨过 A 族门槛时只播境界那条，彩蛋照记 fired 与称号（§3.2）。
+   *
    * @param {number} day 刚收盘的那个交易日号
    */
   evaluateMilestones(now, day) {
-    if (!config.milestones || !config.milestones.enabled) return 0;
+    const eggsOn = !!(config.milestones && config.milestones.enabled);
+    const realmOn = !!(config.realm && config.realm.enabled);
+    if (!eggsOn && !realmOn) return 0;
     let fired = 0;
     for (const acc of this.store.players()) {
       if (!acc.milestones) continue;
       // 权益与 stateFor 同函数同取整：`equityOf` + r2，与 serializeAccount 的 equity 逐位相等
       const equity = r2(this.equityOf(acc));
-      const events = milestones.evaluateClose(acc.milestones, {
-        equity,
-        marginUsage: this.marginUsageOf(acc, equity),
-        day,
-        now,
-      });
+      // 境界先判（它只读权益，不依赖彩蛋）
+      const realmRes = realmOn
+        ? realm.evaluateClose(acc.milestones, { equity, day, now })
+        : { events: [], quietIds: [] };
+      const events = eggsOn
+        ? milestones.evaluateClose(acc.milestones, {
+            equity,
+            marginUsage: this.marginUsageOf(acc, equity),
+            day,
+            now,
+            quietIds: realmRes.quietIds,
+          })
+        : [];
+      const realmEvents = realmRes.events || [];
       // **无论有没有发事件都要标脏**：评估本身会原地更新 `peakEquity` / `maxDrawdown` /
-      // `dayEvaluated` / `liqDay`，不落盘的话重启后水位线会退回旧值（真实峰值被后来的
-      // 收盘价重新锚低，B2 族从此漏判）。只遍历玩家，NPC 一个都不碰
+      // `dayEvaluated` / `liqDay` / `realmIdx`，不落盘的话重启后水位线与境界会退回旧值
+      // （真实峰值被后来的收盘价重新锚低，B2 族从此漏判）。只遍历玩家，NPC 一个都不碰
       this.persist?.touch(acc);
-      if (!events.length) continue;
-      fired += events.length;
+      if (!events.length && !realmEvents.length) continue;
+      fired += events.length + realmEvents.length;
+      for (const ev of realmEvents) {
+        logger.info(
+          `[我是股神] 境界 ${acc.name} ${ev.dir === 'up' ? '破境' : '跌境'}「${ev.title}」` +
+            `（第 ${day} 个交易日收盘，权益 ¥${Math.round(equity)}）`
+        );
+      }
       for (const ev of events) {
         logger.info(
           `[我是股神] 彩蛋 ${acc.name} 触发 ${ev.id}「${ev.title}」` +
@@ -1767,6 +1788,12 @@ class Game {
         },
         // 彩蛋开关（客户端据此决定要不要渲染里程碑卡；文案与判定全在服务端）
         milestones: { enabled: !!config.milestones.enabled, tone: config.milestones.tone },
+        // 修仙境界：整表（38 档 ≈ 2.5KB）只在首屏 /api/state 下发，SSE 增量帧靠 `opts.lite` 省掉——
+        // 这份表每 tick 都跟着 rules 重建一遍，全量发等于每秒几 KB 纯冗余。
+        // 增量帧只留 `enabled`：客户端靠它决定要不要渲染徽标 / 卡片 / 规则页签
+        realm: opts.lite
+          ? { enabled: !!config.realm.enabled }
+          : Object.assign({ enabled: !!config.realm.enabled }, realm.ladderForClient()),
       },
       players: stats.players,
       // 券商榜：总榜在 players 里，这里给按券商聚合的一份（§5.3）
@@ -1973,6 +2000,9 @@ class Game {
         equity,
         initialCash: config.account.initialCash,
       }),
+      // 修仙境界（Doc/头衔方案.md）：徽标显示**已确认境界**（收盘判定），
+      // 盘中越过下一档只用 `pending` 提示——跟着 tick 跳会闪成刷屏
+      realm: acc.milestones ? realm.view(acc.milestones, { equity }) : null,
       // 追保预警（§7 彩蛋）：跌破维持线但还没到强平线时给一条通知，
       // 文案随券商风格变（钟信=正式公函体、天疯=没有这一档，破线即全平）
       marginCall: this.marginCallFor(acc, now),
@@ -2113,13 +2143,18 @@ class Game {
     const priceOf = (s) => this.markets.get(s).lastPrice;
     const all = this.store
       .players()
-      .map((a) => ({
-        account: a.name,
-        name: Game.displayName(a),
-        equity: r2(a.equity(priceOf)),
-        broker: a.broker || null,
-        star: a.broker ? broker.starOf(a, a.broker) : 1,
-      }))
+      .map((a) => {
+        const equity = r2(a.equity(priceOf));
+        return {
+          account: a.name,
+          name: Game.displayName(a),
+          equity,
+          broker: a.broker || null,
+          star: a.broker ? broker.starOf(a, a.broker) : 1,
+          // 境界只作附加展示列，**不参与排序**（沿用彩蛋 §8 红线：排序永远是权益）
+          realm: realm.brief(a.milestones, equity),
+        };
+      })
       .sort((x, y) => y.equity - x.equity || x.account.localeCompare(y.account));
     // 组内名次：同一家券商内部再排一次。这是**最有效的软分流**——冷门券商的组内名次
     // 天然更容易靠前，头部玩家的「争榜」动机于是把人往冷门赶（§5.3）
@@ -2456,12 +2491,15 @@ class Game {
       stockName: this.stocksById.get(stockId).name,
       rows: rows.map((h) => {
         const p = prev ? prev.get(h.account) || null : null;
+        // 境界只给**玩家**行（NPC 没有境界）；股东榜是按需接口，30 行算一遍权益无所谓
+        const holder = h.ai ? null : this.store.get(h.account);
         return {
           account: h.account,
           name: h.name,
           role: h.role,
           ai: !!h.ai,
           aiLabel: h.aiLabel || null,
+          realm: holder && !holder.isNPC ? realm.brief(holder.milestones, r2(this.equityOf(holder))) : null,
           qty: h.qty,
           pct: h.pct,
           change: h.change,
