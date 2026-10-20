@@ -47,6 +47,8 @@ class IndexFeed {
     this.haltUntil = 0;
     this.haltReason = '';
     this.components = []; // 最近一次合成的成分明细（客户端展示权重与贡献）
+    // 刚收盘那个交易日的展示定格值（与 Market.closedDay 同口径，见 settleDay）
+    this.closedDay = null;
   }
 
   /**
@@ -144,6 +146,22 @@ class IndexFeed {
           ? this.dayCycle.locate(now).day
           : 0;
     flow.recordDailyBar(this, day, now);
+    // 与 Market.settleDay 同理：昨收滚动、当日量额清零之前，先定格一份
+    // 「刚收盘这一天」的展示值，夜间休市时段快照照它下发（见 snapshot）
+    const prevBase = this.prevClose;
+    this.closedDay = {
+      day,
+      prevClose: prevBase,
+      last: this.lastPrice,
+      open: this.open,
+      high: this.high,
+      low: this.low,
+      volume: this.volume,
+      turnover: this.turnover,
+      flow: flow.flowSnapshot(this),
+      change: r2(this.lastPrice - prevBase),
+      changePct: prevBase ? r2(((this.lastPrice - prevBase) / prevBase) * 100) : 0,
+    };
     this.prevClose = this.lastPrice;
     this.open = this.lastPrice;
     this.high = this.lastPrice;
@@ -155,23 +173,31 @@ class IndexFeed {
 
   /** 与 Market.snapshot 同构的行情快照，客户端可像处理股票一样处理指数 */
   snapshot() {
-    const change = r2(this.lastPrice - this.prevClose);
-    const changePct = this.prevClose ? r2((change / this.prevClose) * 100) : 0;
+    // 夜间休市按「刚收盘这一天」的定格值下发（口径与 Market.snapshot 一致）
+    const dc = this.dayCycle;
+    const night = !!(dc && dc.ok && dc.locate(Date.now()).phase.key === 'night');
+    const cd = night ? this.closedDay : null;
+    const change = cd ? cd.change : r2(this.lastPrice - this.prevClose);
+    const changePct = cd
+      ? cd.changePct
+      : this.prevClose
+        ? r2((change / this.prevClose) * 100)
+        : 0;
     return {
       stockId: this.stockId,
       name: this.stock.name,
       isIndex: true,
       last: this.lastPrice,
-      prevClose: this.prevClose,
-      open: this.open,
-      high: this.high,
-      low: this.low,
+      prevClose: cd ? cd.prevClose : this.prevClose,
+      open: cd ? cd.open : this.open,
+      high: cd ? cd.high : this.high,
+      low: cd ? cd.low : this.low,
       change,
       changePct,
-      volume: this.volume,
-      turnover: this.turnover,
+      volume: cd ? cd.volume : this.volume,
+      turnover: cd ? cd.turnover : this.turnover,
       // 全部成分股加总的内外盘与净流入（指数自己没有成交）
-      flow: flow.flowSnapshot(this),
+      flow: cd ? cd.flow : flow.flowSnapshot(this),
       // 指数没有自己的股本：marketCap / issueCap 都是**成分股合计**（总市值）
       floatShares: 0,
       initPrice: 0,
@@ -193,6 +219,14 @@ class IndexFeed {
       this.open = state.open;
       this.high = state.high;
       this.low = state.low;
+      // 夜间休市展示的「刚收盘这一天」定格值（JSON 列，见 Market.closedDay）
+      if (state.closed_day) {
+        try {
+          this.closedDay = JSON.parse(state.closed_day);
+        } catch {
+          this.closedDay = null;
+        }
+      }
     }
     if (prices && prices.length) {
       this.priceHistory = prices.map((p) => ({ t: p.t, price: p.price, vol: p.vol }));

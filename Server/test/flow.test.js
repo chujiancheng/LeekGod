@@ -233,9 +233,9 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
   g.stop();
 }
 
-console.log('\n[7] 存档版本：v9 起老档一律拒启（NPC 改真名 + 允许跨股，名字既是主键又是流水引用）');
+console.log('\n[7] 存档版本：v8 及更早一律拒启（9 的迁移缺席），v9 老档原地升到 10');
 {
-  assert(SCHEMA_VERSION === 9, `存档表结构版本为 9（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 10, `存档表结构版本为 10（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -250,6 +250,33 @@ console.log('\n[7] 存档版本：v9 起老档一律拒启（NPC 改真名 + 允
   }
   assert(/表结构版本为 2/.test(msg), `版本 2 的旧档被明确拒绝：${msg.slice(0, 40)}…`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
+
+  // 版本 9 的老档**原地升级**到 10：market_state 补出 closed_day 列（NULL = 尚未结算过）。
+  // v9 本身因为「NPC 改真名」没有迁移语句——它之前的 3~8 老档仍然只能拒启
+  const FILE9 = path.join(os.tmpdir(), `gushen-flow-v9-${process.pid}.db`);
+  for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE9 + s, { force: true });
+  const db9 = new Database(FILE9);
+  db9.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE market_state (
+      stock_id TEXT PRIMARY KEY, last_price REAL NOT NULL, prev_close REAL NOT NULL,
+      open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+      volume INTEGER NOT NULL, turnover REAL NOT NULL, short_interest INTEGER NOT NULL,
+      order_seq INTEGER NOT NULL, trade_seq INTEGER NOT NULL,
+      outer_vol INTEGER NOT NULL DEFAULT 0, outer_amt REAL NOT NULL DEFAULT 0,
+      inner_vol INTEGER NOT NULL DEFAULT 0, inner_amt REAL NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db9.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '9')").run();
+  db9.close();
+  const db10 = openDatabase(FILE9);
+  const v9cols = db10.prepare('PRAGMA table_info(market_state)').all().map((c) => c.name);
+  assert(v9cols.includes('closed_day'), '版本 9 → 10 补出了 market_state.closed_day 列');
+  const ver = db10.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+  assert(Number(ver.value) === 10, `升级后版本号写成 10（实际 ${ver.value}）`);
+  db10.close();
+  for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE9 + s, { force: true });
 
   // 版本 3 的老档**同样被拒**：v9（NPC 真实身份）故意没有 8 → 9 的迁移语句，
   // 所以 3~8 的任何老档都走不到"逐级升级"那条路，提示里会给出要删的具体文件。

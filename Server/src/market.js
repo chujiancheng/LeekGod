@@ -85,6 +85,9 @@ class Market {
     // 交易日时钟（见 daycycle.js）。未挂载时退化为「永远处于连续交易」，
     // 等价于引入「天」之前的旧行为——单元测试里的孤立 Market 就走这条路径
     this.dayCycle = null;
+    // 刚收盘那个交易日的展示定格值（见 settleDay / snapshot）：夜间休市期间
+    // 快照按它下发，涨跌幅不会因为昨收已滚动而整屏变 0%。null = 尚未结算过
+    this.closedDay = null;
     // 集合竞价正在撮合中（runAuction 内 → true）：此窗口内禁止风控强平，
     // 因为竞价簿允许买卖价交叉，强平单按交叉价撮合会被一路拉飞
     this._auctionRunning = false;
@@ -484,6 +487,24 @@ class Market {
     const cancelOrders = opts.cancelOrders !== false;
     // 先定格当日日线：此刻今开/高低/成交量额还都是「今天」的，归零之后就再也拼不出来了
     flow.recordDailyBar(this, this.settleDayNo(now, opts), now);
+    // 再定格一份「刚收盘这一天」的展示值：昨收马上要滚动成今天的收盘价，
+    // 当日高低量额与内外盘马上要清零——不先留一份，夜间休市时段快照里的
+    // 涨跌幅/今开/昨收/量额会整屏变 0 或收盘价，看起来像行情坏了。
+    // 真实行情软件收盘后也一直显示当天的涨跌，直到次日竞价才翻页（见 snapshot）
+    const prevBase = this.prevClose;
+    this.closedDay = {
+      day: this.settleDayNo(now, opts),
+      prevClose: prevBase,
+      last: this.lastPrice,
+      open: this.open,
+      high: this.high,
+      low: this.low,
+      volume: this.volume,
+      turnover: this.turnover,
+      flow: flow.flowSnapshot(this),
+      change: r2(this.lastPrice - prevBase),
+      changePct: prevBase ? r2(((this.lastPrice - prevBase) / prevBase) * 100) : 0,
+    };
     this.prevClose = this.lastPrice;
     this.open = this.lastPrice;
     this.high = this.lastPrice;
@@ -2052,22 +2073,32 @@ class Market {
     const depth = seatCfg.enabled
       ? this.depthWithBrokers(levels, seatCfg.depthBrokers || 2)
       : this.book.depthAgg(levels);
-    const change = r2(this.lastPrice - this.prevClose);
-    const changePct = this.prevClose ? r2((change / this.prevClose) * 100) : 0;
+    // 夜间休市（当日已收盘结算、次日集合竞价还没开始）：行情头部按「刚收盘这一天」
+    // 的定格值下发——昨收仍是**前一天**的收盘价，涨跌幅/今开/高低/量额/资金流向
+    // 都是今天真实的值（与真实行情软件收盘后的展示一致）。结算里昨收已滚动、
+    // 当日量额已清零，直接发会整屏 +0.00 / 0.00%。次日竞价阶段 isNight 为 false，
+    // 自然切回「新的一天」口径（昨收 = 昨日收盘，首笔成交前 0%）
+    const cd = this.isNight() ? this.closedDay : null;
+    const change = cd ? cd.change : r2(this.lastPrice - this.prevClose);
+    const changePct = cd
+      ? cd.changePct
+      : this.prevClose
+        ? r2((change / this.prevClose) * 100)
+        : 0;
     return {
       stockId: this.stock.id,
       name: this.stock.name,
       last: this.lastPrice,
-      prevClose: this.prevClose,
-      open: this.open,
-      high: this.high,
-      low: this.low,
+      prevClose: cd ? cd.prevClose : this.prevClose,
+      open: cd ? cd.open : this.open,
+      high: cd ? cd.high : this.high,
+      low: cd ? cd.low : this.low,
       change,
       changePct,
-      volume: this.volume,
-      turnover: this.turnover,
+      volume: cd ? cd.volume : this.volume,
+      turnover: cd ? cd.turnover : this.turnover,
       // 当日内外盘与资金净流入（外盘额 − 内盘额），客户端盘口与日线图都吃它
-      flow: flow.flowSnapshot(this),
+      flow: cd ? cd.flow : flow.flowSnapshot(this),
       lotSize: this.stock.lotSize,
       floatShares: this.stock.floatShares,
       // 公司资料（公开信息，客户端档案卡 / 行情列表 / 顶栏直接用）：

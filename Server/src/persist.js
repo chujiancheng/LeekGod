@@ -84,15 +84,16 @@ class Persister {
       upsertMarket: db.prepare(`
         INSERT INTO market_state
           (stock_id, last_price, prev_close, open, high, low, volume, turnover, short_interest, order_seq, trade_seq,
-           outer_vol, outer_amt, inner_vol, inner_amt, updated_at)
+           outer_vol, outer_amt, inner_vol, inner_amt, closed_day, updated_at)
         VALUES
           (@stock_id, @last_price, @prev_close, @open, @high, @low, @volume, @turnover, @short_interest, @order_seq, @trade_seq,
-           @outer_vol, @outer_amt, @inner_vol, @inner_amt, @updated_at)
+           @outer_vol, @outer_amt, @inner_vol, @inner_amt, @closed_day, @updated_at)
         ON CONFLICT(stock_id) DO UPDATE SET
           last_price = @last_price, prev_close = @prev_close, open = @open, high = @high, low = @low,
           volume = @volume, turnover = @turnover, short_interest = @short_interest,
           order_seq = @order_seq, trade_seq = @trade_seq,
           outer_vol = @outer_vol, outer_amt = @outer_amt, inner_vol = @inner_vol, inner_amt = @inner_amt,
+          closed_day = @closed_day,
           updated_at = @updated_at
       `),
       // 日线：每个交易日结算时记下的那根 K 线（同一天重复结算走覆盖，不追加第二根）
@@ -298,6 +299,7 @@ class Persister {
         outer_amt: m.outerAmt || 0,
         inner_vol: m.innerVol || 0,
         inner_amt: m.innerAmt || 0,
+        closed_day: m.closedDay ? JSON.stringify(m.closedDay) : null,
         updated_at: now,
       });
       const h = m.priceHistory;

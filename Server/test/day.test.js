@@ -339,6 +339,34 @@ console.log('\n[11] 日终结算：昨收滚动、当日高低量额归零、委
 }
 
 // ============================================================
+console.log('\n[11b] 夜间休市快照：涨跌幅按「刚收盘这一天」下发，不整屏归零');
+{
+  const { m, B1, S1 } = fresh();
+  // 时钟锚到「现在」正好落在夜间段：snapshot() 里的 isNight() 走的是真实时钟
+  m.dayCycle = new DayCycle(config.day, Date.now() - P.night);
+  // 上一交易日昨收 20（发行价），今天推到 21 收盘（涨 5%）
+  m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 21.0, now: 1000 });
+  m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 400, price: 19.0, now: 1000, noCooldown: true });
+  m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 900, price: 21.0, now: 1000, noCooldown: true });
+  m.runAuction(P.auction + 30001);
+  m.settleDay(P.closeAuction + 20001, { cancelOrders: true });
+
+  const snap = m.snapshot();
+  assert(snap.prevClose === 20, `夜间快照昨收仍是前一天收盘 ${snap.prevClose}`);
+  assert(snap.change === 1 && snap.changePct === 5, `涨跌 +${snap.change}（+${snap.changePct}%）= 收盘 21 对昨收 20`);
+  assert(snap.open === 21 && snap.high === 21 && snap.low === 21, '今开/最高/最低是今天真实值');
+  assert(snap.volume === 1000, `成交量是今天的 ${snap.volume}（不清零）`);
+  assert(snap.flow && snap.flow.outerVol + snap.flow.innerVol === 1000, '资金流向也是当天的定格值');
+
+  // 次日开盘竞价阶段（isNight 为 false）：切回「新的一天」口径
+  m.dayCycle = new DayCycle(config.day, Date.now() - P.dayMs - P.auction);
+  const snap2 = m.snapshot();
+  assert(snap2.prevClose === 21, `次日快照昨收滚动到 ${snap2.prevClose}`);
+  assert(snap2.change === 0 && snap2.changePct === 0, '次日竞价阶段涨跌幅 0%（首笔成交前）');
+  assert(snap2.open === 21 && snap2.volume === 0, '次日今开/量额已重置');
+}
+
+// ============================================================
 console.log('\n[12] 次日开盘竞价：隔夜跳空');
 {
   const { m, B1, S1, C } = fresh();

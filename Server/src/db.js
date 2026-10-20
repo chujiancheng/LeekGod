@@ -21,7 +21,7 @@ const { logger } = require('./logger');
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -179,6 +179,10 @@ CREATE TABLE IF NOT EXISTS market_state (
   outer_amt      REAL NOT NULL DEFAULT 0,
   inner_vol      INTEGER NOT NULL DEFAULT 0,
   inner_amt      REAL NOT NULL DEFAULT 0,
+  -- 「刚收盘这一天」的展示定格值（JSON：昨收/今开/高低/量额/涨跌幅/资金流向，见
+  -- Market.settleDay）。夜间休市期间快照按它下发，昨收滚动成今日收盘价之后
+  -- 涨跌幅不至于整屏变 0%。可空：NULL = 尚未结算过 / 老档升级上来
+  closed_day     TEXT,
   updated_at     INTEGER NOT NULL
 );
 
@@ -326,10 +330,21 @@ const MIGRATION_8 = `
 ALTER TABLE stock_ledger ADD COLUMN lend_interest_accrued REAL NOT NULL DEFAULT 0;
 `;
 
+/**
+ * 版本 9 → 10 的**原地升级**：market_state 加一列「刚收盘这一天的展示定格值」JSON。
+ *
+ * 只加一个可空列，老档（版本 9）原地升上来即可：NULL 表示「尚未结算过」，
+ * 下一次日终结算就会写上。用途见 Market.settleDay / snapshot——夜间休市期间
+ * 行情头部的涨跌幅按这份数据下发，不再整屏显示 0%。
+ */
+const MIGRATION_10 = `
+ALTER TABLE market_state ADD COLUMN closed_day TEXT;
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支。
 // **9 故意缺席**：NPC 改真名 + 允许跨股，老档的账户名既是主键又是流水引用，迁不动
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;

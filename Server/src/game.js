@@ -338,6 +338,15 @@ class Game {
       market.turnover = m.turnover;
       market.shortInterest = m.short_interest;
       market.orderSeq = Math.max(market.orderSeq, m.order_seq);
+      // 夜间休市展示的「刚收盘这一天」定格值（JSON 列，见 Market.settleDay）：
+      // 不恢复的话，夜间重启后直到次日竞价前的行情头部又会整屏变 0%
+      if (m.closed_day) {
+        try {
+          market.closedDay = JSON.parse(m.closed_day);
+        } catch {
+          market.closedDay = null;
+        }
+      }
       market.priceHistory = mk.prices.map((p) => ({ t: p.t, price: p.price, vol: p.vol }));
       // 当日内外盘累计（外盘+内盘要等于当日成交量，不恢复就会对不上账）与已收盘的日线
       flow.restoreFlow(market, m, mk.bars);
