@@ -252,6 +252,27 @@ src = src.replace(
     rankPosShown: () => !$('rankPosOverlay').classList.contains('hidden'),
     renderPositions, posRowsHtml,
     identity: () => ({ account: me, nick: myNick, token }),
+    // 弹幕表情：渲染节点 + 选择器（面板挂在 body 上，靠 toggle 开合）
+    dmEmoteNode, dmEmoteKeys,
+    dmPacks: () => DM_EMOTE_PACKS,
+    dmPack: () => dmPack,
+    setDmPack,
+    dmEmoteDef,
+    // 测试里临时注册一个系列，验证「以后加系列」这条路是通的（用完不删也不影响别的断言）
+    dmPushPack: (p) => DM_EMOTE_PACKS.push(p),
+    dmPackSaved: () => localStorage.getItem('gushen_dm_pack'),
+    // 把全部系列的 items 摊平成一个对象，方便断言「每个表情都有语义色」
+    dmEmotes: () => {
+      const all = {};
+      for (const p of DM_EMOTE_PACKS) Object.assign(all, p.items);
+      return all;
+    },
+    setEmotePick: (k) => { dmEmotePick = k; syncEmoteBtn(); },
+    emoteBtnText: () => $('dmEmoBtn').textContent,
+    emoteBtnHtml: () => $('dmEmoBtn').innerHTML,
+    emotePadShown: () => !!(dmPad && !dmPad.hidden),
+    toggleEmotePad,
+    emotePadHtml: () => (dmPad ? dmPad.innerHTML : ''),
     accountRe: () => String(ACCOUNT_RE),
     nickRe: () => String(NICK_RE),
     acctKey: () => localStorage.getItem('gushen_account'),
@@ -2479,6 +2500,111 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
 
     // 安全：玩家弹幕一律 textContent，不许拼 HTML
     assert(/el\.textContent = it\.kind === 'player'/.test(js), '玩家弹幕用 textContent 渲染（防注入）');
+
+    // 表情：一套单色线条，服务端只下发 key
+    assert(/\.dm-emote \{/.test(css) && /stroke: currentColor/.test(css),
+      '表情用 currentColor 描边（自动跟着说话人颜色）');
+    // 三处画表情的地方（飘屏 / 面板 / 标题栏按钮）都必须声明 fill:none，
+    // 少一处 path 就会被默认 fill:black 涂成黑块
+    const svgHosts = ['.dm-emote svg', '.dm-emo-pad svg', '.dm-emo svg'].filter((sel) => {
+      const re = new RegExp(sel.replace(/\./g, '\\.') + ' \\{[\\s\\S]{0,180}?\\}');
+      const m = css.match(re);
+      return !(m && /fill: none/.test(m[0]) && /stroke: currentColor/.test(m[0]));
+    });
+    assert(svgHosts.length === 0, `三处表情容器都声明了 fill:none + currentColor（缺：${svgHosts.join(',') || '无'}）`);
+    assert(/\.dm-emo-pad \{[\s\S]{0,80}position: fixed/.test(css),
+      '表情面板 fixed 定位（.panel 是 overflow:hidden，absolute 会被裁掉）');
+    // fixed 坐标只算一次就会飘：缩放（含手机弹键盘）与容器滚动都要重算，
+    // 滚动必须用捕获阶段——输入条在图表容器里，滚的是它而不是 window
+    assert(/window\.addEventListener\('resize', refitEmotePad\)/.test(js),
+      '窗口缩放后面板重定位（fixed 坐标不会自己跟）');
+    assert(/window\.addEventListener\('scroll', refitEmotePad, true\)/.test(js),
+      '滚动时重定位，且用捕获阶段（滚的是图表容器）');
+    // 重算时不能再把面板挪到 -9999 去量尺寸，否则滚动会抖；offsetWidth 不依赖位置
+    assert(/if \(!pad\.style\.left\) \{/.test(js), '只有首次定位才把面板挪出视口量尺寸（重算不抖）');
+    // 下方放不下要真的翻到按钮上方：只夹进视口的话面板会盖住「表」按钮，关都关不掉
+    assert(/below \+ h <= vh - 8 \? below : Math\.max\(8, above\)/.test(js),
+      '下方放不下时翻到按钮上方（不只夹进视口，否则盖住按钮）');
+    const emoKeys = api.dmEmoteKeys();
+    const serverKeys = require(path.join(__dirname, '..', '..', 'Server', 'src', 'danmaku-emotes.js')).KEYS;
+    assert(emoKeys.length >= 16, `客户端表情 ${emoKeys.length} 个`);
+    assert(emoKeys.length === serverKeys.length && serverKeys.every((k) => emoKeys.includes(k)),
+      '客户端表情表覆盖服务端白名单（少一个就红）');
+    const node = api.dmEmoteNode('cry');
+    assert(node && node.className === 'dm-emote', '白名单 key 渲染成 .dm-emote');
+    assert(node && /viewBox="0 0 24 24"/.test(node.innerHTML), '表情是 24×24 的 svg');
+    assert(api.dmEmoteNode('不存在的表情') === null, '未知 key 返回 null（不崩整条弹幕）');
+
+    // 双色：光有 currentColor 描边就是一根灰线，深色终端里太素。
+    // 每个表情必须自带一个语义色，并且真的画进了 svg —— 将来加表情忘了上色会在这里红
+    const emotes = api.dmEmotes();
+    const colorless = Object.keys(emotes).filter((k) => {
+      const def = emotes[k];
+      return !/^#[0-9a-f]{6}$/i.test(def.tone || '') || !/fill="|stroke="#[0-9a-f]{6}"/i.test(def.svg);
+    });
+    assert(colorless.length === 0, `每个表情都有自己的语义色（缺色：${colorless.join(',') || '无'}）`);
+    assert(emotes.chartup.tone !== emotes.chartdown.tone, '涨跌两个表情颜色不同（红涨绿跌）');
+    assert(/fill="#f0464b"/i.test(emotes.chartup.svg) && !/fill="#f0464b"/i.test(emotes.chartdown.svg),
+      '涨是红、跌是绿（别把 A 股配色反过来）');
+
+    // 选择器：开合 + 选中态回显到按钮
+    api.setEmotePick('');
+    assert(api.emoteBtnText() === '表', '没选表情时按钮显示「表」');
+    api.setEmotePick('cry');
+    assert(/viewBox="0 0 24 24"/.test(api.emoteBtnHtml()), '选中后按钮显示那张表情');
+    api.toggleEmotePad(true);
+    assert(api.emotePadShown(), '面板能打开');
+    assert(/data-emo="cry"/.test(api.emotePadHtml()), '面板里是表情按钮（data-emo）');
+    // CSP 是 style-src 'self'，innerHTML 里的 `style="color:…"` 会被浏览器整条拦掉
+    // （线上实测：控制台 "Applying inline style violates…"，面板退成一排同色灰线；
+    //  预览页走 file:// 没有 CSP，所以预览是彩色的、看不出来）
+    assert(!/style="/.test(api.emotePadHtml()), '面板 HTML 里没有内联 style（CSP 会拦掉它）');
+    assert(/\.style\.color = def\.tone/.test(js), '面板配色走 CSSOM（el.style.color），不受 CSP 限制');
+    api.toggleEmotePad(false);
+    assert(!api.emotePadShown(), '面板能收起');
+    api.setEmotePick('');
+
+    // 发送时把 key 一起带上：服务端只认 key，客户端不传就等于白选
+    assert(/apiPost\('\/api\/danmaku', \{ stockId: activeStockId, text: body, emote \}\)/.test(js),
+      '发送请求带上 emote');
+    // 只点了表情没写字时，回车必须给回执；静默 return 会被当成按钮坏了
+    assert(/表情要跟着一句话一起发/.test(js), '只选表情不发文字时给提示（不静默）');
+
+    // 系列（pack）：「经典」是默认系列，协议不变，以后加系列只动两张表
+    const serverMod = require(path.join(__dirname, '..', '..', 'Server', 'src', 'danmaku-emotes.js'));
+    const packs = api.dmPacks();
+    assert(serverMod.DEFAULT_PACK === 'classic' && packs[0].id === 'classic',
+      '默认系列都是 classic（客户端与服务端首项对齐）');
+    assert(Object.keys(serverMod.PACKS).every((id) => packs.some((p) => p.id === id)),
+      '客户端系列覆盖服务端 PACKS（漏一个系列就红）');
+    assert(packs.every((p) => p.id && p.label && Object.keys(p.items).length > 0), '每个系列都有 id/label/至少一个表情');
+    api.toggleEmotePad(true);
+    assert(!/dm-emo-tab/.test(api.emotePadHtml()), '只有一个系列时不渲染 tab 行（一个 tab 的 tab 栏是噪音）');
+    api.toggleEmotePad(false);
+
+    // 临时注册第二个系列：验证 tab 出现、能切、选中项跨系列不丢、未知系列回退
+    api.dmPushPack({
+      id: 'zztest', label: '测试',
+      items: { zzwave: { label: '挥手', tone: '#88ccff', svg: '<path d="M4 12h16"/>' } },
+    });
+    api.toggleEmotePad(true);
+    assert(/dm-emo-tab/.test(api.emotePadHtml()) && /data-pack="zztest"/.test(api.emotePadHtml()),
+      '多系列时出现 tab 行');
+    api.setDmPack('zztest');
+    assert(api.dmPack() === 'zztest', '能切到新系列');
+    assert(/data-emo="zzwave"/.test(api.emotePadHtml()), '面板换成新系列的表情');
+    assert(api.dmPackSaved() === 'zztest', '停在哪一页会记住（localStorage）');
+    api.setEmotePick('cry');
+    assert(api.dmEmoteDef('cry') && api.dmEmoteDef('zzwave'), '跨系列都能查到定义（切页不丢已选表情）');
+    // 切页会重建 innerHTML，选中态必须跟着 HTML 一起拼出来（以前只重建、不补标，切回来就没了）
+    api.setDmPack('classic');
+    assert(/data-emo="cry"[^>]*class="on"/.test(api.emotePadHtml()), '切回原系列后选中态还在（重建不丢高亮）');
+    api.setDmPack('zztest');
+    assert(!/data-emo="zzwave"[^>]*class="on"/.test(api.emotePadHtml()), '新系列里没有选中项时不高亮');
+    api.setEmotePick('');
+    api.setDmPack('不存在的系列');
+    assert(api.dmPack() === 'classic', '未知系列 id 回退默认（别让整块面板空掉）');
+    api.toggleEmotePad(false);
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

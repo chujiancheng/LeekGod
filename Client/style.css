@@ -2070,6 +2070,62 @@ input { font: inherit; color: inherit; }
 }
 .dm-eye.on { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
 .dm-eye:hover { color: var(--ink); }
+/* 表情按钮：没选时显示「表」（跟左边那个「弹」同风格），选中后 JS 换成那张表情 */
+.dm-emo { display: inline-flex; align-items: center; justify-content: center; width: 24px; flex: none; }
+/* 标题栏按钮里的表情：必须和面板/飘屏同一套画法。
+   这条漏了的话 svg 会用默认 fill:black，把每条 path 涂成一块黑 —— 深色底上等于看不见 */
+.dm-emo svg {
+  width: 15px; height: 15px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.15;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.dm-emo.has-pick { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+
+/* 表情面板：fixed 而不是 absolute —— .panel 是 overflow:hidden，
+   从标题栏往下弹会被整个裁掉。位置由 JS 按按钮矩形现算 */
+.dm-emo-pad {
+  position: fixed; z-index: 60;
+  display: block; padding: 6px; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+}
+.dm-emo-pad[hidden] { display: none; }
+/* 一页 6 列（18 个表情正好 3 行）。系列 tab 单独一行，只有超过一个系列时才出现 */
+.dm-emo-grid { display: grid; grid-template-columns: repeat(6, 28px); gap: 2px; }
+.dm-emo-tabs { display: flex; gap: 4px; margin-bottom: 5px; }
+.dm-emo-tab {
+  flex: 1; height: 20px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: var(--muted);
+  font-size: 11px; line-height: 1; letter-spacing: 0; cursor: pointer;
+}
+.dm-emo-tab:hover { color: var(--ink); background: var(--panel-2); }
+.dm-emo-tab.on {
+  color: var(--gold); background: var(--panel-2);
+  border-color: color-mix(in srgb, var(--gold) 45%, transparent);
+}
+.dm-emo-grid button {
+  width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--muted);
+  cursor: pointer; letter-spacing: 0;
+}
+/* 描边色由 JS 现写（`paintEmotePad()` 用 b.style.color = tone），所以这里不能再写 color ——
+   内联优先级高于样式表，写了也不生效。注意**不能**改成 HTML 里的 `style="color:…"`：
+   CSP 是 style-src 'self'，内联 style 属性会被浏览器整条拦掉，面板会退成一排同色的灰线。
+   hover/选中只能改亮度与底 */
+.dm-emo-grid button:hover { background: var(--panel-2); filter: brightness(1.28); }
+.dm-emo-grid button.on {
+  background: var(--panel-2); filter: brightness(1.28);
+  border-color: color-mix(in srgb, var(--gold) 55%, transparent);
+}
+/* 面板里的表情同理：不写 fill:none 就是一堆黑块 */
+.dm-emo-pad svg {
+  width: 17px; height: 17px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.15;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .dm-input {
   width: 118px; height: 22px; padding: 0 8px;
   border: 1px solid var(--line); border-radius: 6px;
@@ -2122,6 +2178,20 @@ input { font: inherit; color: inherit; }
 .dm-hot  { color: var(--tag-hot); }
 .dm-inst { color: var(--tag-whale); }
 .dm-mm   { color: var(--muted); }
+/* 飘屏里的小表情：1.08em 见方，跟文字基线对齐，不把胶囊撑高。
+   描边用 currentColor —— 外轮廓自动跟着说话人的颜色走（散户灰/游资红/大户紫/玩家金）；
+   内部那层语义色（火橙、涨红、韭菜绿）直接写死在 svg 里，不随身份变，
+   这也是为什么不用系统彩色 emoji：12.5px 下会糊成一团脏点 */
+.dm-emote {
+  display: inline-block; width: 1.08em; height: 1.08em;
+  margin-left: 3px; vertical-align: -.17em;
+}
+.dm-emote svg {
+  width: 100%; height: 100%; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.15;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
 /* 玩家自己发的：金色胶囊，一眼能从 NPC 里分出来 */
 .dm-human {
   color: var(--gold); font-weight: 600;

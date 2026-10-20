@@ -289,6 +289,9 @@
               <button type="button" class="dm-eye on" id="dmEye" title="显示 / 隐藏弹幕">弹</button>
               <input class="dm-input" id="dmInput" type="text" maxlength="24"
                      placeholder="说一句…" autocomplete="off" />
+              <!-- 表情：一套双色线条（Client/app.js 的 DM_EMOTE_PACKS，默认「经典」系列），
+                   选中后跟在句尾。服务端只收 key，玩家自己打的 emoji 会被拒并提示用这个按钮 -->
+              <button type="button" class="dm-eye dm-emo" id="dmEmoBtn" title="加个表情">表</button>
             </span>
           </div>
           <div class="chart-wrap">

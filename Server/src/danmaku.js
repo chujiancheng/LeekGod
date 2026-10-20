@@ -17,6 +17,7 @@
  */
 const config = require('./config');
 const text = require('./danmaku-text');
+const emotes = require('./danmaku-emotes');
 const { logger } = require('./logger');
 
 /** 说话人类型的展示序（客户端配色用，服务端只下发 key） */
@@ -34,6 +35,18 @@ const URL_RE = /(https?:\/\/|www\.|\.(com|cn|net|org|xyz)\b|加\s*[vV微]|私\s*
 const WORD_RE = /[\u4e00-\u9fa5a-zA-Z0-9]/;
 /** 同一字符连续 6 次以上（「啊啊啊啊啊啊」「！！！！！！」） */
 const REPEAT_RE = /(.)\1{5,}/;
+/**
+ * emoji 一律不许进正文：表情走白名单 key（见 danmaku-emotes.js），
+ * 不然 24 字的上限拦不住任意图形——一个 ZWJ 序列就能塞进好几个码位。
+ *
+ * 除了象形文字本身，还要拦**组合符**：
+ * - `\uFE0F` 变体选择符、`\u20E3` 键帽、`\u200D` 零宽连接符，单独出现不是图形，
+ *   但 `1️⃣`（数字 + FE0F + 20E3）、`#️⃣` 这类能拼出键帽图形，光看基础字符是数字/井号，
+ *   只拦 `\p{Extended_Pictographic}` 会漏过去；
+ * - 区域指示符 `\u{1F1E6}-\u{1F1FF}`（国旗，不属于 Extended_Pictographic）。
+ * 正常中文文案用不到这三个组合符，宁可拦严一点。
+ */
+const EMOJI_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{20E3}\u{FE0F}\u{200D}]/u;
 
 const r0 = (v) => Math.round(v);
 
@@ -156,9 +169,10 @@ class DanmakuSystem {
 
   /**
    * 玩家主动发一条弹幕 —— 由 `/api/danmaku` 调用。
+   * @param {string} [emote] 表情 key（白名单内，见 danmaku-emotes.js）；空 = 不带表情
    * @returns {{ok:boolean, error?:string, item?:object}}
    */
-  postPlayer(acc, stockId, raw, now = Date.now()) {
+  postPlayer(acc, stockId, raw, now = Date.now(), emote) {
     const pcfg = this.cfg.player || {};
     if (!this.cfg.enabled || pcfg.enabled === false) return { ok: false, error: '弹幕已关闭' };
     if (!acc) return { ok: false, error: '请先登录' };
@@ -170,10 +184,20 @@ class DanmakuSystem {
     if ([...body].length > maxLen) return { ok: false, error: `最多 ${maxLen} 个字` };
     const low = body.toLowerCase();
     if (BANNED.some((w) => low.includes(w))) return { ok: false, error: '这句话不太合适' };
+    // emoji 只能走表情按钮：正文里带图形会绕过 24 字上限，把任意图形塞进飘屏层。
+    // 判在「纯符号」之前——不然只发一串表情会得到「这句话不太合适」，
+    // 玩家看了不知道该怎么办；这里要明确告诉他用表情按钮
+    if (EMOJI_RE.test(body)) return { ok: false, error: '表情请用输入框旁的表情按钮' };
     // 导流与刷屏：URL / 纯符号 / 同一字符连刷（「啊啊啊啊啊啊」）一律拒。
     // 命中都不回显命中了哪个词——不给试探留信号
     if (URL_RE.test(body) || !WORD_RE.test(body) || REPEAT_RE.test(body)) {
       return { ok: false, error: '这句话不太合适' };
+    }
+    // 表情 key 只认白名单。传了不存在的 key 直接拒——静默丢弃会让客户端以为显示成功
+    let emoteKey = '';
+    if (emote != null && emote !== '') {
+      if (!emotes.isKey(emote)) return { ok: false, error: '没有这个表情' };
+      emoteKey = emote;
     }
 
     const last = this.playerSent.get(acc.name) || 0;
@@ -206,6 +230,7 @@ class DanmakuSystem {
       kind: 'player',
       type: 'human',
       text: body,
+      ...(emoteKey ? { emote: emoteKey } : null),
       from: String(acc.nick || acc.name || '玩家').slice(0, 8),
     });
     return { ok: true, item };
@@ -395,12 +420,15 @@ class DanmakuSystem {
     this.accLast.set(who.acc.name, now);
 
     const isEvent = !!(opts.force && scene === 'liquidation');
+    // 表情：机构/自营恒为 null（见 danmaku-emotes.js 的 FORMAL_TYPES）
+    const emote = opts.emote === undefined ? emotes.pick(scene, who.type, cfg.emoteChance) : opts.emote;
     return this._push({
       t: now,
       stockId,
       kind: isEvent ? 'event' : 'npc',
       type: who.type,
       text: txt,
+      ...(emote ? { emote } : null),
       // 事件级才带成交价：P1 的 L2 锚点要按 (t, price) 钉点，闲聊没有落点可言
       ...(isEvent ? { price: this._lastPrice(stockId) } : null),
     });
@@ -468,12 +496,16 @@ class DanmakuSystem {
       if (!speaker || !txt) return;
       this.lastGlobalAt = now;
       this.accLast.set(speaker.acc.name, now);
+      // 旁观者的表情跟着「被评论的事」走（有人抄底 → 火/盯，有人割肉 → 汗/哭），
+      // 不是跟着说话人的处境走——这条不是他的情绪
+      const emote = emotes.pick(q.scene, speaker.type, cfg.emoteChance);
       this._push({
         t: now,
         stockId: q.stockId,
         kind: 'npc',
         type: speaker.type,
         text: txt,
+        ...(emote ? { emote } : null),
         // 客户端据此给这条加一点点视觉区分（左侧亮边），但协议里**没有**是谁
         flag: 'playerB',
       });

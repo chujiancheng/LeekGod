@@ -955,6 +955,12 @@ const config = {
     accGapMs: 600000,
     // 每次触发 tick 真的开口的概率：不是每 1.5 秒都必说一句，否则像节拍器
     speakChance: 0.55,
+    // 一条弹幕带表情的概率。别调到 1：满屏都是脸会比没有更吵，
+    // 而且「他终于平静了」这种话本来就不该配表情（§3.8）。机构/自营恒不带，见 danmaku-emotes.js
+    emoteChance: 0.55,
+    // NPC 能从哪些表情系列里挑。默认只有「经典」；在 danmaku-emotes.js 的 PACKS 里
+    // 登记新系列后，把它的 id 加进来才会被抽到（玩家手选不受此限制，不看这个开关）
+    emotePacks: ['classic'],
     // 午休 / 夜间密度减半：这两个阶段没有新成交，说太密就像在念稿子（方案 §2.4）。
     // 停牌直接不生成，那是 tick 传进来的 halted，不在这里配
     quietPhases: ['lunch', 'night'],

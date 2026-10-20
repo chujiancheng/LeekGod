@@ -342,7 +342,8 @@ section('[11b] 玩家弹幕内容闸门');
 
 section('[12] item 字段白名单（不剧透 / 不泄露玩家身份）');
 {
-  const ALLOWED = new Set(['id', 't', 'stockId', 'kind', 'type', 'text', 'flag', 'from']);
+  // emote 是白名单 key（客户端画成单色 SVG），price 只在 event 级出现（L2 锚点用）
+  const ALLOWED = new Set(['id', 't', 'stockId', 'kind', 'type', 'text', 'flag', 'from', 'emote', 'price']);
   const dm = freshDm();
   const p = mkAcc('p9', 'player', false);
   dm.onPlayerAction(p, 'buy', S1.id, BIG * 2, 1000, 1000, null);
@@ -354,6 +355,60 @@ section('[12] item 字段白名单（不剧透 / 不泄露玩家身份）');
   const raw = JSON.stringify(pb || {});
   assert(!raw.includes('p9'), 'playerB 的 payload 里搜不到玩家账号/昵称');
   assert(!/fairValue|force|intent|llmPlan/.test(raw), 'payload 不含任何内幕字段');
+}
+
+// ---------------- ⑫b 表情 ----------------
+
+section('[12b] 表情（白名单 key · 情境映射 · 玩家侧）');
+{
+  const emotes = require('../src/danmaku-emotes');
+  const KEYS = emotes.KEYS;
+  assert(KEYS.length >= 16, `表情池 ${KEYS.length} 个`);
+  assert(new Set(KEYS).size === KEYS.length, 'key 无重复');
+  const strayKeys = [];
+  for (const [scene, pool] of Object.entries(emotes.SCENE_POOL)) {
+    for (const k of pool) if (!emotes.isKey(k)) strayKeys.push(`${scene}:${k}`);
+  }
+  assert(strayKeys.length === 0, `情境池里的 key 都在白名单内${strayKeys.length ? '：' + strayKeys.join(',') : ''}`);
+  assert(Object.keys(emotes.SCENE_POOL).length >= 5, '至少覆盖 5 个情境');
+
+  // 机构 / 自营恒不带：chance=1 也不给（「暂无观点 🙂」不是研报）
+  assert(emotes.pick('win', 'inst', 1) === null && emotes.pick('win', 'mm', 1) === null,
+    '机构与自营不发表情（chance=1 也不给）');
+  assert(emotes.pick('win', 'small', 0) === null, 'chance=0 时不带表情');
+  const winPick = emotes.pick('win', 'small', 1);
+  assert(emotes.poolOf('win').includes(winPick), `chance=1 时给的是 win 池里的（${winPick}）`);
+  assert(emotes.pick('没登记的场景', 'small', 1) === null, '未登记情境不给表情（不瞎猜）');
+
+  // 真跑一段：生成出来的 emote 必须合法，且概率开关真的生效
+  const dm = freshDm();
+  dm.cfg.speakChance = 1;
+  dm.cfg.emoteChance = 1;
+  dm.noteWatch(S1.id, 0);
+  for (let t = 0; t < 120000; t += 700) dm.step(t);
+  const all = dm.items;
+  assert(all.length > 0, `两分钟生成了 ${all.length} 条`);
+  assert(all.every((x) => x.emote == null || KEYS.includes(x.emote)), '下发的 emote 都在白名单内');
+  assert(all.filter((x) => x.emote).length >= Math.floor(all.length / 2),
+    `emoteChance=1 时过半带表情（实际 ${all.filter((x) => x.emote).length}/${all.length}）`);
+
+  // 玩家侧：白名单 key 直接透传；不存在的 key 与正文里的 emoji 都拒
+  const p = mkAcc('pm1', 'player', false);
+  const okKey = dm.postPlayer(p, S1.id, '这票我熟', 200000, 'cry');
+  assert(okKey.ok && okKey.item && okKey.item.emote === 'cry', '玩家可以带一个白名单表情');
+  const badKey = dm.postPlayer(p, S1.id, '再来一句', 210000, 'not-a-face');
+  assert(!badKey.ok && /表情/.test(badKey.error), '不存在的表情 key 被拒');
+  const emojiText = dm.postPlayer(p, S1.id, '涨了😭', 220000, '');
+  assert(!emojiText.ok, '正文里贴 emoji 被拒（否则绕得过 24 字上限）');
+  // 键帽 `1️⃣` 的基础字符是数字，只拦 \p{Extended_Pictographic} 会漏过去（要连组合符一起拦）
+  const keycap = dm.postPlayer(p, S1.id, '1️⃣', 240000, null);
+  assert(!keycap.ok && /表情/.test(keycap.error || ''), '键帽 emoji（1️⃣）被拒，且提示用表情按钮');
+  // 纯表情正文要明确指向表情按钮；判在「纯符号」之后会得到「这句话不太合适」，玩家不知道该怎么办
+  const pureEmoji = dm.postPlayer(p, S1.id, '😭😭', 250000, null);
+  assert(!pureEmoji.ok && /表情按钮/.test(pureEmoji.error || ''),
+    '纯表情正文的提示是用表情按钮（不是「不太合适」）');
+  const plain = dm.postPlayer(p, S1.id, '干脆不带表情', 260000, null);
+  assert(plain.ok && plain.item && plain.item.emote === undefined, '不带表情时 item 里没有 emote 键');
 }
 
 // ---------------- ⑥ 集成：真实撮合链路 ----------------
@@ -401,7 +456,52 @@ section('[13] 集成：execute → 弹幕 → stateFor');
   assert(pr.ok, 'sendDanmaku 端到端可用');
   const st2 = g.stateFor(tk);
   assert(st2.danmaku.items.some((x) => x.kind === 'player' && x.from === '弹幕测试'), '玩家弹幕带昵称下发');
+
+  // 参数顺序：emote 排在 now 之后。老签名 (…, now) 不能被当成表情——测试/脚本控时钟全靠它
+  const t0 = Date.now() + 60000; // 推进到冷却窗外，避免被上一条挡住
+  const oldSig = g.sendDanmaku(tk, STOCK.id, '老签名照样发', t0);
+  assert(oldSig.ok, '老签名 sendDanmaku(…, now) 仍然可用（emote 排在 now 之后）');
+  const withEmote = g.sendDanmaku(tk, STOCK.id, '带个表情', t0 + 6000, 'cry');
+  assert(withEmote.ok && withEmote.item && withEmote.item.emote === 'cry',
+    'sendDanmaku(…, now, emote) 把表情透传到 item');
 }
+
+// ---------------- [14] 表情系列（pack） ----------------
+function suite14() {
+  console.log('\n[14] 表情系列（pack）');
+  const emote = require('../src/danmaku-emotes');
+
+  assert(!!emote.PACKS.classic, 'classic 是登记在册的系列');
+  assert(emote.DEFAULT_PACK === 'classic', '默认系列 = classic');
+  assert(emote.KEYS.length > 0 && emote.KEYS.every((k) => emote.isKey(k)), '白名单里的 key 都能过 isKey');
+
+  // key 全局唯一：以后加系列时撞名，玩家选的 key 会指向另一张图，必须机械挡住
+  const allKeys = Object.values(emote.PACKS).flatMap((p) => p.keys);
+  assert(allKeys.length === new Set(allKeys).size, `key 全局唯一（${allKeys.length} 个，无重名）`);
+  assert(allKeys.length === emote.KEYS.length, 'KEYS 等于所有系列 key 的并集');
+
+  assert(emote.packOf('cry') === 'classic', 'packOf 能查到 key 的归属');
+  assert(emote.packOf('不存在的表情') === null, '未知 key 的归属是 null');
+
+  // 系列开关：默认只开 classic
+  assert([...emote.enabledPacks()].join(',') === 'classic', '默认只启用 classic');
+  assert(emote.poolOf('deepLoss').every((k) => emote.packOf(k) === 'classic'),
+    '候选池只包含启用系列的表情');
+
+  // 配置写错 / 写空时不能把 NPC 弄哑：回退默认系列
+  const before = config.danmaku.emotePacks;
+  config.danmaku.emotePacks = [];
+  assert([...emote.enabledPacks()].join(',') === 'classic', '配置为空时回退默认系列');
+  assert(emote.poolOf('win').length > 0, '配置为空时候选池仍然非空（别把弹幕弄成哑巴）');
+  config.danmaku.emotePacks = ['不存在的系列'];
+  assert([...emote.enabledPacks()].join(',') === 'classic', '配置写了未知系列时回退默认');
+  config.danmaku.emotePacks = before;
+
+  // 未登记的情境仍然给 null，不是空数组
+  assert(emote.poolOf('no-such-scene') === null, '未登记情境返回 null');
+}
+
+suite14();
 
 // ---------------- 汇总 ----------------
 console.log(`\n通过 ${passed} 项，失败 ${failed} 项`);

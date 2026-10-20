@@ -554,7 +554,7 @@ function createServer(game, options) {
       if (p === '/api/danmaku' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.write)) return;
         const body = (await readBody(req)) || {};
-        const r = game.sendDanmaku(bearerToken(req), body.stockId, body.text);
+        const r = game.sendDanmaku(bearerToken(req), body.stockId, body.text, Date.now(), body.emote);
         return json(res, r.ok ? 200 : 400, r);
       }
 

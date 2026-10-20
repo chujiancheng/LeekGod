@@ -2123,6 +2123,206 @@
   let dmTrack = 0;
   let dmChromeShown = null; // 弹幕层显隐的缓存值：每帧都会算，只有变了才动 DOM
   let dmBeatAt = 0; // 上次观看心跳时刻（60 秒一次）
+  /**
+   * 表情系列（pack）——「经典」是默认系列，也是目前唯一的一个。
+   * 每个表情是 24×24 的双色 SVG：描边 `currentColor`（自动继承说话人身份色：
+   * 散户灰 / 游资红 / 大户紫 / 玩家金），内部填一层自己的语义色 `tone`
+   * （火橙、涨红、跌绿）——纯灰线在深色终端里太素，全彩 emoji 又会在 12.5px 糊成脏点。
+   * `tone` 写死不跟主题走：涨就该是红的，换皮肤也一样。
+   *
+   * key 必须与 `Server/src/danmaku-emotes.js` 的 KEYS 一致（服务端只下发 key）。
+   * 这些 svg 是**本地常量**，没有任何一个字节来自玩家输入——所以 `innerHTML` 在这里
+   * 是安全的；玩家的自由文本仍然只能走 textContent（见 spawnDanmaku）。
+   *
+   * 加新系列：在数组里追加一项，id 与服务端 PACKS 对齐，key 全局唯一（新系列请带前缀，
+   * 如 `food:burger`）；系列多于一个时选择器顶部会自动多出一排 tab。
+   */
+  const DM_EMOTE_PACKS = [
+    {
+      id: 'classic',
+      label: '经典',
+      items: {
+        cry: {
+          label: '哭',
+          tone: '#4fa3e3',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#4fa3e3" fill-opacity=".22"/>' +
+            '<circle cx="9.2" cy="10.2" r="1.1" fill="#4fa3e3" stroke="none"/>' +
+            '<circle cx="14.8" cy="10.2" r="1.1" fill="#4fa3e3" stroke="none"/>' +
+            '<path d="M9.2 12.4v2.1M14.8 12.4v2.1" stroke="#4fa3e3" stroke-width="2.6"/>' +
+            '<path d="M8.8 17.4c1.4-1.5 4.9-1.5 6.4 0"/>',
+        },
+        laugh: {
+          label: '笑',
+          tone: '#f0c14b',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#f0c14b" fill-opacity=".22"/>' +
+            '<path d="M7.2 10.2c.7-1.1 2-1.1 2.7 0M14.1 10.2c.7-1.1 2-1.1 2.7 0"/>' +
+            '<path d="M8.2 13.6c1.3 2.5 6.3 2.5 7.6 0" fill="#f0c14b" fill-opacity=".55"/>',
+        },
+        sweat: {
+          label: '汗',
+          tone: '#4fb3d9',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#4fb3d9" fill-opacity=".16"/>' +
+            '<circle cx="9.2" cy="10.6" r="1.1" fill="#4fb3d9" stroke="none"/>' +
+            '<circle cx="14.8" cy="10.6" r="1.1" fill="#4fb3d9" stroke="none"/>' +
+            '<path d="M9.8 16h4.4"/>' +
+            '<path d="M19.4 6.4c.9 1.5 1.5 2.6 1.5 3.3a1.5 1.5 0 0 1-3 0c0-.7.6-1.8 1.5-3.3z" fill="#4fb3d9" fill-opacity=".9"/>',
+        },
+        rage: {
+          label: '怒',
+          tone: '#e2563d',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#e2563d" fill-opacity=".22"/>' +
+            '<path d="M7 8.2l3.2 1.7M17 8.2l-3.2 1.7"/>' +
+            '<circle cx="9.4" cy="12.2" r="1.2" fill="#e2563d" stroke="none"/>' +
+            '<circle cx="14.6" cy="12.2" r="1.2" fill="#e2563d" stroke="none"/>' +
+            '<path d="M8.8 17.2c1.3-1.5 5.1-1.5 6.4 0"/>',
+        },
+        shock: {
+          label: '惊',
+          tone: '#f2d24b',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#f2d24b" fill-opacity=".18"/>' +
+            '<circle cx="9.2" cy="10" r="1.7" fill="#f2d24b" fill-opacity=".95"/>' +
+            '<circle cx="14.8" cy="10" r="1.7" fill="#f2d24b" fill-opacity=".95"/>' +
+            '<circle cx="12" cy="16" r="1.7" fill="#f2d24b" fill-opacity=".9"/>',
+        },
+        skull: {
+          label: '骷髅',
+          tone: '#d8dee9',
+          svg: '<path d="M12 3.2a7.6 7.6 0 0 0-4.6 13.6V20h9.2v-3.2A7.6 7.6 0 0 0 12 3.2z" fill="#d8dee9" fill-opacity=".2"/>' +
+            '<circle cx="9" cy="11" r="1.9" fill="#2a3243" stroke="none"/>' +
+            '<circle cx="15" cy="11" r="1.9" fill="#2a3243" stroke="none"/>' +
+            '<path d="M10.2 20v-2.2M12 20v-2.2M13.8 20v-2.2"/>',
+        },
+        rocket: {
+          label: '火箭',
+          tone: '#ef6c3f',
+          svg: '<path d="M12 2.8c3.3 2 5 5.4 5 9v3.4L12 19l-5-3.8V11.8c0-3.6 1.7-7 5-9z" fill="#c9d4e6" fill-opacity=".24"/>' +
+            '<circle cx="12" cy="9" r="1.7" fill="#5aa9e6" fill-opacity=".95"/>' +
+            '<path d="M7 11.6 4.6 15.2l2.9-.5M17 11.6l2.4 3.6-2.9-.5" fill="#e2563d" fill-opacity=".4"/>' +
+            '<path d="M10.4 19.4c.3 1.3.8 2.3 1.6 3.2.8-.9 1.3-1.9 1.6-3.2" fill="#f2a33c" fill-opacity=".95"/>',
+        },
+        fire: {
+          label: '火',
+          tone: '#ef6a3a',
+          svg: '<path d="M12 2.8c2.8 3.2 4.8 5.8 4.8 9.2a4.8 4.8 0 0 1-9.6 0c0-3.4 2-6 4.8-9.2z" fill="#ef6a3a" fill-opacity=".32"/>' +
+            '<path d="M12 11.6c1 1.2 1.6 2.2 1.6 3.2a1.6 1.6 0 0 1-3.2 0c0-1 .6-2 1.6-3.2z" fill="#ffd24a" fill-opacity=".9"/>',
+        },
+        coin: {
+          label: '铜钱',
+          tone: '#e8b64a',
+          svg: '<circle cx="12" cy="12" r="8.4" fill="#e8b64a" fill-opacity=".3"/>' +
+            '<rect x="9.4" y="9.4" width="5.2" height="5.2" rx=".8"/>',
+        },
+        heartbreak: {
+          label: '心碎',
+          tone: '#e2566f',
+          svg: '<path d="M12 20.4 4.8 13a4.4 4.4 0 0 1 6.2-6.2l1 1 1-1A4.4 4.4 0 0 1 19.2 13z" fill="#e2566f" fill-opacity=".3"/>' +
+            '<path d="M13.4 7.6 11.4 11.4h2.8l-1.8 3.6" stroke="#ffd166" stroke-width="2.2"/>',
+        },
+        leek: {
+          label: '韭菜',
+          tone: '#7cbf4a',
+          svg: '<path d="M12 21V11.4" stroke="#7cbf4a"/>' +
+            '<path d="M12 11.4c-3.6 0-5.4-2.6-4.7-6.4 3.2.5 4.7 2.8 4.7 6.4z" fill="#7cbf4a" fill-opacity=".45"/>' +
+            '<path d="M12 11.4c3.6 0 5.4-2.6 4.7-6.4-3.2.5-4.7 2.8-4.7 6.4z" fill="#7cbf4a" fill-opacity=".45"/>' +
+            '<path d="M12 15.2h.01M12 18h.01"/>' +
+            '<path d="M8.8 21h6.4"/>',
+        },
+        eyes: {
+          label: '盯着',
+          tone: '#f0c14b',
+          svg: '<ellipse cx="7.4" cy="12" rx="3.6" ry="2.7" fill="#f0c14b" fill-opacity=".18"/>' +
+            '<ellipse cx="16.6" cy="12" rx="3.6" ry="2.7" fill="#f0c14b" fill-opacity=".18"/>' +
+            '<circle cx="7.4" cy="12" r="1.35" fill="#f0c14b" stroke="none"/>' +
+            '<circle cx="16.6" cy="12" r="1.35" fill="#f0c14b" stroke="none"/>',
+        },
+        zzz: {
+          label: '睡着',
+          tone: '#8db3d9',
+          svg: '<path d="M4 14.4h4.6L4 18.8h4.6" stroke="#8db3d9"/>' +
+            '<path d="M9.8 8h4L9.8 11.8h4" stroke="#8db3d9"/>' +
+            '<path d="M15.2 2.2h3.4L15.2 5.6h3.4" stroke="#8db3d9" stroke-opacity=".55"/>',
+        },
+        question: {
+          label: '问号',
+          tone: '#e8b64a',
+          svg: '<path d="M8.4 9.2a3.7 3.7 0 1 1 5.3 3.4c-1 .4-1.7 1.2-1.7 2.4v.6" stroke="#e8b64a"/>' +
+            '<circle cx="12" cy="19.4" r="1.25" fill="#e8b64a" stroke="none"/>',
+        },
+        chartup: {
+          label: '涨',
+          tone: '#f0464b',
+          svg: '<path d="M3.4 17.4 9 11.4l3.4 3 6.2-6.8" stroke="#f0464b" stroke-width="2.2"/>' +
+            '<path d="M14.8 6.2h5v5z" fill="#f0464b" fill-opacity=".9" stroke="none"/>',
+        },
+        chartdown: {
+          label: '跌',
+          tone: '#1fb978',
+          svg: '<path d="M3.4 6.6 9 12.6l3.4-3 6.2 6.8" stroke="#1fb978" stroke-width="2.2"/>' +
+            '<path d="M14.8 17.8h5v-5z" fill="#1fb978" fill-opacity=".9" stroke="none"/>',
+        },
+        thumbup: {
+          label: '赞',
+          tone: '#e8b64a',
+          svg: '<path d="M7.4 10.8v9.8"/>' +
+            '<path d="M7.4 20.6H5.4a1.6 1.6 0 0 1-1.6-1.6v-6.6a1.6 1.6 0 0 1 1.6-1.6h2" fill="#e8b64a" fill-opacity=".24"/>' +
+            '<path d="M7.4 10.8 10.5 3.6a2.3 2.3 0 0 1 2.4 2.7l-.6 2.9h4.4a1.7 1.7 0 0 1 1.65 2.1l-1.45 5.9a1.7 1.7 0 0 1-1.65 1.3H7.4" fill="#e8b64a" fill-opacity=".24"/>',
+        },
+        face: {
+          label: '平静',
+          tone: '#93a1b5',
+          svg: '<circle cx="12" cy="12" r="8.6" fill="#93a1b5" fill-opacity=".14"/>' +
+            '<circle cx="9.2" cy="10.2" r="1.1" fill="#93a1b5" stroke="none"/>' +
+            '<circle cx="14.8" cy="10.2" r="1.1" fill="#93a1b5" stroke="none"/>' +
+            '<path d="M9 15.4c1.6 1.3 4.4 1.3 6 0"/>',
+        },
+  
+      },
+    },
+  ];
+  const DM_DEFAULT_PACK = 'classic';
+  const DM_PACK_KEY = 'gushen_dm_pack';
+  let dmEmotePick = ''; // 当前选中的表情 key（空 = 不带）
+  // 选择器当前停在哪一页。记住它属于操作习惯：常翻的那一页不该每次重开都跳回第一页
+  let dmPack = DM_DEFAULT_PACK;
+  try {
+    const savedPack = localStorage.getItem(DM_PACK_KEY);
+    if (savedPack && DM_EMOTE_PACKS.some((p) => p.id === savedPack)) dmPack = savedPack;
+  } catch (e) { /* 忽略 */ }
+
+  /** 按 id 找系列；找不到（版本回退 / 手改 localStorage）就退回默认系列 */
+  function dmPackOf(id) {
+    return DM_EMOTE_PACKS.find((p) => p.id === id) || DM_EMOTE_PACKS[0];
+  }
+
+  /**
+   * key → 表情定义，**跨系列查**：玩家选中的表情属于哪个系列都认得，
+   * 翻到别的系列也不会把已经选好的表情弄丢（key 全局唯一，协议里只有 key）
+   */
+  function dmEmoteDef(key) {
+    if (!key) return null;
+    for (const p of DM_EMOTE_PACKS) {
+      if (p.items[key]) return p.items[key];
+    }
+    return null;
+  }
+
+  /** 全部系列的 key：服务端白名单必须被它覆盖（测试对着比，少一个就红） */
+  function dmEmoteKeys() {
+    const out = [];
+    for (const p of DM_EMOTE_PACKS) for (const k of Object.keys(p.items)) out.push(k);
+    return out;
+  }
+
+  function setDmPack(id) {
+    dmPack = dmPackOf(id).id;
+    try { localStorage.setItem(DM_PACK_KEY, dmPack); } catch (e) { /* 忽略 */ }
+    if (dmPad) {
+      // 选中态写在 HTML 里（dmEmotePadHtml 按 dmEmotePick 拼 .on），重建后不用再补标一遍
+      dmPad.innerHTML = dmEmotePadHtml();
+      paintEmotePad();
+    }
+    positionEmotePad();
+  }
   try { dmOn = localStorage.getItem(DM_ON_KEY) !== '0'; } catch (e) { /* 忽略 */ }
   // 水位落盘：刷新页面时不能把最近 5 秒已经播过的弹幕再播一遍
   try { dmSeq = Number(localStorage.getItem(DM_SEQ_KEY)) || 0; } catch (e) { dmSeq = 0; }
@@ -2164,6 +2364,8 @@
       // 输入条只在「交易终端 · 个股」出现：K 线下不显示弹幕，指数也不生成弹幕
       const m = curMarket() || {};
       bar.hidden = activeView !== 'trade' || !!m.isIndex;
+      // 输入条收起来了，表情面板不能还在屏上飘着（它是 fixed 定位，挂在 body 上）
+      if (bar.hidden && dmPad && !dmPad.hidden) toggleEmotePad(false);
     }
     const eye = $('dmEye');
     if (eye) {
@@ -2215,6 +2417,20 @@
     }
   }
 
+  /**
+   * 把表情 key 变成一个 span。key 不在表里就返回 null（服务端版本比客户端新时，
+   * 宁可少一个表情，也不能让整条弹幕挂掉）。
+   */
+  function dmEmoteNode(key) {
+    const def = dmEmoteDef(key);
+    if (!def) return null;
+    const sp = document.createElement('span');
+    sp.className = 'dm-emote';
+    sp.title = def.label;
+    sp.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + def.svg + '</svg>';
+    return sp;
+  }
+
   function spawnDanmaku(it) {
     const layer = $('danmakuLayer');
     if (!layer) return;
@@ -2225,6 +2441,9 @@
     el.className = cls;
     // textContent 而不是 innerHTML：玩家弹幕是自由文本，拼 HTML 就是自找注入
     el.textContent = it.kind === 'player' && it.from ? it.from + '：' + it.text : it.text;
+    // 表情单独挂一个 span：图形只来自上面的本地表，玩家能影响的只有 key 在不在表里
+    const emote = dmEmoteNode(it.emote);
+    if (emote && el.appendChild) el.appendChild(emote);
     // 4 条固定泳道，高度不够就少开几条，避免两条叠在一起
     const tracks = Math.max(1, Math.min(4, Math.floor((layer.clientHeight || 88) / 22)));
     el.style.top = ((dmTrack++ % tracks) * 22 + 2) + 'px';
@@ -2244,22 +2463,211 @@
     el.addEventListener('animationend', () => el.remove(), { once: true });
   }
 
+  // ---------- 表情选择器 ----------
+  // 面板挂在 body 上而不是 .dm-bar 里：.panel 是 overflow:hidden，从标题栏往下弹会被裁掉
+  let dmPad = null;
+
+  function dmEmotePadHtml() {
+    const pack = dmPackOf(dmPack);
+    // 只有一个系列时不画 tab 行——一个 tab 的 tab 栏纯属噪音。
+    // 加第二个系列后这里会自动出现，不用再改代码
+    const tabs = DM_EMOTE_PACKS.length > 1
+      ? '<div class="dm-emo-tabs">' + DM_EMOTE_PACKS.map((p) =>
+        `<button type="button" class="dm-emo-tab${p.id === pack.id ? ' on' : ''}" ` +
+        `data-pack="${p.id}">${p.label}</button>`).join('') + '</div>'
+      : '';
+    // 选中态与配色都**不能**写进这里的 HTML：
+    // ① 选中态直接拼 class（重建面板后依然亮着，切回原系列不会丢）；
+    // ② 配色一律交给 paintEmotePad() 用 CSSOM 写 —— CSP 是 `style-src 'self'`，
+    //    innerHTML 里的 `style="color:…"` 会被浏览器拦掉（控制台报 "Applying inline style
+    //    violates…"），整个面板会退成一排同色的灰线（预览页是 file://、没有 CSP，
+    //    所以看不出来——这正是当初埋下这个坑的原因）
+    const grid = Object.keys(pack.items)
+      .map((k) => `<button type="button" data-emo="${k}" title="${pack.items[k].label}"` +
+        `${k === dmEmotePick ? ' class="on"' : ''}>` +
+        `<svg viewBox="0 0 24 24" aria-hidden="true">${pack.items[k].svg}</svg></button>`)
+      .join('');
+    return tabs + '<div class="dm-emo-grid">' + grid + '</div>';
+  }
+
+  /**
+   * 给面板里的表情上色 —— 描边色用每个表情自己的 `tone`（飘屏里才用说话人身份色）。
+   * 必须走 CSSOM：CSP 只禁内联 style 属性与内联 `<script>`，不拦 `el.style.x = …`
+   * （资产构成条的比例条也是这么写的，见 renderHome 里那段注释）
+   */
+  function paintEmotePad() {
+    if (!dmPad || !dmPad.querySelectorAll) return;
+    dmPad.querySelectorAll('button[data-emo]').forEach((b) => {
+      const def = dmEmoteDef(b.dataset.emo);
+      if (def) b.style.color = def.tone;
+    });
+  }
+
+  /** 按钮本身当「当前选中」的指示灯：没选时显示「表」，选中后直接显示那个表情 */
+  function syncEmoteBtn() {
+    const btn = $('dmEmoBtn');
+    if (!btn) return;
+    const def = dmEmoteDef(dmEmotePick);
+    btn.classList.toggle('has-pick', !!def);
+    btn.title = def ? `已选表情：${def.label}（再点一次取消）` : '加个表情';
+    if (def) {
+      btn.style.color = def.tone;
+      btn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${def.svg}</svg>`;
+    } else {
+      btn.style.color = '';
+      btn.textContent = '表';
+    }
+  }
+
+  function ensureEmotePad() {
+    if (dmPad) return dmPad;
+    const pad = document.createElement('div');
+    pad.className = 'dm-emo-pad';
+    pad.id = 'dmEmoPad';
+    pad.hidden = true;
+    pad.innerHTML = dmEmotePadHtml();
+    pad.addEventListener('click', (ev) => {
+      const t = ev.target;
+      // 系列 tab：只翻页，不关面板（关掉的话想再翻一页还得重开）
+      const tabBtn = t && t.closest ? t.closest('button[data-pack]') : null;
+      if (tabBtn) {
+        setDmPack(tabBtn.dataset.pack);
+        return;
+      }
+      const b = t && t.closest ? t.closest('button[data-emo]') : null;
+      if (!b) return;
+      const key = b.dataset.emo;
+      dmEmotePick = dmEmotePick === key ? '' : key; // 再点一次 = 取消
+      syncEmoteBtn();
+      toggleEmotePad(false);
+      const input = $('dmInput');
+      if (input && input.focus) input.focus();
+    });
+    (document.body || document.documentElement).appendChild(pad);
+    dmPad = pad;
+    return pad;
+  }
+
+  /**
+   * 贴按钮下沿摆放：右边放不下就往左挪，底下放不下就往上翻，绝不顶出窗口。
+   * 尺寸必须现量——多系列时面板会多一行 tab，每页条数也可能不同，
+   * 照老公式算会让面板一半露在窗口外。
+   * 窗口缩放 / 页面滚动时也会重新调这里（面板是 fixed，坐标只算一次就会飘）。
+   */
+  function positionEmotePad() {
+    const pad = dmPad;
+    const btn = $('dmEmoBtn');
+    if (!pad || pad.hidden) return;
+    // 首次定位先挪出视口再量，否则会看见面板在默认位置闪一下。
+    // 之后（重算）不能再挪——滚动时每帧都挪到 -9999 会看得见抖动，而 offsetWidth
+    // 不依赖位置，元素渲染后随时能量
+    if (!pad.style.left) {
+      pad.style.left = '0px';
+      pad.style.top = '-9999px';
+    }
+    const w = pad.offsetWidth || (6 * 28 + 5 * 2 + 6 * 2 + 2);
+    const h = pad.offsetHeight || (3 * 28 + 2 * 2 + 6 * 2 + 2);
+    const rect = btn && btn.getBoundingClientRect ? btn.getBoundingClientRect() : null;
+    const vw = (typeof window !== 'undefined' && window.innerWidth) || 1280;
+    const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+    // 老浏览器/测试桩的 rect 可能没有 right/bottom，用 left+width 兜一下
+    const anchorRight = rect ? (rect.right == null ? (rect.left || 0) + (rect.width || 0) : rect.right) : 0;
+    const anchorBottom = rect ? (rect.bottom == null ? (rect.top || 0) + (rect.height || 0) : rect.bottom) : 0;
+    const left = rect ? Math.max(8, Math.min(anchorRight - w, vw - w - 8)) : 8;
+    // 底下放得下就贴下沿；放不下就**翻到按钮上方**（不是简单夹进视口——
+    // 夹住的话面板会盖住「表」按钮本身，想再点一次关掉都点不到）；两边都放不下才夹
+    const below = (rect ? anchorBottom + 6 : 60);
+    const above = (rect ? (rect.top == null ? anchorBottom - (rect.height || 0) : rect.top) : 60) - h - 6;
+    const top = below + h <= vh - 8 ? below : Math.max(8, above);
+    pad.style.left = left + 'px';
+    pad.style.top = Math.min(top, vh - h - 8) + 'px';
+  }
+
+  /**
+   * 面板跟着窗口走：缩放（含手机弹出键盘）或页面滚动后重算坐标。
+   * 滚动用捕获阶段监听——输入条在图表容器里，滚动的是它，不是 window
+   */
+  function refitEmotePad() {
+    if (!dmPad || dmPad.hidden) return;
+    const bar = $('dmBar');
+    // 输入条自己都被藏了（切到 K 线 / 指数）就别留一块浮层在屏上
+    if (bar && bar.hidden) { toggleEmotePad(false); return; }
+    positionEmotePad();
+  }
+
+  function toggleEmotePad(open) {
+    const pad = ensureEmotePad();
+    const btn = $('dmEmoBtn');
+    const next = open === undefined ? !!pad.hidden : !!open;
+    pad.hidden = !next;
+    if (btn && btn.setAttribute) btn.setAttribute('aria-expanded', next ? 'true' : 'false');
+    if (!next) return;
+    // 每次打开都重建一次：系列表/当前页可能在面板关着的时候变过
+    // （加新系列、切账号），重建比维护一堆"脏了没"的标记可靠
+    pad.innerHTML = dmEmotePadHtml();
+    paintEmotePad(); // 配色只能走 CSSOM（CSP 不许内联 style 属性）
+    positionEmotePad();
+  }
+
   function bindDanmaku() {
     refreshDanmakuChrome();
     const eye = $('dmEye');
     if (eye) eye.addEventListener('click', () => setDanmakuOn(!dmOn));
+    const emo = $('dmEmoBtn');
+    if (emo) {
+      syncEmoteBtn();
+      emo.addEventListener('click', (ev) => {
+        if (ev && ev.stopPropagation) ev.stopPropagation(); // 别被下面那个「点外面关掉」接住
+        toggleEmotePad();
+      });
+    }
+    document.addEventListener('click', (ev) => {
+      if (!dmPad || dmPad.hidden) return;
+      const t = ev && ev.target;
+      if (t && (t === emo || (dmPad.contains && dmPad.contains(t)))) return;
+      toggleEmotePad(false);
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev && ev.key === 'Escape' && dmPad && !dmPad.hidden) toggleEmotePad(false);
+    });
+    // 面板是 fixed 定位，坐标只在打开那一刻算：窗口缩放（含手机弹键盘）与任何容器滚动
+    // 都会让按钮挪位置，不重算的话面板会飘在半空。scroll 用捕获阶段——滚的往往是
+    // 图表容器而不是 window
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', refitEmotePad);
+      window.addEventListener('scroll', refitEmotePad, true);
+    }
     const input = $('dmInput');
     if (!input) return;
     const send = () => {
       const body = (input.value || '').trim();
-      if (!body) return;
+      if (!body) {
+        // 只点了表情、没写字：回车/点发送必须给一句回执，否则看起来像按钮坏了
+        if (dmEmotePick) toast('表情要跟着一句话一起发', 'err');
+        return;
+      }
+      const emote = dmEmotePick;
       input.value = '';
-      apiPost('/api/danmaku', { stockId: activeStockId, text: body })
+      dmEmotePick = '';
+      syncEmoteBtn();
+      /**
+       * 没发出去就把内容还给他：被冷却/敏感词拦下时要改一改再发，重打一遍很烦。
+       * 但服务端说「没有这个表情」时不能还——那是客户端留着一个旧版本才有的 key，
+       * 还回去的话按钮显示「表」（查不到定义）却每次都带着它发，只能刷新页面才能解开
+       */
+      const handBack = (msg) => {
+        input.value = body;
+        dmEmotePick = /没有这个表情/.test(msg || '') ? '' : (emote || '');
+        syncEmoteBtn();
+        toast(msg || '发送失败', 'err');
+      };
+      apiPost('/api/danmaku', { stockId: activeStockId, text: body, emote })
         .then((r) => r.json())
         .then((res) => {
-          if (!res || !res.ok) toast((res && res.error) || '发送失败', 'err');
+          if (res && res.ok) return;
+          handBack(res && res.error);
         })
-        .catch(() => toast('发送失败', 'err'));
+        .catch(() => handBack('发送失败'));
     };
     input.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter') return;

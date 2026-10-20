@@ -943,12 +943,15 @@ class Game {
   /**
    * 玩家主动发一条弹幕（`POST /api/danmaku`）。
    * 频率、长度、敏感词全在 DanmakuSystem 里判，这里只做登录态与令牌解析。
+   *
+   * 参数顺序：`emote` 放在 `now` **之后**。`now` 是测试/脚本用来控时钟的既有位置参数，
+   * 把新参数插在它前面，会让 `(token, stockId, body, now)` 的老调用被当成「表情是 now」直接拒掉。
    */
-  sendDanmaku(token, stockId, body, now = Date.now()) {
+  sendDanmaku(token, stockId, body, now = Date.now(), emote) {
     const acc = this.accountFor(token);
     if (!acc) return { ok: false, error: '请先登录' };
     if (acc.isNPC) return { ok: false, error: '无效账户' };
-    const r = this.danmaku.postPlayer(acc, stockId, body, now);
+    const r = this.danmaku.postPlayer(acc, stockId, body, now, emote);
     if (r.ok) this.persist?.touch(acc);
     return r;
   }
