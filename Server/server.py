@@ -180,11 +180,12 @@ def start():
             subprocess.CREATE_NEW_PROCESS_GROUP
             | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         )
-    # 显式抬高 V8 老生代上限：3160 NPC + 高频成交下默认 ~4GB 曾被挤爆
-    # （heap out of memory）。可用 NODE_OPTIONS 覆盖
+    # 显式抬高 V8 老生代上限：SSE 每帧全量 JSON 的垃圾曾把堆线性堆到上限（heap OOM）。
+    # 2026-10-21 起 SSE 公共段每 tick 只序列化一次（垃圾 ~降 3 倍），实测活跃堆仅几十 MB，
+    # 2560MB 足够并让 V8 更早回收、RSS 不再无限爬。可用 NODE_OPTIONS 覆盖
     node_cmd = ["node", SERVER_ENTRY]
     if "NODE_OPTIONS" not in os.environ:
-        node_cmd = ["node", "--max-old-space-size=6144", SERVER_ENTRY]
+        node_cmd = ["node", "--max-old-space-size=2560", SERVER_ENTRY]
     process = subprocess.Popen(
         node_cmd,
         cwd=SERVER_DIR,

@@ -1667,23 +1667,28 @@ class Game {
 
   /** 玩家视角完整状态 */
   stateFor(token, opts = {}) {
-    const now = Date.now();
-    const acc = this.accountFor(token);
+    const common = this.stateCommon(opts);
+    const self = this.stateSelfFor(token, opts);
+    return Object.assign({}, common, self);
+  }
+
+  /**
+   * state 帧的公共段：所有 SSE 连接完全相同的部分（行情/时钟/榜单/公告/弹幕），
+   * 约占帧体 3/4。SSE 每 tick 给每条连接推一帧，其中这部分一字不差——
+   * 旧实现每连接各建对象各 JSON.stringify 一遍 60KB，大字符串垃圾按连接数翻倍，
+   * 堆被 V8 拖到逼近老生代上限才回收（实测 1.2GB/h 线性爬升）。
+   * 现在由 http.js 每 tick 算一次、序列化一次，分块写到各连接（见 SseHub.broadcastAll）。
+   * `opts.now`：调用方传入统一时钟，保证公共段与各账户段同 tick（阶段切换边界不串帧）。
+   */
+  stateCommon(opts = {}) {
+    const now = opts.now || Date.now();
     // 行情快照可由调用方传入：SSE 每 tick 要给每条连接推一份，行情部分完全一样
     const markets = opts.markets || this.marketSnapshots();
     const index = opts.index || this.index.snapshot();
     if (!this._stats) this.refreshStats();
     const stats = this._stats;
     const primary = this.markets.get(this.stocks[0].id);
-    // 券商参数按账户解析（两级兜底：broker 覆盖 → 全局默认）。
-    // 未登录（acc=null）时必须给**纯基准**并把「每周之星」也关掉——day:0 让 weeklyPick 不生效，
-    // 否则登录页会看到一个被当周之星减半的费率
-    const bk = acc ? this.brokerOf(acc, now) : broker.forAccount(null, { day: 0 });
-    const vipLead = bk.newsVipLeadMs || 0;
-    const viewer = vipLead > 0
-      ? { tier: 'vip', leadMs: vipLead, showDir: !!bk.newsVipVisible }
-      : null;
-    const base = {
+    return {
       serverTime: now,
       startedAt: this.startedAt,
       markets,
@@ -1694,18 +1699,58 @@ class Game {
       notice: this.noticeSnapshot(now),
       // 兼容字段：老客户端只认单个 market。取第一只股票，新客户端一律走 markets
       market: markets[0],
+      // 分时图弹幕：只带最近 5 秒的条目，客户端按 id 去重（不靠上一帧差集，
+      // 断线重连/刷新也不会漏）。玩家行为反应类不携带任何玩家标识
+      danmaku: this.danmaku.snapshot(now),
+      // 公平窗口（§7.2）：泄露期里给公众一条**模糊**提示，不点方向、不点原因、不点谁。
+      // 「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割
+      newsHints: this.newsHints(now),
+      players: stats.players,
+      // 券商榜：总榜在 players 里，这里给按券商聚合的一份（§5.3）
+      brokerBoard: this.brokerBoard(),
+      online: this.store.playerCount,
+      // 股东榜改为按需拉取（/api/holders?stock=X）：10 只股票 × 前 30 名每 tick 全推会把帧撑爆
+      halt: primary.haltInfo(now),
+    };
+  }
+
+  /**
+   * state 帧的账户段：按账户变化的部分（VIP 消息视角、券商 rules、账户本体）。
+   * 与 stateCommon 同参数同时钟，两段合并后与旧版 stateFor 逐字段一致。
+   * 未登录（token 失效）时 account:null——客户端照旧触发重登。
+   */
+  stateSelfFor(token, opts = {}) {
+    const now = opts.now || Date.now();
+    const acc = this.accountFor(token);
+    // 券商参数按账户解析（两级兜底：broker 覆盖 → 全局默认）。
+    // 未登录（acc=null）时必须给**纯基准**并把「每周之星」也关掉——day:0 让 weeklyPick 不生效，
+    // 否则登录页会看到一个被当周之星减半的费率
+    const bk = acc ? this.brokerOf(acc, now) : broker.forAccount(null, { day: 0 });
+    const vipLead = bk.newsVipLeadMs || 0;
+    const viewer = vipLead > 0
+      ? { tier: 'vip', leadMs: vipLead, showDir: !!bk.newsVipVisible }
+      : null;
+    const self = {
       // 消息磁带：**泄露期的消息不出现在公众视野里**（消息分层三段式的灵魂）。
       // 达到 L2 情报等级的券商客户能在公开前看到"哪只股票有消息"；方向是否可见
       // 取决于声誉星级到没到 4★ 以上（§8.1）
       news: this.news.tapeSnapshot(50, now, viewer),
-      // 分时图弹幕：只带最近 5 秒的条目，客户端按 id 去重（不靠上一帧差集，
-      // 断线重连/刷新也不会漏）。玩家行为反应类不携带任何玩家标识
-      danmaku: this.danmaku.snapshot(now),
       lastNews: NewsSystem.visibleFor(this.lastNews, viewer, now) ? this.lastNews : null,
-      // 公平窗口（§7.2）：泄露期里给公众一条**模糊**提示，不点方向、不点原因、不点谁。
-      // 「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割
-      newsHints: this.newsHints(now),
-      rules: {
+      rules: this.rulesFor(bk, opts),
+    };
+    if (!acc) {
+      self.account = null;
+      return self;
+    }
+    self.account = this.serializeAccount(acc, now);
+    self.cooldownLeft = this.cooldownLeft(acc, now);
+    return self;
+  }
+
+  /** stateFor.rules 的构造（券商参数按 bk 解析，其余是全局配置）。供 stateForSplit 复用 */
+  rulesFor(bk, opts = {}) {
+    const primary = this.markets.get(this.stocks[0].id);
+    return {
         feeRate: bk.feeRate,
         cooldownMs: bk.cooldownMs,
         lockMs: bk.lockMs,
@@ -1794,21 +1839,7 @@ class Game {
         realm: opts.lite
           ? { enabled: !!config.realm.enabled }
           : Object.assign({ enabled: !!config.realm.enabled }, realm.ladderForClient()),
-      },
-      players: stats.players,
-      // 券商榜：总榜在 players 里，这里给按券商聚合的一份（§5.3）
-      brokerBoard: this.brokerBoard(),
-      online: this.store.playerCount,
-      // 股东榜改为按需拉取（/api/holders?stock=X）：10 只股票 × 前 30 名每 tick 全推会把帧撑爆
-      halt: primary.haltInfo(now),
     };
-    if (!acc) {
-      base.account = null;
-      return base;
-    }
-    base.account = this.serializeAccount(acc, now);
-    base.cooldownLeft = this.cooldownLeft(acc, now);
-    return base;
   }
 
   /** 账户在某只股票上的持仓切片 */

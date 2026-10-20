@@ -232,6 +232,9 @@ function readBody(req, limit = 64 * 1024) {
   });
 }
 
+/** SSE 'state' 帧的固定前缀（broadcastAll 分块写时复用同一字符串对象） */
+const SSE_STATE_HEAD = 'event: state\ndata: ';
+
 class SseHub {
   constructor(game) {
     this.game = game;
@@ -270,22 +273,49 @@ class SseHub {
   }
 
   send(conn, event, data) {
+    this.sendRaw(conn, event, JSON.stringify(data));
+  }
+
+  /** 已序列化好的帧直接写（省掉二次 stringify），异常时摘除连接 */
+  sendRaw(conn, event, frame) {
     try {
-      conn.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      conn.res.write(`event: ${event}\ndata: ${frame}\n\n`);
     } catch (e) {
       this.remove(conn);
     }
   }
 
   broadcastAll() {
+    if (this.conns.size === 0) return;
     // 行情快照（10 只股票 + 指数）每条连接都一样，按 tick 只算一次；账户段仍按各自令牌单独拼。
     // 分时历史与股东榜都不进帧（体积太大），客户端按需拉 /api/history、/api/holders
     const markets = this.game.marketSnapshots();
     const index = this.game.index.snapshot();
+    const now = Date.now(); // 公共段与各账户段同一时钟，阶段切换边界不串帧
+    // 帧拆两段（见 game.stateCommon / stateSelfFor）：公共段 ~70KB 每 tick 只序列化**一次**，
+    // 通过多次 res.write 分块写到各连接（SSE 是字节流，分块与否客户端看到的字节完全一样），
+    // 公共块字符串对象全连接复用；账户段（~17KB）按 token 去重后各账户一份。
+    // 此前每连接各自物化一整个 85KB 帧（4 连接 = 每秒 0.5MB 大字符串垃圾），
+    // 堆被 V8 拖到逼近老生代上限才回收（实测 1.2GB/h 线性爬升）。
+    const common = this.game.stateCommon({ markets, index, lite: true, now });
+    const commonBody = JSON.stringify(common).slice(0, -1); // 去掉收尾的 '}'，后面拼账户段
+    const selfCache = new Map(); // token -> 账户段字符串（同账户多标签页共享）
     for (const conn of this.conns) {
-      // `lite: true`：增量帧不带境界整表（首屏 /api/state 与 SSE 首帧各带一次，客户端缓存）
-      const state = this.game.stateFor(conn.token, { markets, index, lite: true });
-      this.send(conn, 'state', state);
+      try {
+        let selfChunk = selfCache.get(conn.token);
+        if (selfChunk === undefined) {
+          const self = this.game.stateSelfFor(conn.token, { markets, index, lite: true, now });
+          selfChunk = JSON.stringify(self).slice(1); // 去掉开头的 '{'，接在公共段后面
+          selfCache.set(conn.token, selfChunk);
+        }
+        conn.res.write(SSE_STATE_HEAD);
+        conn.res.write(commonBody);
+        conn.res.write(',');
+        conn.res.write(selfChunk);
+        conn.res.write('\n\n');
+      } catch (e) {
+        this.remove(conn);
+      }
     }
   }
 }
@@ -878,4 +908,4 @@ function createServer(game, options) {
   return server;
 }
 
-module.exports = { createServer };
+module.exports = { createServer, SseHub };
