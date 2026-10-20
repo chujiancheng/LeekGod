@@ -138,6 +138,15 @@ function isJsonRequest(req) {
   return /^application\/json\b/i.test(String(req.headers['content-type'] || '').trim());
 }
 
+/**
+ * 是否本机回环来源（运维关服这类不可逆操作的额外一道门槛）。
+ * node 在不同栈下拿到的是 `127.0.0.1` / `::1` / `::ffff:127.0.0.1` 三种写法之一。
+ */
+function isLoopback(ip) {
+  const s = String(ip || '');
+  return s === '127.0.0.1' || s === '::1' || s === '::ffff:127.0.0.1' || s.startsWith('127.');
+}
+
 /** 带 Origin 的请求必须同源；同源的非浏览器请求不带 Origin */
 function sameOrigin(req) {
   const origin = req.headers.origin;
@@ -280,7 +289,14 @@ class SseHub {
   }
 }
 
-function createServer(game) {
+/**
+ * @param {Game} game
+ * @param {object} [options] `onShutdown(reason)`：收到运维关服指令后执行的收尾函数
+ *   （由 index.js 注入——http 层只管把请求转成一次「该关了」的通知，
+ *   怎么关、关完退不退进程，属于入口层的职责）
+ */
+function createServer(game, options) {
+  const opts = options || {};
   const hub = new SseHub(game);
   // 开放交易接口（/open/v1）：独立鉴权（API Key）、独立限流、独立 SSE。
   // 与下面的 /api/* 完全平行——两条链路不共享凭据，也不共享限流计数。
@@ -652,6 +668,67 @@ function createServer(game) {
         const id = p.slice('/api/admin/keys/'.length);
         const r = open.keys.revoke(id);
         if (r.ok) logger.info(`[我是股神] 撤销 API Key ${r.id}（${r.account}）`);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 运维：交易日时钟（server.py 的安全关服判定每秒轮询它）----
+      //
+      // 故意**不过 admin 限流**：admin 档是 10 次/分钟，而休市窗口（收盘后的 night 段）
+      // 只有 40 秒，40 秒内最多问 6 次就等于没有精度。这是纯只读、几十字节的接口，
+      // 又有口令把关，放开频率比让脚本瞎猜安全得多。
+      if (p === '/api/admin/clock' && req.method === 'GET') {
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[我是股神] 运维时钟接口口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        return json(res, 200, { ok: true, ...game.opsClock() });
+      }
+
+      // ---- 运维：优雅下线（server.py stop / restart 的唯一停服通道）----
+      //
+      // 为什么不让脚本直接 taskkill：Windows 上强杀 = TerminateProcess，走不到
+      // index.js 的 SIGTERM 收尾，log4js 的尾巴和 SQLite 的 WAL 都靠运气。
+      // 这里让进程自己收尾（停 tick → 关存档 → 关监听 → exit），脚本在外面等 PID 消失。
+      // 只接受回环来源：真正跑运维脚本的一定是这台机器。
+      if (p === '/api/admin/shutdown' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.admin)) return;
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[我是股神] 运维关服口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        if (!isLoopback(ip)) {
+          logger.warn(`[我是股神] 拒绝来自 ${ip} 的关服指令（只接受本机）`);
+          return json(res, 403, { ok: false, error: '关服指令只接受本机来源' });
+        }
+        logger.info(`[我是股神] 收到运维关服指令（来自 ${ip}）`);
+        json(res, 200, { ok: true, note: '正在关闭' });
+        // 先把 200 写回去，脚本要靠它判断「指令已送达」再去等进程消失；
+        // 立刻 exit 会把响应掐断，脚本只能看到连接被重置
+        setTimeout(() => opts.onShutdown && opts.onShutdown('admin-http'), 200);
+        return;
+      }
+
+      // ---- 运维：系统公告（关服 / 重启前通知玩家）----
+      //
+      // 只存最新一条、只存内存（进程一停就该消失）。
+      // `{clear: true}` 或空文本 = 撤下公告：运维脚本在等待关服的途中按了 Ctrl+C
+      // 时必须能撤回，否则玩家会一直盯着一条永远不发生的「即将关闭」。
+      if (p === '/api/admin/notice' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.admin)) return;
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[我是股神] 系统公告口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        const body = await readBody(req);
+        const text = body.clear ? '' : body.text;
+        const r = game.setNotice(text, { minutes: body.minutes, kind: body.kind });
+        if (r.ok) {
+          logger.info(
+            r.notice
+              ? `[我是股神] 系统公告（${ip}，${body.minutes || 30} 分钟）: ${r.notice.text}`
+              : `[我是股神] 系统公告已撤下（${ip}）`
+          );
+        }
         return json(res, r.ok ? 200 : 400, r);
       }
 

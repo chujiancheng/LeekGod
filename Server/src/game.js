@@ -1447,6 +1447,48 @@ class Game {
     return r;
   }
 
+  // ---------- 运维：系统公告 ----------
+
+  /**
+   * 系统公告（关服 / 重启前的通知，也可临时口播）。
+   *
+   * 只保留**最新一条**：`id` 自增，客户端按 id 判断"是不是新公告"再弹 toast，
+   * 靠文本比对会被重复推送砸出满屏提示。带过期时间，且**只存内存不落库**——
+   * 进程一停公告就该消失，重启后玩家不该还看到「即将关闭」。
+   * 下发走 `stateFor` 的 `notice` 段（每帧都带），刷新页 / 新登录的玩家也能立刻看见，
+   * 只靠广播一次性推给在线连接是不够的。
+   */
+  setNotice(text, options) {
+    const o = options || {};
+    const body = String(text || '').trim().slice(0, 120);
+    if (!body) {
+      this.notice = null;
+      this.broadcast();
+      return { ok: true, notice: null };
+    }
+    const mins = Number(o.minutes);
+    const now = Date.now();
+    // id 用时间戳做基数再自增：进程重启后公告 id 仍单调递增，
+    // 客户端靠 id 去重才不会把「服务已恢复」当成旧公告吞掉
+    this.noticeSeq = Math.max(this.noticeSeq || 0, now) + 1;
+    this.notice = {
+      id: this.noticeSeq,
+      text: body,
+      kind: String(o.kind || 'info'),
+      at: now,
+      expiresAt: now + (Number.isFinite(mins) && mins > 0 ? Math.round(mins * 60000) : 30 * 60000),
+    };
+    this.broadcast();
+    return { ok: true, notice: this.notice };
+  }
+
+  /** 当前有效公告（过期的当没有） */
+  noticeSnapshot(now = Date.now()) {
+    const n = this.notice;
+    if (!n || n.expiresAt <= now) return null;
+    return n;
+  }
+
   // ---------- 状态快照 ----------
 
   /** 下单冷却剩余毫秒（按账户券商的冷却，不是全局值） */
@@ -1488,6 +1530,8 @@ class Game {
       index,
       // 交易日时钟（全市场共用一份）：第几天、哪个阶段、还剩多久、游戏内时刻
       day: this.day.snapshot(now),
+      // 系统公告（运维关服 / 重启前的通知）：每帧都带一份，刷新的玩家也能立刻看到
+      notice: this.noticeSnapshot(now),
       // 兼容字段：老客户端只认单个 market。取第一只股票，新客户端一律走 markets
       market: markets[0],
       // 消息磁带：**泄露期的消息不出现在公众视野里**（消息分层三段式的灵魂）。
@@ -2020,6 +2064,25 @@ class Game {
   brokerBoard() {
     if (!this._brokerBoard) this.leaderboard();
     return this._brokerBoard || [];
+  }
+
+  /**
+   * 运维时钟快照：给 `python server.py stop/restart` 的安全关服判定用。
+   *
+   * 为什么不复用 `stateFor` / `/api/state`：那条链路要玩家会话令牌，而且要把十只股票的
+   * 全量盘口序列化一遍，是给浏览器画图的重量级快照；运维脚本只想回答一个问题——
+   * 「现在是不是可以安全停进程的休市窗口」，每秒钟问一次。给它一个几十字节的答案即可。
+   *
+   * 只暴露时间轴与停牌开关（客户端顶栏本来就看得见），不含任何内幕。
+   */
+  opsClock() {
+    const now = Date.now();
+    const day = this.day.snapshot(now);
+    // 停牌是**全市场一起停**（见 Game.halt），取第一只的状态就代表全部
+    const primary = this.markets.get(this.stocks[0].id);
+    const halt = primary ? primary.haltInfo(now) : { halted: false, until: 0, reason: '' };
+    // 带上公告，运维脚本发完能回读确认「真的挂上去了 / 真的撤掉了」
+    return { serverTime: now, day, halt, notice: this.noticeSnapshot(now) };
   }
 
   /**

@@ -13,6 +13,29 @@ cd Server
 重启指令 python server.py restart
 以上三种操作都通过上面的指令进行
 
+stop / restart 是**安全关服**，不是立刻杀进程：
+- 当前处于收盘休市（交易日时钟的 night 段）→ 直接停；
+- 盘中 / 集合竞价 / 午休 → 挂机等当天收盘，落进休市窗口再停（默认最多等 900 秒，超时不动服务器、退出码 2）；
+- restart 会**等旧进程真正退出才 start**，起来后再确认服务可达。
+参数：
+  --now    立即执行：先向服务端发停牌指令冻结撮合、公告「交易已暂停」，再关进程（不等收盘）；
+           restart --now 起来后自动复牌
+  --force  不做任何检查直接结束进程（救火用，不发公告）
+  --lunch  午间休市也算安全窗口（默认只认收盘后）
+  --timeout=N  最长等待秒数，默认 900
+
+公告（玩家端顶部横幅 + toast）：
+- 安全 stop/restart 会自动发：等待开始发「今日收盘后关闭/重启维护」，动手前发「正在关闭」，
+  restart 就绪后发「已恢复」；等待被取消/超时会自动撤下公告。
+- 手动发：python server.py notice "内容" [分钟]；撤下：python server.py notice --clear
+
+查看现状：
+  python server.py status   # 进程 + 当前交易日阶段 + 现在能否安全关服
+  python server.py clock    # 只读：阶段 / 剩余时间 / 是否停牌
+
+注意：Agent 在会话内**不要**跑 start/stop/restart（PID 文件全局一份，会打掉用户正在跑的正式服务）；
+临时验证用 GU_PID_FILE + PORT + PERSIST_FILE 各指一份临时路径，跑完清临时文件。
+
 # 开放平台 API Key（玩家量化策略）
 玩家自助路径（常规，不需要你操作）：登录游戏 → 主页「开放接口」→ /portal.html 生成 / 查看 / 撤销。
 页面走 /api/open/keys（会话令牌鉴权，只能操作自己的 Key），明文只在浏览器弹层出现一次。

@@ -126,6 +126,12 @@
       </div>
     </header>
 
+    <!-- 系统公告：运维关服 / 重启前由 server.py 下发（state.notice 驱动），比停牌横幅更靠前 -->
+    <div class="halt-banner sys-notice" id="noticeBanner" hidden>
+      <span class="halt-tag" id="noticeTag">公告</span>
+      <span class="halt-text" id="noticeText"></span>
+    </div>
+
     <!-- 停牌横幅：由服务端 halt 状态驱动，两个视图共用 -->
     <div class="halt-banner" id="haltBanner" hidden>
       <span class="halt-tag">停牌</span>

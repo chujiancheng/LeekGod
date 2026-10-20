@@ -38,6 +38,8 @@
   let priceDirty = false;
   let lastNewsSeen = null;
   let lastLiquidations = 0;
+  // 已提示过的系统公告 id：服务端每帧都带 notice，靠 id 只弹一次 toast
+  let lastNoticeId = 0;
   let newsUnread = 0;
   let lastStateAt = 0;
   let relogging = false;
@@ -1777,6 +1779,7 @@
 
     renderHeader();
     renderStockTabs();
+    renderNotice();
     renderHalt();
     renderDay();
     renderDepth();
@@ -5125,6 +5128,31 @@
           : `可成交 ${fmtQty(m.auction.volume)} 股${m.auction.locked ? ' · 已锁定' : ''}`;
     } else {
       strip.hidden = true;
+    }
+  }
+
+  /**
+   * 系统公告横幅（运维关服 / 重启前由 server.py 下发）。
+   *
+   * 横幅常驻到公告过期或撤下——关服通知不是"一闪而过的 toast"，
+   * 玩家回来瞄一眼就该知道要停服了；首次出现时再补一条 toast 提醒。
+   * 文案一律 textContent 写入（内容来自服务端，不拼 HTML）。
+   */
+  function renderNotice() {
+    const banner = $('noticeBanner');
+    const n = state && state.notice;
+    if (!n || !n.text) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    // shutdown = 红色停服提示；info = 绿色恢复提示
+    banner.className = 'halt-banner sys-notice' + (n.kind === 'shutdown' ? '' : ' ok');
+    $('noticeText').textContent = n.text;
+    $('noticeTag').textContent = n.kind === 'shutdown' ? '停服' : '公告';
+    if (n.id !== lastNoticeId) {
+      lastNoticeId = n.id;
+      toast(n.text, n.kind === 'shutdown' ? 'err' : 'ok');
     }
   }
 
