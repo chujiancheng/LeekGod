@@ -1270,6 +1270,26 @@ class Market {
 
   /** 单笔撮合：结算双方、记流水、更新行情 */
   execute(taker, maker, price, qty, now, aggressorSide) {
+    // 弹幕（§3.3.2）：玩家「清仓割肉」的判定基线必须在 settleSell **之前**取——
+    // 卖完之后批次可能整个消失，事后再也算不出买入均价。只对玩家算，NPC 直接跳过
+    let dmSell = null;
+    if (this.onPlayerAction) {
+      const sellOrder0 = taker.side === 'sell' ? taker : maker;
+      const acc0 = sellOrder0 && sellOrder0.account;
+      if (acc0 && !acc0.isNPC) {
+        const pos0 = acc0.longs && acc0.longs.get(this.stockId);
+        let q0 = 0;
+        let c0 = 0;
+        if (pos0 && pos0.lots) {
+          for (const l of pos0.lots) {
+            q0 += l.qty;
+            c0 += l.qty * l.price;
+          }
+        }
+        dmSell = { acc: acc0, qty: q0, avg: q0 > 0 ? c0 / q0 : 0 };
+      }
+    }
+
     const feeBuy = this.settleBuy(taker.side === 'buy' ? taker : maker, price, qty, now);
     const feeSell = this.settleSell(taker.side === 'sell' ? taker : maker, price, qty, now);
 
@@ -1359,6 +1379,25 @@ class Market {
     // 在途委托量脱钩（见 Account.syncReserved）。成交是唯一会移动持仓的路径，收尾重摊一次
     this.syncReserved(taker.account, this.stockId, now);
     if (maker.account !== taker.account) this.syncReserved(maker.account, this.stockId, now);
+
+    // 弹幕（§3.3.2）：玩家成交的被动反应。放在风控之后——这笔成交若直接打穿保证金，
+    // 「有人被抬走了」应该先于「有人割在地板上」。整段吞异常：观测层绝不能穿回撮合路径
+    if (this.onPlayerAction) {
+      try {
+        if (buyOrder.account && !buyOrder.account.isNPC) {
+          this.onPlayerAction(buyOrder.account, 'buy', this.stockId, amount, qty, now, null);
+        }
+        if (dmSell && dmSell.acc === sellOrder.account) {
+          this.onPlayerAction(sellOrder.account, 'sell', this.stockId, amount, qty, now, {
+            avg: dmSell.avg,
+            qtyBefore: dmSell.qty,
+            posAfter: sellOrder.account.longQty(this.stockId),
+          });
+        }
+      } catch (e) {
+        /* 弹幕异常不影响成交 */
+      }
+    }
   }
 
   /**
@@ -1738,7 +1777,7 @@ class Market {
       // market 不认识彩蛋——它只提供一个事件源，且这条通知绝不改变本函数的任何结果。
       // （异常隔离在钩子内部：`Game.onLiquidate` 自己吞异常。这里是撮合链上的一环，
       // 异常穿回去会打断 `execute` 所在的撮合循环、留下撤不掉的幽灵单）
-      this.onLiquidate?.(account, now);
+      this.onLiquidate?.(account, now, this.stockId);
     }
     return events.length > 0;
   }

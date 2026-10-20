@@ -330,7 +330,10 @@
     // 换号 = 换一条彩蛋事件流：水位（gushen_event_seq）必须跟着清，否则新账号的
     // seq 从 0 起、本地旧水位却还在，新事件全被 `e.seq > lastEggSeq` 挡掉
     const next = account || '';
-    if (next !== me) resetEggStream();
+    if (next !== me) {
+      resetEggStream();
+      resetDanmakuStream(); // 弹幕水位同理：换号不换水位，新号的弹幕会被旧 id 挡住
+    }
     me = next;
     myNick = nick || next;
     token = tok || '';
@@ -480,6 +483,9 @@
   function setActiveStock(stockId) {
     if (!stockId || stockId === activeStockId) return;
     activeStockId = stockId;
+    // 切股票要把在飞的弹幕收掉：上一只票的声音飘在新图上，是最容易出戏的一种错
+    const dmLayer = $('danmakuLayer');
+    if (dmLayer) dmLayer.textContent = '';
     localStorage.setItem('gushen_stock', stockId);
     priceDirty = false;
     loadHistory(stockId);
@@ -1784,6 +1790,7 @@
     renderDay();
     renderDepth();
     renderTape();
+    renderDanmaku(s);
     renderFlow();
     renderChartMode();
     renderAssets();
@@ -2074,6 +2081,8 @@
     }
     const zoomBox = $('chartZoom');
     if (zoomBox) zoomBox.hidden = !isKline();
+    // 弹幕层跟着模式走：K 线没有「今天几点」，飘字没有落点（方案 §2.4）
+    refreshDanmakuChrome();
     const m = curMarket() || {};
     const sub = $('chartSub');
     if (!sub) return;
@@ -2101,6 +2110,162 @@
     localStorage.setItem(MINUTE_RANGE_KEY, minuteRange);
     renderChartMode();
     drawChart();
+  }
+
+  // ---------- 分时图弹幕（Doc/弹幕方案.md · L1 飘屏） ----------
+  const DM_ON_KEY = 'gushen_danmaku';
+  const DM_SEQ_KEY = 'gushen_dm_seq';
+  const DM_MAX_ON_SCREEN = 8;
+  // 已渲染到的最大 id。服务端重启 seq 会回退，那时必须重置水位，
+  // 否则新弹幕的 id 全都小于它，客户端一条都不播（彩蛋的 gushen_event_seq 出过这个事故）
+  let dmSeq = 0;
+  let dmOn = true;
+  let dmTrack = 0;
+  let dmChromeShown = null; // 弹幕层显隐的缓存值：每帧都会算，只有变了才动 DOM
+  let dmBeatAt = 0; // 上次观看心跳时刻（60 秒一次）
+  try { dmOn = localStorage.getItem(DM_ON_KEY) !== '0'; } catch (e) { /* 忽略 */ }
+  // 水位落盘：刷新页面时不能把最近 5 秒已经播过的弹幕再播一遍
+  try { dmSeq = Number(localStorage.getItem(DM_SEQ_KEY)) || 0; } catch (e) { dmSeq = 0; }
+
+  /** 换账号时清水位（setIdentity 调用）：新账号不该被上一个账号的 id 挡住 */
+  function resetDanmakuStream() {
+    dmSeq = 0;
+    try { localStorage.removeItem(DM_SEQ_KEY); } catch (e) { /* 忽略 */ }
+  }
+
+  /** 弹幕只出现在「交易终端 · 分时」：K 线没有「今天几点」，主页那块也太小（方案 §2.4） */
+  function dmVisible() {
+    return dmOn && activeView === 'trade' && !isKline();
+  }
+
+  function setDanmakuOn(on) {
+    dmOn = !!on;
+    try { localStorage.setItem(DM_ON_KEY, dmOn ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    dmChromeShown = null; // 强制刷新一次显隐
+    refreshDanmakuChrome();
+  }
+
+  /**
+   * 弹幕层与标题栏输入条的显隐。三处会让它变：开关、图表模式（分时/K 线）、
+   * 当前标的（个股/指数）。每帧调一次，但状态没变时不动 DOM。
+   */
+  function refreshDanmakuChrome() {
+    const show = dmVisible();
+    if (show !== dmChromeShown) {
+      dmChromeShown = show;
+      const layer = $('danmakuLayer');
+      if (layer) {
+        layer.classList.toggle('off', !show);
+        if (!show) layer.textContent = ''; // 不显示时把还在飞的收掉，别留在屏上
+      }
+    }
+    const bar = $('dmBar');
+    if (bar) {
+      // 输入条只在「交易终端 · 个股」出现：K 线下不显示弹幕，指数也不生成弹幕
+      const m = curMarket() || {};
+      bar.hidden = activeView !== 'trade' || !!m.isIndex;
+    }
+    const eye = $('dmEye');
+    if (eye) {
+      eye.classList.toggle('on', dmOn);
+      eye.title = dmOn ? '隐藏弹幕' : '显示弹幕';
+    }
+  }
+
+  /** 十字光标激活时把弹幕压暗：读数优先（方案 §6.4） */
+  function dimDanmaku(on) {
+    const layer = $('danmakuLayer');
+    if (layer) layer.classList.toggle('dim', !!on);
+  }
+
+  /**
+   * 观看心跳：`/api/history` 一只票只拉一次，而服务端 watcher 的 TTL 是 5 分钟。
+   * 没有这个心跳，玩家盯同一只票超过 5 分钟后它就不再生成弹幕（方案 §3.4）。
+   */
+  function danmakuHeartbeat() {
+    const now = Date.now();
+    if (now - dmBeatAt < 60000) return;
+    if (activeView !== 'trade' || isKline() || !activeStockId) return;
+    const m = curMarket() || {};
+    if (m.isIndex) return; // 指数不生成弹幕，不浪费请求
+    dmBeatAt = now;
+    apiGet('/api/danmaku/watch?stock=' + encodeURIComponent(activeStockId)).catch(() => {
+      dmBeatAt = 0; // 失败了下轮再补
+    });
+  }
+
+  /** 每帧处理一次增量：只播 id > dmSeq 的，且只播当前这只股票的 */
+  function renderDanmaku(s) {
+    const d = s && s.danmaku;
+    if (!d) return;
+    // 服务端重启 / 换存档：seq 归零，本地水位必须跟着归零，否则新弹幕一条都不播
+    if (d.seq > 0 && d.seq < dmSeq) dmSeq = 0;
+    const items = d.items || [];
+    let moved = false;
+    for (const it of items) {
+      if (!it || typeof it.id !== 'number' || it.id <= dmSeq) continue;
+      dmSeq = it.id; // 即使不播也要推进水位，否则切回来会重播旧弹幕
+      moved = true;
+      if (!dmVisible()) continue;
+      if (it.stockId !== activeStockId) continue;
+      spawnDanmaku(it);
+    }
+    if (moved) {
+      try { localStorage.setItem(DM_SEQ_KEY, String(dmSeq)); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  function spawnDanmaku(it) {
+    const layer = $('danmakuLayer');
+    if (!layer) return;
+    const el = document.createElement('div');
+    let cls = 'dm-item dm-' + (it.type || 'mid');
+    if (it.flag === 'playerB') cls += ' dm-pb';
+    if (it.kind === 'event') cls += ' dm-event';
+    el.className = cls;
+    // textContent 而不是 innerHTML：玩家弹幕是自由文本，拼 HTML 就是自找注入
+    el.textContent = it.kind === 'player' && it.from ? it.from + '：' + it.text : it.text;
+    // 4 条固定泳道，高度不够就少开几条，避免两条叠在一起
+    const tracks = Math.max(1, Math.min(4, Math.floor((layer.clientHeight || 88) / 22)));
+    el.style.top = ((dmTrack++ % tracks) * 22 + 2) + 'px';
+    // 先挂上去（但不跑动画）再量宽度：位移必须按容器宽度算。写死 1400px 的话，
+    // 大屏上字会在飞到左边缘之前就停住、然后整条消失，而且速度随屏宽忽快忽慢
+    el.style.animation = 'none';
+    layer.appendChild(el);
+    const boxW = layer.clientWidth || 600;
+    const dist = Math.round(boxW + (el.offsetWidth || 160) + 8);
+    // 匀速 70px/s（窄屏 60）；玩家行为反应再慢一点（×0.78），让他来得及反应「这条在说我」
+    const speed = (boxW < 520 ? 60 : 70) * (it.flag === 'playerB' ? 0.78 : 1);
+    el.style.setProperty('--dm-dist', '-' + dist + 'px');
+    el.style.animation = ''; // 恢复 CSS 的 animation-name，从这一刻开始飞
+    el.style.animationDuration = (dist / speed).toFixed(2) + 's';
+    // 屏上最多 8 条：超了立刻收最旧的，不等它飞完（否则密集时会盖成一片）
+    while (layer.children.length > DM_MAX_ON_SCREEN) layer.removeChild(layer.firstElementChild);
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+  }
+
+  function bindDanmaku() {
+    refreshDanmakuChrome();
+    const eye = $('dmEye');
+    if (eye) eye.addEventListener('click', () => setDanmakuOn(!dmOn));
+    const input = $('dmInput');
+    if (!input) return;
+    const send = () => {
+      const body = (input.value || '').trim();
+      if (!body) return;
+      input.value = '';
+      apiPost('/api/danmaku', { stockId: activeStockId, text: body })
+        .then((r) => r.json())
+        .then((res) => {
+          if (!res || !res.ok) toast((res && res.error) || '发送失败', 'err');
+        })
+        .catch(() => toast('发送失败', 'err'));
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      send();
+    });
   }
 
   function bindChartMode() {
@@ -6195,9 +6360,12 @@
     c.addEventListener('mousemove', (e) => {
       const m = curMarket();
       if (!state || !m) return;
+      // 光标在读盘：弹幕压到 35%，读数优先（方案 §6.4）
+      dimDanmaku(true);
       // 拖动平移中不弹光标框：它跟着手指跑、还挡着 K 线
       if (chartPan && chartPan.moved) {
         tip.hidden = true;
+        dimDanmaku(false);
         return;
       }
       const rect = c.getBoundingClientRect();
@@ -6257,6 +6425,7 @@
     });
     c.addEventListener('mouseleave', () => {
       tip.hidden = true;
+      dimDanmaku(false);
     });
   }
 
@@ -6373,6 +6542,8 @@
     renderHalt();
     renderDay();
     renderClock();
+    // 观看心跳（内部 60 秒节流）：服务端 watcher 的 TTL 只有 5 分钟，没有它盯盘会哑掉
+    danmakuHeartbeat();
     // 股东榜：进 tab 时按需拉，前台每 5 秒刷新一次（服务端只在操作时记快照，
     // 但持股会随行情外的成交变动，5 秒足够新）
     if (activeView === 'trade' && activeTab === 'holders') {
@@ -6414,6 +6585,7 @@
     bindCrosshair();
     bindKlineView();
     bindChartMode();
+    bindDanmaku();
     bindTransfer();
     bindEggs();
     bindCompanyProfile();

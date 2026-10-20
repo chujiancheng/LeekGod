@@ -548,6 +548,26 @@ function createServer(game, options) {
         return json(res, r.ok ? 200 : 400, r);
       }
 
+      // ---- 分时图弹幕：玩家主动发一条 ----
+      // 长度 / 频率 / 敏感词都在 DanmakuSystem 里判（错误信息直接回给客户端展示），
+      // 这里只做同源 + 登录态 + 通用写限流
+      if (p === '/api/danmaku' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.write)) return;
+        const body = (await readBody(req)) || {};
+        const r = game.sendDanmaku(bearerToken(req), body.stockId, body.text);
+        return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 弹幕观看心跳：交易终端每 60 秒一次，只打点不产出 ----
+      // 没有它的话，玩家盯同一只票超过 watchTtlMs 后 watcher 过期，这只票就不再生成弹幕
+      if (p === '/api/danmaku/watch' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const r = game.watchDanmaku(url.searchParams.get('stock'));
+        return json(res, r.ok ? 200 : 404, r);
+      }
+
       // ---- 自动化交易：创建 / 启停 / 删除（列表走 /api/state 的 account.auto）----
       if (p === '/api/auto' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.order)) return;

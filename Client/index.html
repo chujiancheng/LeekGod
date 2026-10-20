@@ -283,9 +283,19 @@
               <button class="chart-mode" type="button" data-range="5d">5日</button>
             </span>
             <span class="panel-sub" id="chartSub">均价与价格 · 成交量 · MACD(12,26,9)</span>
+            <!-- 分时弹幕控件：开关 + 一行输入框。放在标题栏而不是画布上——
+                 画布上任何常驻元素都会挤占 K 线的可视高度 -->
+            <span class="dm-bar" id="dmBar">
+              <button type="button" class="dm-eye on" id="dmEye" title="显示 / 隐藏弹幕">弹</button>
+              <input class="dm-input" id="dmInput" type="text" maxlength="24"
+                     placeholder="说一句…" autocomplete="off" />
+            </span>
           </div>
           <div class="chart-wrap">
             <canvas id="chart"></canvas>
+            <!-- 弹幕飘屏层：盖在价格区上半部，从左往右飞。pointer-events:none 是硬要求，
+                 它压着 canvas，一旦能吃事件，十字光标 / 拖动平移 / 滚轮缩放全废 -->
+            <div class="danmaku-layer" id="danmakuLayer" aria-hidden="true"></div>
             <!-- K 线缩放/平移：滚轮缩放、拖动平移、双击复位；这块按钮是给没有滚轮的
                  触控板/触屏留的后路，只在 K 线模式显示（renderChartMode 控制 hidden） -->
             <div class="chart-zoom" id="chartZoom" hidden>

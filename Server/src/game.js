@@ -18,6 +18,7 @@ const flow = require('./flow');
 const broker = require('./broker');
 const milestones = require('./milestones');
 const { WhaleManager } = require('./llm/whales');
+const { DanmakuSystem } = require('./danmaku');
 
 // 同一账户最多保留的活跃令牌数（多标签页够用，防止 sessions 无界增长）
 const MAX_SESSIONS_PER_ACCOUNT = 5;
@@ -87,13 +88,20 @@ class Game {
       // 跨股票找市场：强平撤单要把委托交回它所属股票的市场（见 Market.cancelAny）
       market.marketOf = (stockId) => this.markets.get(stockId);
       // 强平落地通知（彩蛋 C02 首次爆仓）：market 只负责上报，判定与状态在 game/milestones
-      market.onLiquidate = (acc, now) => this.onLiquidate(acc, now);
+      market.onLiquidate = (acc, now, stockId) => this.onLiquidate(acc, now, stockId);
+      // 弹幕（§3.3.2）：玩家成交的被动反应。market 只在成交后报一声，
+      // 聚合计账、冷却、选人、取文案全在 DanmakuSystem 里
+      market.onPlayerAction = (acc, side, stockId, amount, qty, now, ctx) =>
+        this.danmaku.onPlayerAction(acc, side, stockId, amount, qty, now, ctx);
       this.markets.set(stock.id, market);
       const mgr = new NpcManager(market, null, this.store, { seqBase: npcSeq });
       mgr.game = this; // 跨股（P2）要访问其它 market / 账户权益
       this.npcs.set(stock.id, mgr);
       npcSeq += npcPerStock;
     }
+    // 分时图弹幕（Doc/弹幕方案.md）：场内声音，不是聊天室。
+    // 必须建在 markets/npcs 之后——情绪选人要扫每只股票的 NPC 浮盈
+    this.danmaku = new DanmakuSystem(this);
     this.news = new NewsSystem(this.stocks);
     for (const npc of this.npcs.values()) npc.news = this.news;
     // 泄露期的可观测性指标（消息分层 §7.2 MVP 验收口径）：让消息系统能取到价格，
@@ -678,6 +686,14 @@ class Game {
       this.index.update(this.markets, now);
     }
 
+    // 弹幕推进：玩家行为反馈（延迟 0.3~1.2s 才自然）先出，再按情绪补一句闲聊。
+    // 放在行情/指数都更新完之后——选人要用本 tick 的最新价算浮盈。
+    // 带上阶段与停牌：停牌没有新事件不该说话，午休/夜间密度减半（方案 §2.4）
+    this.danmaku.step(now, {
+      phase: dayState && dayState.phase ? dayState.phase.key : null,
+      halted,
+    });
+
     // 排行榜/股东按 tick 算一次，避免每个 SSE 连接各算一遍
     this.refreshStats();
     this.broadcast();
@@ -894,7 +910,14 @@ class Game {
    * 强平落地（C 族 C02「天台初体验」）：由 `Market.maybeLiquidate` 通过 `onLiquidate`
    * 钩子上报。这条是事件驱动的，不走收盘判定——爆仓可能发生在一天里的任何时刻。
    */
-  onLiquidate(acc, now = Date.now()) {
+  onLiquidate(acc, now = Date.now(), stockId = null) {
+    // 弹幕先接：强平是「场内事件」，与彩蛋开关无关（两者都是观测层，互不依赖）。
+    // 这里仍在撮合链上（maybeLiquidate → 本函数），异常绝不能穿回去
+    try {
+      if (stockId) this.danmaku.onLiquidate(acc, stockId, now);
+    } catch (e) {
+      logger.error(`[弹幕] 强平上报异常（已忽略，不影响撮合）：${(e && e.message) || e}`);
+    }
     if (!config.milestones || !config.milestones.enabled) return;
     if (!acc || acc.isNPC || !acc.milestones) return;
     try {
@@ -915,6 +938,19 @@ class Game {
       // 异常断在循环中间会留下撤不掉的幽灵单。这里吞掉并记一条账，交易照常
       logger.error(`[我是股神] 强平彩蛋上报异常（已忽略，不影响撮合）：${(e && e.message) || e}`);
     }
+  }
+
+  /**
+   * 玩家主动发一条弹幕（`POST /api/danmaku`）。
+   * 频率、长度、敏感词全在 DanmakuSystem 里判，这里只做登录态与令牌解析。
+   */
+  sendDanmaku(token, stockId, body, now = Date.now()) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    if (acc.isNPC) return { ok: false, error: '无效账户' };
+    const r = this.danmaku.postPlayer(acc, stockId, body, now);
+    if (r.ok) this.persist?.touch(acc);
+    return r;
   }
 
   /**
@@ -1595,6 +1631,9 @@ class Game {
       // 达到 L2 情报等级的券商客户能在公开前看到"哪只股票有消息"；方向是否可见
       // 取决于声誉星级到没到 4★ 以上（§8.1）
       news: this.news.tapeSnapshot(50, now, viewer),
+      // 分时图弹幕：只带最近 5 秒的条目，客户端按 id 去重（不靠上一帧差集，
+      // 断线重连/刷新也不会漏）。玩家行为反应类不携带任何玩家标识
+      danmaku: this.danmaku.snapshot(now),
       lastNews: NewsSystem.visibleFor(this.lastNews, viewer, now) ? this.lastNews : null,
       // 公平窗口（§7.2）：泄露期里给公众一条**模糊**提示，不点方向、不点原因、不点谁。
       // 「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割
@@ -2418,8 +2457,28 @@ class Game {
   historyFor(stockIdRaw) {
     const stockId = this.resolveMarketId(stockIdRaw);
     if (!stockId) return { ok: false, error: '未知标的' };
+    // 「有人正在看这只票」的打点：客户端切股票/刷新本来就会拉一次 history，
+    // 不需要额外心跳。没人看的股票不生成弹幕——省 CPU，也不让 10 只票分掉配额。
+    // **只在个股上打点**：指数没有 NPC 池，为它生成弹幕纯属空转
+    if (this.stocksById.has(stockId)) this.danmaku.noteWatch(stockId);
     const market = this.markets.get(stockId);
     return { ok: true, stockId, priceHistory: market.priceHistory };
+  }
+
+  /**
+   * 「我正在看这只票」的心跳（`GET /api/danmaku/watch`）。
+   * 与 historyFor 里那次打点同一个口径，只是不带数据：`/api/history` 一只股票只拉一次，
+   * 玩家盯盘超过 watchTtlMs（5 分钟）后如果不切股票，watcher 就会过期、这只票彻底哑掉。
+   * 所以交易终端每 60 秒补一次心跳。没人在看的股票不生成弹幕（方案 §3.4）。
+   */
+  watchDanmaku(stockIdRaw) {
+    // 用 resolveStockId 而不是 resolveMarketId：**指数不生成弹幕**（没有 NPC 池），
+    // 让它进 watchers 只会白占一次 _pickStock 的机会，所以这里只认个股
+    if (stockIdRaw == null || stockIdRaw === '') return { ok: false, error: '缺少标的' };
+    const stockId = this.resolveStockId(stockIdRaw);
+    if (!stockId) return { ok: false, error: '未知标的' };
+    this.danmaku.noteWatch(stockId);
+    return { ok: true, stockId };
   }
 
   /**

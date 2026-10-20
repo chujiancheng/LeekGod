@@ -2054,3 +2054,83 @@ input { font: inherit; color: inherit; }
   .rule-kv { flex-direction: column; gap: 2px; }
   .rule-kv .rk { width: auto; }
 }
+
+/* ==================================================================
+   分时图弹幕（Doc/弹幕方案.md L1 飘屏）
+   两层结构：.dm-bar 在标题栏（开关 + 输入），.danmaku-layer 在画布上（纯展示）。
+   ================================================================== */
+.dm-bar { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+/* display:inline-flex 会盖掉 [hidden] 的默认 display:none，必须显式写一条 */
+.dm-bar[hidden] { display: none; }
+.dm-eye {
+  width: 24px; height: 22px; padding: 0; flex: none;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); color: var(--muted);
+  font-size: 12px; line-height: 1; letter-spacing: 0; cursor: pointer;
+}
+.dm-eye.on { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+.dm-eye:hover { color: var(--ink); }
+.dm-input {
+  width: 118px; height: 22px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); color: var(--ink);
+  font-size: 12px; letter-spacing: 0; outline: none;
+}
+.dm-input:focus { border-color: var(--gold); }
+.dm-input::placeholder { color: var(--muted); }
+/* 窄屏把输入框收短，别把「均价与价格 · 成交量 · MACD」挤没了 */
+@media (max-width: 1240px) { .dm-input { width: 84px; } }
+
+/* 飘屏层：只盖价格区上半部（下面要留出成交量与 MACD），右边界让开 58px 价格轴。
+   pointer-events:none 不是优化，是功能前提——它压在 canvas 上，能吃事件就没法看盘 */
+.danmaku-layer {
+  position: absolute; left: 4px; right: 62px; top: 4px; height: 60%;
+  overflow: hidden; pointer-events: none; z-index: 3;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 4%, #000 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 4%, #000 100%);
+}
+.danmaku-layer.off { display: none; }
+/* 光标在读盘时压暗：读数优先于氛围（方案 §6.4）。transition 让它缓一点，别一闪一闪 */
+.danmaku-layer { transition: opacity .12s linear; }
+.danmaku-layer.dim { opacity: .35; }
+
+.dm-item {
+  position: absolute; left: 100%; white-space: nowrap;
+  padding: 3px 9px; border-radius: 11px;
+  font-size: 12.5px; line-height: 1; letter-spacing: 0;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--bg) 64%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  will-change: transform;
+  animation-name: dm-fly;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+/* 位移距离由 JS 按容器宽度现算（spawnDanmaku 里 setProperty('--dm-dist')）。
+   写死一个数字时，容器比它宽就飞不到左边缘（字在半路停住再消失），
+   窄屏又飞得太快——速度应该是恒定的 70px/s */
+@keyframes dm-fly {
+  from { transform: translateX(0); }
+  to   { transform: translateX(var(--dm-dist, -1200px)); }
+}
+
+/* 说话人身份只靠颜色区分（机构冷、游资热、大户紫、散户灰、自营淡）——
+   标签文字会占掉半条弹幕，反而看不清说了什么 */
+.dm-small { color: color-mix(in srgb, var(--ink) 70%, var(--muted)); }
+.dm-mid  { color: color-mix(in srgb, var(--ink) 86%, var(--blue)); }
+.dm-big  { color: var(--tag-big); }
+.dm-hot  { color: var(--tag-hot); }
+.dm-inst { color: var(--tag-whale); }
+.dm-mm   { color: var(--muted); }
+/* 玩家自己发的：金色胶囊，一眼能从 NPC 里分出来 */
+.dm-human {
+  color: var(--gold); font-weight: 600;
+  background: color-mix(in srgb, var(--gold) 20%, transparent);
+  border-color: color-mix(in srgb, var(--gold) 34%, transparent);
+}
+/* 玩家行为反应（「有大哥进场了」）：左侧一道金边。
+   不给它加「在说你」的文字标记——玩家能感觉到被看见，但不该被明确告知在围观他 */
+.dm-item.dm-pb, .dm-item.dm-event {
+  box-shadow: inset 2px 0 0 var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 26%, transparent);
+}

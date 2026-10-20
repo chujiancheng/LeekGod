@@ -941,6 +941,62 @@ const config = {
     momentumClamp: 0.3,
   },
 
+  // 分时图弹幕（见 Doc/弹幕方案.md）—— **文案 100% 取自本地池，无任何模型调用**
+  danmaku: {
+    enabled: true,
+    // 语气前缀（「唉，」「真行，」）总开关：关掉就是纯主句，方便对比观感
+    prefix: true,
+    // 全服节奏：任意两条弹幕之间至少隔这么久。玩家的操作反馈也走这个闸门
+    globalGapMs: 1500,
+    // 单股配额：稳态 4 条/分钟、两条之间至少 6 秒，屏幕才不糊
+    stockPerMin: 4,
+    stockGapMs: 6000,
+    // 单个 NPC 10 分钟内最多说 1 条——「曹俊（杭州）」3 分钟骂 12 次街就穿帮了
+    accGapMs: 600000,
+    // 每次触发 tick 真的开口的概率：不是每 1.5 秒都必说一句，否则像节拍器
+    speakChance: 0.55,
+    // 午休 / 夜间密度减半：这两个阶段没有新成交，说太密就像在念稿子（方案 §2.4）。
+    // 停牌直接不生成，那是 tick 传进来的 halted，不在这里配
+    quietPhases: ['lunch', 'night'],
+    quietFactor: 0.5,
+    // 待发反应的最长滞留：超过就丢，不补播（「14:02 有人被抬走」拖到 14:10 最出戏）
+    queueTtlMs: 60000,
+    // 下发窗口：只带最近 5 秒的条目（客户端按 id 去重，不依赖上一帧差集）
+    snapshotMs: 5000,
+    itemLimit: 60,
+    // 「有人在看」的 TTL：由 /api/history?stock= 打点，5 分钟没看就不为它生成
+    watchTtlMs: 300000,
+
+    // 玩家被动反应（§3.3.2，已拍板：只做 B 档，不做「NPC 接玩家话」）
+    playerB: {
+      enabled: true,
+      // 大额买入的门槛：60 秒内累计成交额 ≥ 流通市值 × 0.05%
+      floatMvPct: 0.0005,
+      windowMs: 60000,
+      // 触发后 30 秒不再累加：否则玩家下一笔零碎单会接着触发
+      quietMs: 30000,
+      // 清仓割肉的最小累计成交额（20 万）
+      minAmount: 200000,
+      // 同一玩家 5 分钟内最多被评论 1 次，否则像被监视
+      commentGapMs: 300000,
+      // 玩家被强平：2 分钟冷却，不受上面 5 分钟 chat 冷却约束
+      liqGapMs: 120000,
+      maxPerMin: 2,
+    },
+
+    // 玩家主动发弹幕
+    player: {
+      enabled: true,
+      maxLen: 24,
+      gapMs: 5000,
+      perMin: 6,
+      // 同文 60 秒内拒发：复制粘贴刷屏是移动端最省力的攻击
+      sameTextGapMs: 60000,
+      // 单账户自然日上限，防脚本（内存计数，重启清零）
+      maxPerDay: 120,
+    },
+  },
+
   // 随机消息（利多 / 利空）
   news: {
     minIntervalMs: 20000,

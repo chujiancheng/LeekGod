@@ -2441,6 +2441,46 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
       'CSS 里有 tone-* 配色规则（bar / 图例共用）');
   }
 
+  // ---- 弹幕：K 线隐藏、位移自适应、光标压暗、心跳、水位落盘（Doc/弹幕方案.md §6）----
+  console.log('\n[24] 分时弹幕（飘屏层）');
+  {
+    const js = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+
+    // 显隐：只在「交易终端 · 分时 · 开着」时显示，K 线必须不显示（方案 §2.4）
+    assert(/function dmVisible\(\)[\s\S]{0,160}!isKline\(\)/.test(js), 'dmVisible 排除 K 线模式');
+    assert(/function dmVisible\(\)[\s\S]{0,160}activeView === 'trade'/.test(js), 'dmVisible 排除非交易终端视图');
+    assert(/chartZoom[\s\S]{0,260}refreshDanmakuChrome\(\)/.test(js), '切换图表模式时刷新弹幕层显隐');
+    assert(/\.danmaku-layer\.off \{ display: none; \}/.test(css), 'CSS 有关层隐藏规则');
+    assert(/\.dm-bar\[hidden\] \{ display: none; \}/.test(css), '输入条隐藏规则（inline-flex 会盖掉 [hidden]，必须显式写）');
+
+    // 位移：按容器宽度算，速度恒定；写死数值时大屏飞不到左边缘
+    assert(/setProperty\('--dm-dist'/.test(js), 'JS 按容器宽度写 --dm-dist');
+    assert(/translateX\(var\(--dm-dist/.test(css), 'keyframes 用 --dm-dist 而不是写死像素');
+
+    // 光标压暗：读数优先
+    assert(/\.danmaku-layer\.dim \{ opacity: \.35; \}/.test(css), 'CSS 有光标压暗规则');
+    assert(/function dimDanmaku\(/.test(js) && /mouseleave[\s\S]{0,120}dimDanmaku\(false\)/.test(js),
+      '光标离开时恢复不透明度');
+
+    // 身份配色：散户也有自己的灰，不能落到默认墨色
+    assert(/\.dm-small \{ color:/.test(css), '散户弹幕有独立配色（.dm-small）');
+
+    // 水位：落盘 + 换账号清 + 服务端重启回退
+    assert(/localStorage\.setItem\(DM_SEQ_KEY/.test(js), '弹幕水位落盘（刷新不重播旧弹幕）');
+    assert(/function resetDanmakuStream\(/.test(js) && /next !== me[\s\S]{0,120}resetDanmakuStream\(\)/.test(js),
+      '换账号时清水位');
+    assert(/d\.seq < dmSeq\) dmSeq = 0/.test(js), '服务端 seq 回退时重置水位');
+
+    // 心跳：没有它，盯同一只票 5 分钟后服务端 watcher 过期、这只票就哑了
+    assert(/function danmakuHeartbeat\(/.test(js) && /\/api\/danmaku\/watch\?stock=/.test(js),
+      '有观看心跳请求');
+    assert(/function tickUI\(\)[\s\S]{0,600}danmakuHeartbeat\(\)/.test(js), '心跳挂在 200ms UI 定时器上');
+
+    // 安全：玩家弹幕一律 textContent，不许拼 HTML
+    assert(/el\.textContent = it\.kind === 'player'/.test(js), '玩家弹幕用 textContent 渲染（防注入）');
+  }
+
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
   process.exit(failed ? 1 : 0);
 })();
