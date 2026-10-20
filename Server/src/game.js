@@ -9,7 +9,8 @@ const { logger } = require('./logger');
 const { Store, Account, r2 } = require('./store');
 const { Market, ACTIONS, setTradeSeqBase } = require('./market');
 const { NewsSystem } = require('./news');
-const { NpcManager, normalizeNpcType } = require('./npc');
+const { NpcManager, normalizeNpcType, totalNpcCount } = require('./npc');
+const identity = require('./identity');
 const { AutoManager } = require('./auto');
 const { IndexFeed } = require('./indexfeed');
 const { DayCycle } = require('./daycycle');
@@ -66,6 +67,16 @@ class Game {
     // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
     this.markets = new Map();
     this.npcs = new Map();
+    // 跨股（P2）的全市场闸门：所有池共用一份预算与一张「单股跨股暴露」表
+    this.crossBudget = 0;
+    this.crossExposure = new Map();
+    // 跨股成交计数（probe 用来算跨股占比，不参与决策）
+    this.crossFillCount = 0;
+    this.crossFillQty = 0;
+    // 每只股票的 NPC 各占一段全局序号（账号 npc-0001… / 展示名的人名都从它派生），
+    // 这样 3160 个账户的名字天然不撞，而名字里又不必带股票前缀
+    const npcPerStock = totalNpcCount();
+    let npcSeq = 0;
     for (const stock of this.stocks) {
       const market = new Market(stock);
       market.journal = opts.persist || null;
@@ -78,7 +89,10 @@ class Game {
       // 强平落地通知（彩蛋 C02 首次爆仓）：market 只负责上报，判定与状态在 game/milestones
       market.onLiquidate = (acc, now) => this.onLiquidate(acc, now);
       this.markets.set(stock.id, market);
-      this.npcs.set(stock.id, new NpcManager(market, null, this.store));
+      const mgr = new NpcManager(market, null, this.store, { seqBase: npcSeq });
+      mgr.game = this; // 跨股（P2）要访问其它 market / 账户权益
+      this.npcs.set(stock.id, mgr);
+      npcSeq += npcPerStock;
     }
     this.news = new NewsSystem(this.stocks);
     for (const npc of this.npcs.values()) npc.news = this.news;
@@ -159,6 +173,10 @@ class Game {
       this.startedAt = Date.now();
       this.day.reanchor(this.startedAt);
       const now = this.startedAt;
+      // 新局的 NPC 名字从这个清空的去重集开始重新生成（名字是确定性的，只要建号顺序
+      // 一致、起点一致，同一局里重启/重开得到的是同一套人；不 reset 会继承上一局的
+      // 禁用集，导致名字整体漂移）
+      identity.reset();
       for (const stock of this.stocks) {
         const market = this.markets.get(stock.id);
         this.npcs.get(stock.id).init(now);
@@ -212,6 +230,8 @@ class Game {
       const acc = new Account(row.name, !!row.is_npc, row.role);
       // 昵称：老档（版本 5 升级上来）为 NULL，表示"还没开完户"，下次登录时补填（§3.2）
       acc.nick = row.nick || null;
+      // NPC 的"常住"股票：名字里不再带前缀，归属只能从这里读（见 identity.js）
+      acc.homeStock = row.home_stock || null;
       acc.cash = row.cash;
       acc.orderFrozen = row.order_frozen;
       acc.shortMargin = row.short_margin;
@@ -249,6 +269,8 @@ class Game {
         continue;
       }
       acc.ledger.set(row.stock_id, {
+        // 开服初始持股（按股票）：十大股东的"变动"基准
+        originQty: row.origin_qty || 0,
         lendOffered: row.lend_offered || 0,
         lendInterestEarned: row.lend_interest_earned || 0,
         lendInterestDebt: row.lend_interest_debt || 0,
@@ -397,19 +419,22 @@ class Game {
     }
 
     // 重建 NPC 报价对象：持仓/现金已在上面恢复，这里只补 manager 的运行期字段。
-    // 每个 NPC 账户属于唯一一只股票（账户名带股票简称前缀），按前缀分派回各自的 manager
+    // 归属读 `home_stock`（账户->常驻股票），**不再靠名字前缀**——NPC 现在叫「曹俊（杭州）」，
+    // 名字里没有股票信息，前缀也反解不出来
     const typeKeys = Object.keys(config.npc.types);
     for (const stock of this.stocks) {
       const npc = this.npcs.get(stock.id);
       const market = this.markets.get(stock.id);
-      const prefix = `${stock.alias}·`;
+      // 做市商（role='mm'）单独恢复：它们不进投资者的类型过滤，也不参与定价脑的情绪
+      const makerRows = snap.accounts.filter(
+        (r) => r.is_npc && r.role === 'mm' && r.home_stock === stock.id
+      );
+      if (makerRows.length) npc.restoreMakers(makerRows);
       const rows = snap.accounts
-        .filter((r) => r.is_npc && typeKeys.includes(normalizeNpcType(r.role)) && r.name.startsWith(prefix))
+        .filter((r) => r.is_npc && typeKeys.includes(normalizeNpcType(r.role)) && r.home_stock === stock.id)
         .map((r) => ({ ...r, role: normalizeNpcType(r.role) }))
         .sort((a, b) =>
-          a.role === b.role
-            ? a.name.length - b.name.length || a.name.localeCompare(b.name)
-            : a.role.localeCompare(b.role)
+          a.role === b.role ? a.name.localeCompare(b.name) : a.role.localeCompare(b.role)
         );
       const capScale =
         (stock.floatShares * stock.initPrice) / config.npc.refMarketCap;
@@ -478,6 +503,13 @@ class Game {
   tick() {
     const now = Date.now();
     this.tickCount += 1;
+    // 跨股投资者的"注意力榜单"（涨幅 + 成交额）：每 60 tick 重排一次。
+    // 每个人只看自己那份短名单（方案 §4.2），所以榜单要全局算、按池下发
+    if (this.tickCount % 60 === 1) this.refreshWatchRank();
+    // 跨股交易的**全市场**每 tick 预算：316 个池共用一份，防止同一 tick 里
+    // 所有池一起往热门股上砸单把盘口打穿（池级预算等于没预算）
+    const xcfg = config.npc.cross;
+    this.crossBudget = xcfg && xcfg.enabled ? xcfg.maxTradesPerTick || 3 : 0;
 
     // ---- 交易日时钟：定位当前阶段，并在阶段切换时做该做的事 ----
     // 阶段由「本轮开盘时刻 + 当前时间」纯函数推出，没有内部状态，重启后自动接上
@@ -571,7 +603,13 @@ class Game {
 
     // 逐只股票推进：做市报价、风控扫描、融券/融资利息都按股票各自结算。
     // 停牌时整段冻结（价格若继续走，玩家看到的停牌倒计时就成了假的）
-    for (const stock of this.stocks) {
+    //
+    // 起点逐 tick 轮转：跨股预算（crossBudget）是全市场共享的，按固定顺序遍历会让
+    // 排在前面几个池每 tick 都把预算吃光，后面三百个池的投资者一辈子轮不到外股
+    const stockCount = this.stocks.length;
+    const stockOff = this.tickCount % stockCount;
+    for (let si = 0; si < stockCount; si++) {
+      const stock = this.stocks[(si + stockOff) % stockCount];
       const market = this.markets.get(stock.id);
       if (!halted) {
         if (active) {
@@ -877,6 +915,25 @@ class Game {
       // 异常断在循环中间会留下撤不掉的幽灵单。这里吞掉并记一条账，交易照常
       logger.error(`[我是股神] 强平彩蛋上报异常（已忽略，不影响撮合）：${(e && e.message) || e}`);
     }
+  }
+
+  /**
+   * 跨股投资者的注意力榜单：按近期涨幅排，涨幅相近时看成交量。
+   *
+   * 真实投资者不会同时盯十只票（方案 §4.2）：机构看全场、游资盯涨幅榜、
+   * 散户只记得昨天涨的那只。这张榜单就是"他们眼里有什么"，
+   * 每人再按自己的 watch 数量截取——所以算一次、全池共用。
+   */
+  refreshWatchRank() {
+    const rows = this.stocks.map((s) => {
+      const m = this.markets.get(s.id);
+      const h = m.priceHistory;
+      const ref = h.length > 60 ? h[h.length - 61].price : m.prevClose || m.lastPrice;
+      const ret = ref > 0 ? m.lastPrice / ref - 1 : 0;
+      return { stockId: s.id, ret, vol: m.volume };
+    });
+    rows.sort((a, b) => b.ret - a.ret || b.vol - a.vol);
+    for (const npc of this.npcs.values()) npc.watchRank = rows;
   }
 
   /** 刷新排行榜与各股票的前十大股东缓存 */
@@ -2209,8 +2266,10 @@ class Game {
       const qty = acc.longQty(stockId);
       if (qty <= 0) continue;
       const role = acc.isNPC ? acc.role || 'npc' : 'player';
-      // NPC 的初始持股记录在账户上（每股一套 NPC 池，账户只属于一只股票）
-      const base = acc.isNPC ? acc.initialLong || 0 : 0;
+      // 初始持股按**股票**读（stock_ledger.origin_qty）：NPC 可以跨股之后，
+      // 账户级的 initialLong 只有一个数，表达不了"在 A 股有 10 万股、在 B 股是 0"，
+      // 读它会让外股持仓的「变动」列变成全量（显示成凭空新进）
+      const base = acc.isNPC ? acc.ledger.get(stockId)?.originQty || 0 : 0;
       rows.push({
         account: acc.name, // 快照与"我"的判定都按账号走，昵称改名不影响
         name: Game.displayName(acc),

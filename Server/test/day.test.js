@@ -780,7 +780,10 @@ console.log('\n[19] 竞价簿里没有「无主委托」：主动吃单的残单
   assert(!mk.book.orders.has(rf.order.id), '进入收敛档后试探远价被撤掉（tag 切换触发重报价）');
 
   const owners = new Set();
+  // 做市商（eng.makers）也必须算 owner：它们和投资者不是一个数组，
+  // 漏掉就会把 6 家自营的 36 张正常报价误判成"无主委托"
   for (const n of eng.npcs) for (const o of n.ownResting) owners.add(o.id);
+  for (const m of eng.makers) for (const o of m.ownResting) owners.add(o.id);
   const orphan = [...mk.book.orders.values()].filter(
     (o) => o.account && o.account.isNPC && !owners.has(o.id)
   );

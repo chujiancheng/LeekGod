@@ -2380,6 +2380,7 @@
     retail: '散户',
     player: '玩家',
     npc: '投资者',
+    mm: '自营',
     whale: 'AI主力',
   };
   const ROLE_CLS = {
@@ -2390,6 +2391,7 @@
     small: 'role-retail',
     retail: 'role-retail',
     player: 'role-player',
+    mm: 'role-mm',
     whale: 'role-whale',
   };
   const HOLDER_ACTION_LABEL = {

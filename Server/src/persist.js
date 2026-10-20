@@ -42,15 +42,15 @@ class Persister {
     this.st = {
       upsertAccount: db.prepare(`
         INSERT INTO accounts
-          (name, is_npc, role, nick, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
+          (name, is_npc, role, nick, home_stock, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
            broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day,
            milestones)
         VALUES
-          (@name, @is_npc, @role, @nick, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
+          (@name, @is_npc, @role, @nick, @home_stock, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
            @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day,
            @milestones)
         ON CONFLICT(name) DO UPDATE SET
-          is_npc = @is_npc, role = @role, nick = @nick, cash = @cash, order_frozen = @order_frozen,
+          is_npc = @is_npc, role = @role, nick = @nick, home_stock = @home_stock, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
           initial_long = @initial_long, last_order_at = @last_order_at, deposited = @deposited,
           broker = @broker, broker_changed_at = @broker_changed_at, broker_since_day = @broker_since_day,
@@ -61,9 +61,9 @@ class Persister {
       delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
       insLedger: db.prepare(`
         INSERT INTO stock_ledger
-          (account, stock_id, lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid,
+          (account, stock_id, origin_qty, lend_offered, lend_interest_earned, lend_interest_debt, lend_interest_paid,
            lend_interest_accrued, finance_interest_accrued)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       delLots: db.prepare('DELETE FROM lots WHERE account = ?'),
       insLot: db.prepare(`
@@ -410,9 +410,13 @@ class Persister {
       name: acc.name,
       is_npc: isNpc,
       role: acc.role,
-      // 昵称只对玩家有意义：NPC 的叫法是账户名派生的（§11.4.1），落盘一份等于多出一份
-      // 与账户名冗余的副本，还让 NPC 逐 tick 有变化可写（项目禁忌）
-      nick: isNpc ? null : acc.nick || null,
+      // 昵称：玩家填的、NPC 由 identity.js 生成的真实姓名（曹俊（杭州））。
+      // 这里曾经对 NPC 写 null（那时名字由账户名 `大米·游资1` 派生，落一份是冗余）——
+      // 名字与账号分家之后 nick 是**唯一**的展示名来源，必须落盘，否则重启后
+      // 股东榜会退回 npc-0312 这种内部键
+      nick: acc.nick || null,
+      // NPC 的"常住"股票（归属），玩家为 NULL
+      home_stock: acc.homeStock || null,
       cash,
       order_frozen: orderFrozen,
       short_margin: acc.shortMargin,
@@ -438,10 +442,13 @@ class Persister {
     });
 
     // 按股票的融券/融资计息明细：整段重写（行数很少，省去逐行 diff 的复杂度）。
-    // 没有挂借也没有欠息的股票不写行，避免 NPC 的 3160 个账户各写 10 行空数据
+    // 没有挂借也没有欠息的股票不写行，避免 NPC 的 3160 个账户各写 10 行空数据。
+    // `originQty` 必须进这个判断：NPC 把初始持仓卖光之后，这一行就只剩它一个非零值，
+    // 漏掉的话重启后初始持仓归零、股东榜的"变动"列会凭空多出一大截
     this.st.delLedger.run(acc.name);
     for (const [stockId, led] of acc.ledger) {
       if (
+        !led.originQty &&
         !led.lendOffered &&
         !led.lendInterestEarned &&
         !led.lendInterestDebt &&
@@ -453,6 +460,7 @@ class Persister {
       }
       this.st.insLedger.run(
         acc.name, stockId,
+        led.originQty || 0,
         led.lendOffered || 0,
         led.lendInterestEarned || 0, led.lendInterestDebt || 0,
         led.lendInterestPaid || 0, led.lendInterestAccrued || 0, led.financeInterestAccrued || 0

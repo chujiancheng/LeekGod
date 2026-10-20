@@ -170,7 +170,11 @@ const acc2 = g2.store.get('tester');
 const accS2 = g2.store.get('shorteruser');
 assert(!!acc2, '玩家账户被恢复');
 assert(!!accS2, '做空玩家账户被恢复');
-assert(!!g2.store.get(`${STOCK.alias}·机构1`) && !!g2.store.get(`${STOCK.alias}·散户220`), 'NPC 账户被恢复');
+// NPC 改真名后账号是 npc-0001 这类内部键，名字在 nick 里，所以按池内账户反查
+assert(
+  N(g2).npcs.length > 0 && N(g2).npcs.every((n) => !!g2.store.get(n.acc.name)),
+  'NPC 账户被恢复'
+);
 const expectSlots = Object.values(config.npc.types).reduce((s, t) => s + t.count, 0);
 assert(N(g2).npcs.length === expectSlots, `NPC 报价对象重建 ${N(g2).npcs.length} / 期望 ${expectSlots}`);
 
@@ -259,7 +263,9 @@ for (const n of N(g1).npcs) {
     npcBad = `${n.acc.name} 未落盘`;
     break;
   }
-  if (Math.abs(row.cash - want) > 1e-6 || row.order_frozen !== 0) {
+  // NPC 现金落盘按「分」取整（persist.writeAccount 的 r2），所以容差用半分；
+  // 这里要守住的是「冻结没有凭空蒸发」，不是小数点后十几位的逐位相等
+  if (Math.abs(row.cash - want) > 0.005 || row.order_frozen !== 0) {
     npcBad = `${n.acc.name} 现金 ${row.cash} ≠ ${want}（冻结 ${row.order_frozen}）`;
     break;
   }
@@ -273,7 +279,9 @@ const snapFloat = lotQtyOf(snap2.lots, 'long') - snap2.markets.get(STOCK.id).sta
 assert(snapFloat === before.floatDelta, `流通盘净额不变 ${snapFloat} 股（多头 − 未平空头）`);
 
 console.log('\n[10] NPC 报价单不入存档，但持仓必须落盘');
-const npcFrozenRow = p2.db.prepare('SELECT order_frozen FROM accounts WHERE name = ?').get(`${STOCK.alias}·机构1`);
+// NPC 改真名后账号是 npc-0001 这种内部键（名字在 nick 里），从池里取一个即可
+const instNpc = N(g1).npcs.find((n) => n.type === 'inst');
+const npcFrozenRow = p2.db.prepare('SELECT order_frozen FROM accounts WHERE name = ?').get(instNpc.acc.name);
 assert(npcFrozenRow.order_frozen === 0, 'NPC 存档里的挂单冻结为 0（资金不会锁死在报价单上）');
 const npcOrderRows = p2.db
   .prepare('SELECT COUNT(*) AS n FROM orders WHERE account IN (SELECT name FROM accounts WHERE is_npc = 1)')
@@ -284,7 +292,7 @@ const npcReserved = p2.db
   .get().n;
 assert(npcReserved === 0, 'NPC 批次预留已归零（不会永久锁住可卖数量）');
 assert(P(g2).book.bids.length > 0 && P(g2).book.asks.length > 0, '重启后 NPC 双边报价已重建（盘口非空）');
-const inst2 = g2.store.get(`${STOCK.alias}·机构1`);
+const inst2 = g2.store.get(instNpc.acc.name);
 assert(inst2.longQty(STOCK.id) > 0, `NPC 持仓已恢复（机构1 持 ${inst2.longQty(STOCK.id)} 股）`);
 
 console.log('\n[11] 续跑后主循环继续推进');

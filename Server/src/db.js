@@ -10,6 +10,10 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 9：NPC 真实身份（accounts 加 home_stock；stock_ledger 加 origin_qty）
+//    **故意不提供 8 → 9 的迁移**：这一版把 NPC 的名字从「大米·游资1」换成真人名，
+//    并让账户可以跨股票交易，老档里的名字既是主键又是流水引用，迁不动也没必要迁
+//    （测试期，删档重开即可）。老档启动会被下面 openDatabase 明确拒绝并提示删档。
 // 8：做空利息按持仓时长累计（stock_ledger 加 lend_interest_accrued 列，可空默认 0）
 // 7：开放平台 API Key（api_keys 表；只加表，没有改既有列）
 // 6：账号与昵称分家（accounts 加 nick 列，name 从此只作登录账号）
@@ -17,7 +21,7 @@ const { logger } = require('./logger');
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -38,7 +42,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   is_npc        INTEGER NOT NULL DEFAULT 0,
   role          TEXT NOT NULL,
   -- 昵称：玩家开户时填、之后随时可改。NULL = 还没开过户（老档升级上来 / 建号未完成）
+  -- NPC 也用它：存真实展示名（曹俊（杭州） / 望元私募 / 宁波桑田路·孙叔），见 identity.js
   nick          TEXT,
+  -- NPC 的"常住"股票：只表示初始建仓在哪只，**不限制它买什么**（跨股交易靠它恢复归属，
+  -- 名字里不再带股票前缀，也就不能再靠前缀反解）。玩家为 NULL
+  home_stock    TEXT,
   cash          REAL NOT NULL,
   order_frozen  REAL NOT NULL DEFAULT 0,
   short_margin  REAL NOT NULL DEFAULT 0,
@@ -72,6 +80,11 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS stock_ledger (
   account                   TEXT NOT NULL,
   stock_id                  TEXT NOT NULL,
+  -- 开服建仓时这个账户在这只股票上的初始持股。
+  -- 为什么不用 accounts.initial_long：那个是**账户级单值**，跨股之后一个账户在 10 只票上
+  -- 各有各的初始持仓，单值表达不了；十大股东的「变动」列原来读它，跨股后会全算错。
+  -- 玩家恒为 0（玩家没有初始建仓，变动基准就是 0）
+  origin_qty                INTEGER NOT NULL DEFAULT 0,
   lend_offered              INTEGER NOT NULL DEFAULT 0,
   lend_interest_earned      REAL NOT NULL DEFAULT 0,
   lend_interest_debt        REAL NOT NULL DEFAULT 0,
@@ -314,11 +327,22 @@ ALTER TABLE stock_ledger ADD COLUMN lend_interest_accrued REAL NOT NULL DEFAULT 
 `;
 
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
-// 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支
+// 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支。
+// **9 故意缺席**：NPC 改真名 + 允许跨股，老档的账户名既是主键又是流水引用，迁不动
 const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;
+
+/** 拒启时的统一提示：把**具体要删的文件**写出来，别让人去猜是哪个档 */
+function rebuildHint(file, from, to) {
+  const abs = path.resolve(file);
+  return (
+    `存档表结构版本为 ${from}，当前代码期望 ${to}，这一版无法原地升级。\n` +
+    `确认不需要旧数据后，删掉这三个文件重开新局：\n` +
+    `  ${abs}\n  ${abs}-wal\n  ${abs}-shm`
+  );
+}
 
 /**
  * 打开（必要时创建）数据库并保证表结构就绪。
@@ -344,14 +368,18 @@ function openDatabase(file) {
   if (from0 === SCHEMA_VERSION) return db;
   if (!Number.isFinite(from0) || from0 < MIN_MIGRATABLE || !MIGRATIONS[from0 + 1]) {
     db.close();
-    throw new Error(
-      `存档表结构版本为 ${row.value}，当前代码期望 ${SCHEMA_VERSION}：` +
-        `旧存档无法直接读取。确认不需要旧数据后，删除存档文件重开新局。`
-    );
+    throw new Error(rebuildHint(file, row.value, SCHEMA_VERSION));
   }
   let from = from0;
   while (from < SCHEMA_VERSION) {
-    db.exec(MIGRATIONS[from + 1]);
+    const sql = MIGRATIONS[from + 1];
+    // 逐级迁到某一版发现没有下一步（当前就是 8 → 9：NPC 改真名那一版）——
+    // 停在中间态比直接拒启更糟（库已经是半新半旧），所以在这里关掉连接、要求重建
+    if (!sql) {
+      db.close();
+      throw new Error(rebuildHint(file, from0, SCHEMA_VERSION));
+    }
+    db.exec(sql);
     from += 1;
   }
   db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));

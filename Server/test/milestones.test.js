@@ -443,9 +443,9 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
 }
 
 // ============================================================
-console.log('\n[14] 存档版本 4 → 8：逐级原地升级补出 milestones / nick / lend_interest_accrued 列（以及 7 的 api_keys 表）');
+console.log('\n[14] 存档版本 4 在 v9 起被明确拒启（NPC 改真名那一版没有迁移路径，必须删库重开）');
 {
-  assert(SCHEMA_VERSION === 8, `当前版本是 8（${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 9, `当前版本是 9（${SCHEMA_VERSION}）`);
   const FILE = tmpFile('v4');
   rmDb(FILE);
   const db = new Database(FILE);
@@ -480,7 +480,10 @@ console.log('\n[14] 存档版本 4 → 8：逐级原地升级补出 milestones /
   } catch (e) {
     err = e.message;
   }
-  assert(!err && !!up, `版本 4 的档被原地升级而不是拒绝：${err}`);
+  assert(
+    !!err && /表结构版本为 4/.test(err) && /删掉这三个文件/.test(err),
+    `版本 4 的档被拒启并给出删档路径：${err.slice(0, 46)}…`
+  );
   if (up) {
     const v = up.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
     assert(Number(v.value) === SCHEMA_VERSION, `版本号写成 ${SCHEMA_VERSION}（${v.value}）`);

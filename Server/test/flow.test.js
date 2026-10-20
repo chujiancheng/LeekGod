@@ -233,9 +233,9 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
   g.stop();
 }
 
-console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧档必须清库重开）；券商列与彩蛋列可原地升级');
+console.log('\n[7] 存档版本：v9 起老档一律拒启（NPC 改真名 + 允许跨股，名字既是主键又是流水引用）');
 {
-  assert(SCHEMA_VERSION === 8, `存档表结构版本为 8（实际 ${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 9, `存档表结构版本为 9（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -251,11 +251,9 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   assert(/表结构版本为 2/.test(msg), `版本 2 的旧档被明确拒绝：${msg.slice(0, 40)}…`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
 
-  // 版本 3 → 8 走的是**逐级原地 ALTER 升级**（券商那批列、彩蛋的 milestones 列、昵称的
-  // nick 列、做空利息的 lend_interest_accrued 列全是可空/带默认值，不用清库）。这条分支
-  // 存在的意义是：引入券商 / 彩蛋 / 昵称 / 按日结做空利息都不必强制清掉正在跑的那一局。
-  // 老档要照原样给出 stock_ledger（版本 2 起就有，但那时没有 lend_interest_accrued 列），
-  // 否则 DDL 会先按**新**结构把它建出来，随后的 ALTER 就撞 duplicate column
+  // 版本 3 的老档**同样被拒**：v9（NPC 真实身份）故意没有 8 → 9 的迁移语句，
+  // 所以 3~8 的任何老档都走不到"逐级升级"那条路，提示里会给出要删的具体文件。
+  // 这一条留着是为了守住「拒启必须是明确报错，而不是半截迁移后的诡异状态」。
   const FILE3 = path.join(os.tmpdir(), `gushen-flow-v3-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE3 + s, { force: true });
   const db3 = new Database(FILE3);
@@ -294,7 +292,10 @@ console.log('\n[7] 存档版本：资金流向列与日线表需要新档（旧�
   } catch (e) {
     upMsg = e.message;
   }
-  assert(!upMsg && !!db4, `版本 3 的旧档被原地升级而不是拒绝：${upMsg}`);
+  assert(
+    !!upMsg && /表结构版本为 3/.test(upMsg) && /删掉这三个文件/.test(upMsg),
+    `版本 3 的旧档被明确拒绝并给出删档路径：${upMsg.slice(0, 46)}…`
+  );
   if (db4) {
     const v = db4.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
     assert(Number(v.value) === SCHEMA_VERSION, `升级后版本号写成 ${SCHEMA_VERSION}（实际 ${v.value}）`);

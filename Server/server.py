@@ -143,6 +143,26 @@ def rotate_log():
         pass
 
 
+def start_failure_hint():
+    """启动即退时，把 server-console.log 里最可能的原因摘出来直接打印。
+
+    最常见的两种：缺依赖（新环境没 npm install）、存档版本不兼容（2026-10-20 起
+    NPC 改真名那一版故意没有 8 → 9 的迁移，任何老档都必须删库重开）。
+    不自动删档——存档是玩家的东西，删不删由人决定。
+    """
+    try:
+        with open(CONSOLE_LOG, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()[-6000:]
+    except OSError:
+        return
+    if "存档表结构版本为" in text:
+        at = text.find("存档表结构版本为")
+        print("\n存档版本不兼容，需要删库重开：")
+        print(text[at:at + 500].rstrip())
+    elif "Cannot find module" in text:
+        print("\n缺少依赖：先在本目录执行 npm install 再启动")
+
+
 def start():
     pid = get_pid()
     if pid:
@@ -178,6 +198,7 @@ def start():
 
     if process.poll() is not None:
         print("启动失败，查看 server-console.log")
+        start_failure_hint()
         remove_pid()
         return False
 
@@ -528,6 +549,7 @@ def wait_ready(seconds=30):
             return True
         if not get_pid():
             print("启动后进程已退出，查看 server-console.log")
+            start_failure_hint()
             return False
         time.sleep(1)
     print(f"{seconds} 秒内服务未应答，进程可能还在初始化；稍后 status 确认")

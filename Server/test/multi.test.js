@@ -85,11 +85,14 @@ console.log('\n[1] 十只股票 + 大盘指数就位，每只自成一套市场'
   }
   assert(dup === 0 && names.size === totalNpc, 'NPC 账户名全局唯一');
 
-  // 每只股票的 NPC 只持有自己那只股票
-  const bad = [...g.npcs.values()].find(
-    (n) => n.npcs.some((x) => x.acc.longs.size > 1 || !x.acc.longs.has(n.stock.id))
+  // 归属不串：每个 NPC 的「初始底仓」（origin_qty）只能落在自己那只股票上。
+  // 跨股（P2）之后账户可以在别股持仓，但那是买来的，不是分来的——底仓串了才是真 bug
+  const bad = [...g.npcs.values()].find((n) =>
+    n.npcs.some((x) =>
+      [...x.acc.ledger.entries()].some(([sid, led]) => led.originQty > 0 && sid !== n.stock.id)
+    )
   );
-  assert(!bad, '每个 NPC 账户只在自己股票的池子里持仓');
+  assert(!bad, '每个 NPC 的初始底仓只落在自己股票的池子里（外股持仓只能来自跨股买入）');
 
   // 流通盘守恒：每只股票的多头总量 = 该股流通盘（开服无空头）
   for (const s of config.stocks) {

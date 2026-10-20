@@ -9,6 +9,7 @@ const { logger } = require('./logger');
 const { ACTIONS } = require('./market');
 const { Account, r2 } = require('./store');
 const broker = require('./broker');
+const identity = require('./identity');
 
 function gauss() {
   // 标准正态近似
@@ -71,13 +72,21 @@ class NpcManager {
    * @param {import('./market').Market} market
    * @param {import('./news').NewsSystem} news
    * @param {import('./store').Store} [store]
+   * @param {{seqBase?:number}} [opts] seqBase = 本池第一个 NPC 的全局序号。
+   *   账号与名字都由它派生（`npc-0312` / `曹俊（杭州）`），跨股票递增才不会撞；
+   *   由 `Game` 按「股票顺序 × 每池人数」算出并传入。
    */
-  constructor(market, news, store) {
+  constructor(market, news, store, opts = {}) {
     this.market = market;
     this.news = news;
     this.store = store || null;
     this.stock = market.stock;
+    this.seqBase = opts.seqBase || 0;
     this.npcs = [];
+    // 做市商（role='mm'）：每股票 6 家券商自营，只报价不吃单。
+    // 与 npcs（316 个投资者）分开存：定价脑/力量天平/意图仍按投资者池算，
+    // 盘口则由这里铺——两者别混在一起，否则 requoteQty / 情绪倾斜会互相污染
+    this.makers = [];
     this.fairValue = market.stock.initPrice;
     // 基本面重心（慢速随机游走的锚）与趋势阶段状态
     this.fund = market.stock.initPrice;
@@ -130,6 +139,31 @@ class NpcManager {
     const cfg = config.npc;
     this.capScale = (market.stock.floatShares * market.stock.initPrice) / cfg.refMarketCap;
     this.qtyScale = market.stock.floatShares / cfg.refFloatShares;
+    // 做市商每档量：按「旧池每侧总挂单量 ÷（家数 × 档数）」反推，深度守恒。
+    // 拍脑袋乘 50 会让盘口厚度凭空翻几倍——盘口变厚，主动单就永远打不穿，
+    // 价格会在盘口里"滑行"，趋势和波动全被吃掉
+    const mcfg = cfg.maker || {};
+    const makerCount = Math.max(1, mcfg.count || 6);
+    const makerLevels = Math.max(1, mcfg.levels || 3);
+    const oldSideQty = Object.values(cfg.types).reduce((s, t) => {
+      const rq = t.requoteQty || [100, 800];
+      return s + t.count * ((rq[0] + rq[1]) / 2);
+    }, 0);
+    this.makerQty =
+      mcfg.qtyPerLevel != null
+        ? mcfg.qtyPerLevel
+        : (oldSideQty * (mcfg.depthMul == null ? 1 : mcfg.depthMul)) / (makerCount * makerLevels);
+    // ---- 跨股（P2）运行期状态 ----
+    this.game = null; // 由 Game 注入：跨股要访问其它 market / 权益
+    this.watchRank = []; // 涨幅/成交额榜（Game 每 N tick 刷新一次）
+    // 跨股的单股暴露与每 tick 预算都是**全市场**口径，落在 game 上（见 crossStore）。
+    // 本池没有 game（单元测试单独 new）时才回落到自己的字段。
+    this.crossExposure = new Map();
+    this._crossBudget = 0;
+    // 一个游戏日多少 tick：私人估值的日频漂移靠它错峰
+    const dph = config.day && config.day.enabled ? config.day.phases : null;
+    const dayMs = dph ? dph.reduce((s, p) => s + p.ms, 0) : 620000;
+    this.dayTicks = Math.max(1, Math.round(dayMs / (config.tickIntervalMs || 700)));
   }
 
   /** 按类型取行为档案（初始化时已挂到 n.profile） */
@@ -253,11 +287,18 @@ class NpcManager {
     const capScale = this.capScale;
     const qtyScale = this.qtyScale;
 
-    // 严格守恒：五类 holdRatio 合计 = 100% 流通盘。
+    // ---- 做市商：先定下自营库存，剩下的才分给投资者 ----
+    // 顺序很重要：守恒口径是「流通盘总量不变」，做市商拿的是同一个盘子里的 4%
+    const mcfg = cfg.maker || {};
+    const makerOn = !!mcfg.enabled;
+    const invPct = makerOn ? Math.max(0, Math.min(0.5, mcfg.initInventoryPct || 0)) : 0;
+    const investorFloat = Math.floor((float * (1 - invPct)) / lot) * lot;
+
+    // 严格守恒：五类 holdRatio 合计 = 100% 投资者盘子。
     // 各类按比例取整手后，余数补给最后一类（小散户），避免丢股。
-    const holdTotals = entries.map(([, t]) => Math.floor((float * t.holdRatio) / lot) * lot);
+    const holdTotals = entries.map(([, t]) => Math.floor((investorFloat * t.holdRatio) / lot) * lot);
     const holdSum = holdTotals.reduce((a, b) => a + b, 0);
-    holdTotals[holdTotals.length - 1] += float - holdSum;
+    holdTotals[holdTotals.length - 1] += investorFloat - holdSum;
 
     const split = (total, n) => {
       const base = Math.floor(total / n / lot) * lot;
@@ -267,16 +308,27 @@ class NpcManager {
     };
 
     let instIdx = 0;
+    let seq = this.seqBase; // 全局唯一序号：账号与展示名都从它派生（见 identity.js）
+
+    if (makerOn) this.initMakers(now, float - investorFloat);
+
     for (let ti = 0; ti < entries.length; ti++) {
       const [typeKey, t] = entries[ti];
       const sharesArr = split(holdTotals[ti], t.count);
       for (let i = 0; i < t.count; i++) {
-        // 账户名带股票简称前缀：10 只股票各有 316 个 NPC，不加前缀会互相覆盖
-        const acc = new Account(`${this.stock.alias}·${t.label}${i + 1}`, true, typeKey);
+        // 账号是内部键（npc-0312），展示名走 nick（曹俊（杭州））。
+        // 两者分家之后名字里不再带股票前缀，所以归属改由 homeStock 记录
+        const acc = new Account(identity.accountFor(seq), true, typeKey);
+        acc.nick = identity.nameFor(typeKey, seq);
+        acc.homeStock = this.stock.id;
         acc.cash = (t.totalCash / t.count) * capScale;
         const shares = sharesArr[i];
         acc.initialLong = shares;
+        // 初始持仓的"按股票"口径：十大股东的变动列读它，跨股之后账户级的
+        // single initialLong 表达不了，所以两处都写（后者仍供 npc 库存软目标用）
+        acc.ledgerOf(this.stock.id).originQty = shares;
         acc.longPos(this.stock.id).lots.push({ qty: shares, price: this.stock.initPrice, ts: now - preAge, reserved: 0 });
+        seq += 1;
         // NPC 自动出借：按类型固定比例挂入融券池（开局玩家没券，池子必须有基础券源）。
         // 做空类（机构/游资）不出借：同股多空互斥下它们要靠卖光库存翻成净空，
         // 而挂借中的券卖不掉（freeSellableLong 扣掉 lendOffered），留着挂借就永远翻不了空。
@@ -294,6 +346,9 @@ class NpcManager {
           }
         }
         if (this.store) this.store.put(acc);
+        // 新局建号必须立刻标脏：初始 3160 个账户只靠 sweep 分片轮转的话，
+        // 第一次 commit 只写得进 1/300，重启时读回来的名单是残的
+        if (this.market.notifyChange) this.market.notifyChange(acc);
         this.npcs.push({
           acc,
           type: typeKey,
@@ -314,6 +369,566 @@ class NpcManager {
       }
     }
     this.applyTags();
+  }
+
+  /**
+   * 做市商档案。**不是**一类投资者，所以不从 `config.npc.types` 派生：
+   * - 不看消息、不带方向观点（sentiment 恒 0）——自营只提供流动性
+   * - 不做空（库存从流通盘里划，够铺卖盘）
+   * - 挂单量由 `requoteMaker` 按档位直接算，不走 requoteQty
+   */
+  makerProfile() {
+    const m = config.npc.maker;
+    return {
+      label: '自营',
+      canShort: false,
+      useCamp: false,
+      momentum: false,
+      newsScope: '公众',
+      sentimentScale: 0,
+      publicNewsFade: 0.5,
+      instNewsFollow: 0,
+      fundWeight: 0.35, // 偏基本面一点：自营的锚不该被短端情绪带走
+      quoteLastWeight: m.quoteLastWeight,
+      valueHitEdge: 0.002,
+      quoteTilt: 0,
+      centerShift: m.centerShift,
+      spread: m.spread,
+      requoteQty: [0, 0],
+      aggressiveQty: [0, 0],
+      aggressiveRate: m.aggressiveRate || 0,
+      polarOrderScale: false,
+      openShortSentiment: -9,
+      inventorySkew: 0, // 存货倾斜在 requoteMaker 里按库存单独算
+      heatFade: 0,
+    };
+  }
+
+  /**
+   * 建 6 家券商自营（role='mm'）：账号 `mm-600001-1`、展示名「钟信自营」。
+   * 现金与旧池同量（Σ types.totalCash × capScale）、库存从流通盘划来的 invQty。
+   * 家数取 `min(config.npc.maker.count, 券商数)`——每家券商自营只出现一次，
+   * 玩家在盘口看到的是六家不同的自营席位。
+   */
+  initMakers(now, invQty) {
+    const cfg = config.npc;
+    const mcfg = cfg.maker;
+    const lot = this.stock.lotSize;
+    const preAge = config.trade.lockMs + 60000;
+    const brokers = broker.describeAll() || [];
+    const count = Math.max(1, Math.min(mcfg.count || 6, brokers.length || mcfg.count || 6));
+    const totalCash = Object.values(cfg.types).reduce((s, t) => s + t.totalCash, 0);
+    const perCash = r2((totalCash * this.capScale) / count);
+    const perInv = Math.floor(invQty / count / lot) * lot;
+
+    for (let i = 0; i < count; i++) {
+      const bk = brokers[i] || { key: `mm${i + 1}`, abbr: `自营${i + 1}`, name: `自营${i + 1}` };
+      const acc = new Account(`mm-${this.stock.id}-${i + 1}`, true, 'mm');
+      // public=false 时统一叫「机构专用」：不暴露是哪家券商在做市
+      acc.nick = mcfg.public === false ? '机构专用' : identity.makerNick(bk.abbr || bk.name);
+      acc.homeStock = this.stock.id;
+      acc.cash = perCash;
+      // 最后一个吃掉取整余数，保证 6 家库存合计 = invQty
+      const qty = i === count - 1 ? invQty - perInv * (count - 1) : perInv;
+      acc.initialLong = qty;
+      acc.ledgerOf(this.stock.id).originQty = qty;
+      if (qty > 0) {
+        acc
+          .longPos(this.stock.id)
+          .lots.push({ qty, price: this.stock.initPrice, ts: now - preAge, reserved: 0 });
+      }
+      if (this.store) this.store.put(acc);
+      if (this.market.notifyChange) this.market.notifyChange(acc);
+      const h = identity.hash(`mm:${this.stock.id}:${i}`);
+      this.makers.push({
+        acc,
+        type: 'mm',
+        profile: this.makerProfile(),
+        initialLong: qty,
+        initialCash: acc.cash,
+        camp: 0,
+        ownBias: 0,
+        ownResting: [],
+        aucTag: null,
+        wantShort: false,
+        requoteIn: i, // 错峰：6 家不挤在同一 tick 重挂
+        brokerKey: bk.key,
+        // 每家的个性：点差/档距/耐心略有差异，否则 6 家报价完全重合，盘口像一堵墙
+        aggBias: 0.85 + h * 0.3,
+        spreadBias: 0.85 + identity.hash(`mm-s:${this.stock.id}:${i}`) * 0.4,
+        lastQuotePx: 0,
+      });
+    }
+  }
+
+  /**
+   * 从存档恢复做市商（role='mm'）：账户/持仓/现金已由 applySnapshot 建好，
+   * 这里只补运行期字段。券商按账号序号回填（`mm-600001-1` → 第 1 家券商），
+   * 所以第几家自营永远是同一家——玩家看到的席位不会因为重启而换人。
+   */
+  restoreMakers(rows) {
+    const cfg = config.npc.maker;
+    const brokers = broker.describeAll() || [];
+    const count = Math.max(1, Math.min(cfg.count || 6, brokers.length || 6));
+    const sorted = rows.slice().sort((a, b) => a.name.localeCompare(b.name));
+    sorted.forEach((row, i) => {
+      const idx = Math.min(i, count - 1);
+      const h = identity.hash(`mm:${this.stock.id}:${idx}`);
+      this.makers.push({
+        acc: this.store.get(row.name),
+        type: 'mm',
+        profile: this.makerProfile(),
+        initialLong: row.initial_long,
+        initialCash: 0,
+        camp: 0,
+        ownBias: 0,
+        ownResting: [],
+        aucTag: null,
+        wantShort: false,
+        requoteIn: idx,
+        brokerKey: (brokers[idx] || {}).key || null,
+        aggBias: 0.85 + h * 0.3,
+        spreadBias: 0.85 + identity.hash(`mm-s:${this.stock.id}:${idx}`) * 0.4,
+        lastQuotePx: 0,
+      });
+    });
+  }
+
+  /**
+   * 投资者还能挂多少限价单（1 = 旧行为，0 = 只吃单不挂单）。
+   *
+   * P1 之后盘口由 6 家做市商提供，投资者不再人人双边报价——只有大户/中户
+   * 会在自己估值附近挂小额限价（方案 §4.4）。这个比例同时作用在挂单量上：
+   * 做市商关掉时恒为 1，行为逐位退回改动前。
+   */
+  quoteScaleOf(n) {
+    const m = config.npc.maker;
+    if (!m || !m.enabled) return 1;
+    if (n.type === 'big') return 0.35;
+    if (n.type === 'mid') return 0.25;
+    return 0;
+  }
+
+  /**
+   * 做市商是否该重报价。
+   * 与投资者的 `shouldRequote` 同源但更简单：自营没有情绪、没有阵营，
+   * 只有"价格动了没有"和"手上还有没有活单"两个理由。
+   */
+  shouldRequoteMaker(m, now) {
+    if (this.market.auctionKind && this.market.auctionKind(now)) {
+      // 竞价里只补一次：每 tick 撤光重挂会搅散委托簿，虚拟成交价永远在抖
+      const tag = this.session && this.session.converging ? 'converge' : 'probe';
+      if (m.aucTag !== tag) {
+        m.aucTag = tag;
+        return true;
+      }
+      return m.ownResting.length === 0;
+    }
+    m.aucTag = null;
+    if (!m.ownResting.length) return true;
+    // 价格动了就跟：不做无意义的撤挂（6 家 × 6 单，每 tick 全撤也是笔开销）
+    const drift = m.lastQuotePx > 0 ? Math.abs(this.market.lastPrice / m.lastQuotePx - 1) : 1;
+    if (drift > 0.0008) return true;
+    if (m.requoteIn > 0) {
+      m.requoteIn -= 1;
+      return false;
+    }
+    const cfg = config.npc.maker;
+    if (Math.random() < (cfg.requoteRate != null ? cfg.requoteRate : 0.5)) {
+      m.requoteIn = Math.floor(rand(1, 3));
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 做市商报价：双边各 `levels` 档，档位按 step 向外拉开。
+   *
+   * 与投资者报价的三处关键差别：
+   * ① **不带情绪**（自营没有方向观点），中枢只由「最新价 + 基本面锚」决定；
+   * ② **库存倾斜**：库存高于目标 → 中枢整体下移（急着出货）、低于目标 → 上移（急着收货）。
+   *    这就是存货模型的核心：做市商靠价差赚钱，不靠赌方向，库存偏离用价格纠正；
+   * ③ 单笔量大一个量级（接管原来 316 个人的深度），但只有 6 家、每家 3 档，
+   *    盘口从"密密麻麻的小单"变成"几家自营的大单"。
+   */
+  requoteMaker(m, now) {
+    const cfg = config.npc.maker;
+    const lot = this.stock.lotSize;
+    const sid = this.stock.id;
+    // 撤旧单（做市商现金充足，不存在"撤了挂不回来"的问题，可以全撤）
+    for (const o of m.ownResting) {
+      if (o.status === 'live') this.market.cancel(m.acc, o.id, now, { internal: true });
+    }
+    m.ownResting = m.ownResting.filter((o) => o.status === 'live');
+
+    const p = m.profile;
+    const lastPx = this.market.lastPrice;
+    const qlw = this.quoteLastWeight(p);
+    const base = qlw * lastPx + (1 - qlw) * this.valueOf(p);
+    // 库存倾斜：dev > 0 = 库存超目标 → 中枢下移
+    const target = Math.max(lot, m.initialLong * (cfg.inventoryTargetPct != null ? cfg.inventoryTargetPct : 0.5));
+    const q = m.acc.longQty(sid);
+    const dev = Math.max(-2, Math.min(2, (q - target) / target));
+    let center = base * (1 - dev * (cfg.inventorySkew || 0) * 0.004 * (m.aggBias || 1));
+    // ---- 库存告急（P0-3）----
+    // 自营不做空，库存就是卖盘的全部来源。卖光之后整侧卖盘消失，玩家一手都买不进
+    //（实测某只票连续空 60 tick ≈ 42 秒，腾迅/梅团/网艺的库存都到过 0%）。
+    // 缺货时做市商的正常反应是**抬价收货**，而不是按原价把最后的货卖光：
+    //   scarce = 0（库存 ≥ 底仓）→ 不变；scarce = 1（一点货都不剩）→ 中枢上移 scarceShift
+    const reserve = m.initialLong * (cfg.minInventoryPct != null ? cfg.minInventoryPct : 0.35);
+    const scarce = reserve > 0 ? Math.max(0, Math.min(1, 1 - q / reserve)) : 0;
+    if (scarce > 0) {
+      center *= 1 + scarce * (cfg.scarceShift != null ? cfg.scarceShift : 0.012) * (m.aggBias || 1);
+    }
+    const cush = this.quoteCushion();
+    center = Math.min(lastPx * (1 + cush), Math.max(lastPx * (1 - cush), center));
+
+    const sr = p.spread || [0.0004, 0.0012];
+    const spread = Math.max(0.02, base * rand(sr[0], sr[1]) * (m.spreadBias || 1) * this._mul.spread);
+    const step = (cfg.step || 0.0012) * (m.aggBias || 1);
+    const levels = Math.max(1, cfg.levels || 3);
+    const levelQty = (i) =>
+      roundLot(this.makerQty * this.qtyScale * (1 - 0.22 * i) * this._mul.qty, lot);
+    // 缺货时买盘放大：抬价之后还得真把量摆出来，才收得回货
+    const bidMul = 1 + scarce * Math.max(0, (cfg.scarceBidMul != null ? cfg.scarceBidMul : 2) - 1);
+
+    let placed = false;
+    for (let i = 0; i < levels; i++) {
+      const off = step * i;
+      const bidPx = this.market.clampPrice(center * (1 - off) - spread / 2);
+      const askPx = this.market.clampPrice(center * (1 + off) + spread / 2);
+      const want = levelQty(i);
+
+      // 买盘：受现金与库存上限约束（自营也有一条"别把整只票买下来"的线）
+      if (bidPx > 0.01) {
+        let bq = Math.min(want * bidMul, this.cashCapacity(m, bidPx), this.longCapacity(m));
+        bq = Math.floor(bq / lot) * lot;
+        if (bq >= lot) {
+          const r = this.market.place(m.acc, this.buyOpenOpts(m, bq, bidPx, now));
+          if (r.ok) {
+            m.ownResting.push(r.order);
+            placed = true;
+          }
+        }
+      }
+      // 卖盘：自营库存卖出（不做空），**留底仓**。
+      // 底仓（minInventoryPct × 初始库存）之上的部分才按档位挂；库存低于底仓时只报一手，
+      // 保证"还有货就有卖盘"——最差是卖盘极薄，而不是整侧归零、玩家完全买不进。
+      // 只约束报价量，不冻结货：真要卖还是卖得掉的（有买家吃单时照常成交）。
+      const sellable = m.acc.freeSellableLong(sid, now);
+      const avail = sellable - reserve;
+      const sellCap = avail >= lot ? avail : sellable >= lot ? lot : 0;
+      if (sellCap >= lot) {
+        let sq = Math.min(want, sellCap);
+        sq = Math.floor(sq / lot) * lot;
+        if (sq >= lot) {
+          const r = this.market.place(m.acc, {
+            action: ACTIONS.SELL_CLOSE,
+            qty: sq,
+            price: askPx,
+            now,
+            noCooldown: true,
+          });
+          if (r.ok) {
+            m.ownResting.push(r.order);
+            placed = true;
+          }
+        }
+      }
+    }
+    if (placed) m.lastQuotePx = lastPx;
+  }
+
+  /**
+   * 投资者的私人估值（P2）：**每股一个**，不由池级 fairValue 派生。
+   *
+   * 真实投资者看不到"上帝视角的公允价值"，每个人心里有自己的价：
+   * 发行价 × (1 ± valueBias)，之后每天向「自己的成本 + 市场价」的均值靠拢。
+   * 偏置由 (账户名, 股票) 哈希确定性生成 → 重启后还是同一个人、同一个看法。
+   */
+  privateValue(n, sid, market) {
+    if (!n.pv) n.pv = new Map();
+    let v = n.pv.get(sid);
+    if (v == null) {
+      const cfg = config.npc.cross;
+      const h = identity.hash(`pv:${n.acc.name}:${sid}`);
+      // ⚠️ 锚必须是**当前市价**，不是发行价：游戏里的价格能走出几倍行情，
+      // 用发行价当锚会让所有人一致认为"太贵了"，于是只卖不买（实测 200 tick
+      // 跨股成交 0 笔）。以市价为锚、个人偏置 ±8% 产生分歧，日均向成本/市价靠拢，
+      // 均值回归力来自"很多人的偏见平均"，不需要上帝视角
+      v = market.lastPrice * (1 + (h * 2 - 1) * (cfg.valueBias || 0.08));
+      n.pv.set(sid, v);
+    }
+    return v;
+  }
+
+  /** 该账户在某只股票上的持仓均价；没持仓返回 0 */
+  avgCost(n, sid) {
+    const pos = n.acc.longs.get(sid);
+    if (!pos || !pos.lots.length) return 0;
+    let q = 0;
+    let cost = 0;
+    for (const l of pos.lots) {
+      q += l.qty;
+      cost += l.qty * l.price;
+    }
+    return q > 0 ? cost / q : 0;
+  }
+
+  /**
+   * 私人估值每日向「成本与市价的均值」靠拢——投资者的看法会被自己的持仓和行情拉回去。
+   * 没有这一步，早期随机偏置会永久固化：看错的人一辈子看错，价格失去均值回归力。
+   */
+  driftPrivateValues() {
+    const cfg = config.npc.cross;
+    if (!cfg || !cfg.enabled || !this.game) return;
+    const alpha = cfg.valueDrift != null ? cfg.valueDrift : 0.3;
+    for (const n of this.npcs) {
+      if (!n.pv) continue;
+      for (const [sid, v] of n.pv) {
+        const mk = this.game.markets.get(sid);
+        if (!mk) continue;
+        const cost = this.avgCost(n, sid);
+        const target = cost > 0 ? (cost + mk.lastPrice) / 2 : mk.lastPrice;
+        n.pv.set(sid, v + (target - v) * alpha);
+      }
+    }
+  }
+
+  /**
+   * 该账户这一轮看哪几只外股：「已有持仓」+「涨幅榜前列」。
+   *
+   * 方案 §4.2 的表里写的是「持仓 + 涨幅前 N」，两个来源缺一不可：
+   *   - 只给涨幅榜 → 买进来的票一旦掉出榜就再也看不见，永远卖不掉（尸体仓位）；
+   *   - 只给持仓   → 永远发现不了新票，跨股市场是一潭死水。
+   * 所以先按 `watchHold` 给持仓留名额，剩下的从 `watchRank` 补齐。
+   */
+  crossCandidates(n) {
+    const cfg = config.npc.cross;
+    const w = Math.max(1, (cfg.watch && cfg.watch[n.type]) || 2);
+    const holdQuota = Math.min(w, (cfg.watchHold && cfg.watchHold[n.type]) || 1);
+    const out = [];
+    for (const [sid] of n.acc.longs) {
+      if (out.length >= holdQuota) break;
+      if (sid === this.stock.id) continue;
+      if (!this.game || !this.game.markets.has(sid)) continue;
+      out.push(sid);
+    }
+    for (const r of this.watchRank || []) {
+      if (out.length >= w) break;
+      if (r.stockId === this.stock.id || out.includes(r.stockId)) continue;
+      out.push(r.stockId);
+    }
+    return out;
+  }
+
+  /**
+   * 跨股闸门（预算 + 单股暴露）的存放处：有 game 就挂 game，独立跑测试才回落到本池。
+   *
+   * ⚠️ 必须全市场共享。这两条闸门最初写成了池级字段，316 个池各算各的：
+   * 「每 tick 3 笔」变成全市场 948 笔、单股 8% 流通盘变成 316×8% —— 闸门形同虚设。
+   * 方案 §5 的反羊群本意是「同一批钱不能把一只票推上天」，那是市场级的口径。
+   */
+  crossStore() {
+    if (!this.game) return this;
+    if (!this.game.crossExposure) this.game.crossExposure = new Map();
+    if (this.game.crossBudget == null) this.game.crossBudget = 0;
+    return this.game;
+  }
+
+  crossUsed(sid) {
+    return this.crossStore().crossExposure.get(sid) || 0;
+  }
+
+  addCrossUsed(sid, delta) {
+    const st = this.crossStore();
+    st.crossExposure.set(sid, Math.max(0, (st.crossExposure.get(sid) || 0) + delta));
+  }
+
+  /** 跨股成交计数（只给 probe 看占比用，不参与任何决策） */
+  noteCrossFill(qty) {
+    const st = this.crossStore();
+    st.crossFillCount = (st.crossFillCount || 0) + 1;
+    st.crossFillQty = (st.crossFillQty || 0) + qty;
+  }
+
+  crossBudget() {
+    return this.crossStore().crossBudget || 0;
+  }
+
+  spendCrossBudget() {
+    this.crossStore().crossBudget -= 1;
+  }
+
+  /**
+   * 跨股一笔（P2）：按「私人估值 + 动量 + 消息」给外股打分，做一个仓位调整。
+   *
+   * 三条硬约束（方案 §5）：
+   * ① 单只外股市值 ≤ 自有权益 maxSinglePct、外股合计 ≤ maxForeignPct；
+   * ② 池级单股暴露 ≤ 该股流通市值 maxStockExposurePct（反羊群：10 只票不能被同一批钱推成同涨同跌）；
+   * ③ 外股只吃对手价、不挂长期单（不污染别股的盘口判断）。
+   */
+  maybeCrossStock(n, now, inAuction = null) {
+    const cfg = config.npc.cross;
+    if (!cfg || !cfg.enabled || !this.game) return;
+    // 竞价段一律不做跨股：跨股的本质是"看到外股便宜就立刻吃对手价"，
+    // 而竞价段只累积不撮合——此刻下单必然吃不到，只会留下一张长期挂单。
+    // 竞价状态由 step 统一算好传进来（默认自己算，方便单独调用）
+    const auc =
+      inAuction == null ? (this.market.auctionKind ? !!this.market.auctionKind(now) : false) : inAuction;
+    if (auc) return;
+    const rate = (cfg.rate && cfg.rate[n.type]) || 0;
+    if (rate <= 0 || Math.random() >= rate * this.activity()) return;
+    if ((n.crossCool || 0) > 0) {
+      n.crossCool -= 1;
+      return;
+    }
+    if (this.crossBudget() <= 0) return;
+    const cands = this.crossCandidates(n);
+    if (!cands.length) return;
+    const sid = cands[Math.floor(Math.random() * cands.length)];
+    const market = this.game.markets.get(sid);
+    if (!market || !market.lastPrice) return;
+
+    const price = market.lastPrice;
+    const pv = this.privateValue(n, sid, market);
+    const valueScore = Math.max(-0.3, Math.min(0.3, pv / price - 1));
+    // 动量：该股最近 momentumTicks 的涨跌幅（从它自己的分时取，跨股也看得到）
+    let mom = 0;
+    const h = market.priceHistory;
+    const mt = config.npc.momentumTicks;
+    if (h && h.length > mt) {
+      const ref = h[h.length - 1 - mt].price;
+      if (ref > 0) mom = Math.max(-0.3, Math.min(0.3, price / ref - 1));
+    }
+    const newsS =
+      this.news && this.news.sentiment ? this.news.sentiment('散户', now, sid, null) : 0;
+    const wv = (cfg.wValue && cfg.wValue[n.type]) || 0.5;
+    const wm = (cfg.wMom && cfg.wMom[n.type]) || 0.5;
+    const wn = (cfg.wNews && cfg.wNews[n.type]) || 0.5;
+    // 打分 = 预期收益（1 = 100%）：价值偏离 + 动量 + 消息冲击 + 小噪声
+    const score = wv * valueScore + wm * mom + wn * newsS * 0.02 + gauss() * 0.008;
+
+    const action =
+      score > cfg.buyEdge ? 'buy' : score < -(cfg.sellEdge || 0.03) ? 'sell' : null;
+    if (!action) return;
+
+    const equity = this.game.equityOf(n.acc);
+    if (!(equity > 0)) return;
+    const lot = market.stock.lotSize;
+    const curQty = n.acc.longQty(sid);
+    const curMV = curQty * price;
+
+    if (action === 'buy') {
+      // 目标权重：分数越高越想买，上限 maxSinglePct
+      const targetW = Math.min(
+        cfg.maxSinglePct || 0.3,
+        ((score - cfg.buyEdge) / Math.max(0.02, cfg.buyEdge)) * 0.12
+      );
+      let addMV = targetW * equity - curMV;
+      // 外股合计上限
+      const foreignMV = this.foreignMV(n, sid);
+      addMV = Math.min(addMV, (cfg.maxForeignPct || 0.6) * equity - foreignMV);
+      // 全市场单股暴露上限（反羊群）
+      const capMV = market.stock.floatShares * price * (cfg.maxStockExposurePct || 0.08);
+      const usedMV = this.crossUsed(sid) * price;
+      addMV = Math.min(addMV, capMV - usedMV);
+      if (addMV <= 0) return;
+
+      const rq = (cfg.qtyPct && cfg.qtyPct[n.type]) || [0.00005, 0.0002];
+      const maxByType = market.stock.floatShares * rand(rq[0], rq[1]);
+      let qty = Math.min(addMV / price, maxByType, n.acc.cash / (price * (1 + config.trade.feeRate)));
+      qty = Math.floor(qty / lot) * lot;
+      if (qty < lot) return;
+      // 外股只吃对手价
+      const asks = market.book.asks;
+      if (!asks.length) return;
+      const ask = asks[0];
+      qty = Math.min(qty, Math.max(lot, Math.ceil((ask.qty - ask.filled) * 0.5)));
+      qty = Math.floor(qty / lot) * lot;
+      if (qty < lot) return;
+      const r = market.place(n.acc, {
+        action: ACTIONS.BUY_OPEN,
+        qty,
+        price: market.clampPrice(ask.price + 0.01),
+        now,
+        noCooldown: true,
+      });
+      const filled = this.settleCross(n, market, r, now);
+      if (filled > 0) {
+        this.spendCrossBudget();
+        n.crossCool = (cfg.cooldownTicks && cfg.cooldownTicks[n.type]) || 5;
+        this.addCrossUsed(sid, filled);
+        this.noteCrossFill(filled);
+      }
+      return;
+    }
+
+    // 卖出：只卖已有持仓（投资者不做裸空）
+    if (curQty < lot) return;
+    const frac = score < -0.12 ? 1 : 0.5; // 极度便宜才清仓，否则减半
+    const rq = (cfg.qtyPct && cfg.qtyPct[n.type]) || [0.00005, 0.0002];
+    const maxByType = market.stock.floatShares * rand(rq[0], rq[1]);
+    let qty = Math.min(curQty * frac, maxByType);
+    qty = Math.min(qty, n.acc.freeSellableLong(sid, now));
+    const bids = market.book.bids;
+    if (!bids.length) return;
+    const bid = bids[0];
+    qty = Math.min(qty, Math.max(lot, Math.ceil((bid.qty - bid.filled) * 0.5)));
+    qty = Math.floor(qty / lot) * lot;
+    if (qty < lot) return;
+    const r = market.place(n.acc, {
+      action: ACTIONS.SELL_CLOSE,
+      qty,
+      price: market.clampPrice(bid.price - 0.01),
+      now,
+      noCooldown: true,
+    });
+    const filled = this.settleCross(n, market, r, now);
+    if (filled > 0) {
+      this.spendCrossBudget();
+      n.crossCool = (cfg.cooldownTicks && cfg.cooldownTicks[n.type]) || 5;
+      this.addCrossUsed(sid, -filled);
+      this.noteCrossFill(filled);
+    }
+  }
+
+  /**
+   * 跨股委托收尾：**外股不留挂单**，吃不到的残留当场撤掉，返回实际成交量。
+   *
+   * 这是"无主委托"的根因：`maybeCrossStock` 挂的是**别人家**的簿，而所有清理路径
+   * （requote / gcResting / 日终撤单）都只撤自己 market 上的单，不登记就没有 ownership，
+   * 谁也撤不掉（实测 `day.test.js` 抓到的 167 张无主委托里 144 张是跨股单）。
+   * 不去维护跨池登记表（所有权太脏、还要处理对方 pool 生命周期），而是**根本不留下挂单**：
+   * 成交完剩下的部分当场撤掉，函数返回时那本簿上干干净净。
+   */
+  settleCross(n, market, r, now) {
+    if (!r || !r.ok || !r.order) return 0;
+    const filled = r.order.filled || 0;
+    if (r.order.qty - filled > 0) {
+      market.cancel(n.acc, r.order.id, now, { internal: true });
+    }
+    return filled;
+  }
+
+  /**
+   * 该账户的「外股」持仓市值合计（不含 homeStock）。
+   *
+   * ⚠️ 本股必须排除：机构在自己票上有 330 万股（约 6600 万），把它算进"外股仓位"
+   * 会让 `maxForeignPct × 权益 − 本股市值` 永远是负数，跨股一笔都做不成
+   *（实测 addMV = −2900 万，全部在买入分支被拦下）。
+   */
+  foreignMV(n, sid) {
+    let mv = 0;
+    for (const [k, pos] of n.acc.longs) {
+      if (k === n.acc.homeStock) continue;
+      const mk = this.game ? this.game.markets.get(k) : null;
+      if (!mk) continue;
+      let q = 0;
+      for (const l of pos.lots) q += l.qty;
+      mv += q * mk.lastPrice;
+    }
+    return mv;
   }
 
   /**
@@ -355,6 +970,14 @@ class NpcManager {
       if (n.newsTier === 'insider' || (n.newsTier === 'inst' && !best)) best = n.newsViewer;
     }
     this.poolViewer = best;
+    // 做市商的席位是固定的（第 i 家自营就是第 i 家券商），不参与上面的随机分配；
+    // 它们也不吃消息——自营只做流动性，给它情报等级会变成"用内幕做市"
+    for (const m of this.makers) {
+      m.broker = m.brokerKey;
+      m.acc.broker = m.brokerKey;
+      m.newsTier = 'public';
+      m.newsViewer = null;
+    }
   }
 
   /** 每 tick 推进市场模拟 */
@@ -374,14 +997,33 @@ class NpcManager {
     this.updateForce(now);
     this.updateMoodPolar();
     this.updateIntent();
+    // 私人估值的日频漂移（错峰到每天第一 tick，一次算完全部账户 × 关注股）
+    if (this.tickCount % this.dayTicks === 0) this.driftPrivateValues();
+
+    // ---- 做市商先铺盘口 ----
+    // 顺序有意：先让 6 家自营把双边挂上，投资者的限价/吃单才有对手盘。
+    // 做市商不做主动吃单（aggressiveRate=0），只报价 + 被动成交
+    //
+    // 集合竞价段：**不做主动吃单**。
+    // 竞价只累积、不撮合，主动单在这里没有"立刻成交"的语义——价格钉在「对手价 ∓1 分」，
+    // 而对手价本身还是试探档逐步外扩出来的虚拟价，于是每笔主动单都在把报价再往外推一分，
+    // 收敛档又因为"本 tick 先撤后挂、挂完不再撤"而留下这批远价，竞价成交价被拖出 ±3%
+    //（实测收敛档后仍有 459 张超 ±quoteCushion 的委托）。竞价深度交给 requote 的双边报价。
+    // 竞价状态整个 tick 只算一次，往下传（见 gcResting）
+    const inAuction = this.market.auctionKind ? !!this.market.auctionKind(now) : false;
+    for (const m of this.makers) {
+      this.gcResting(m, now, inAuction);
+      if (this.shouldRequoteMaker(m, now)) this.requoteMaker(m, now);
+    }
 
     for (const n of this.npcs) {
-      this.gcResting(n);
+      this.gcResting(n, now, inAuction);
       this.updateBias(n, now);
       this.updateSide(n);
       this.syncLend(n);
-      const shouldRequote = this.shouldRequote(n, now);
-      if (shouldRequote) this.requote(n, now);
+      // 投资者不再人人双边报价：盘口改由做市商提供，只有大户/中户留小额限价单
+      //（见 quoteScaleOf）。其余类型只主动吃单——这才是真实市场的样子
+      if (this.quoteScaleOf(n) > 0 && this.shouldRequote(n, now)) this.requote(n, now);
       // 分歧度越高机构主动吃单越频繁，多空大战放量；其余类型用各自 aggressiveRate。
       // 再乘日内节奏：开盘/尾盘段吃单更密、午间更稀
       const p = this.profileOf(n);
@@ -392,7 +1034,10 @@ class NpcManager {
         (p.polarOrderScale ? 1 + this.polar * 0.8 : 1) *
         this._mul.aggro *
         llmAggro;
-      if (Math.random() < rate) this.tryAggressive(n, now);
+      if (!inAuction && Math.random() < rate) this.tryAggressive(n, now);
+      // 跨股（P2）：看外股、按私人估值下单。放在本股行为之后，
+      // 保证"先照顾自己的仓位"——真实投资者也是先看持仓再看机会
+      this.maybeCrossStock(n, now, inAuction);
     }
     // 本阶段已经完整走过一轮报价：此后买盘侧还是空的，就是真的空档（见 recycleLiquidity）
     this._quotedOnce = true;
@@ -1179,8 +1824,53 @@ class NpcManager {
     return this.fund * w + this.fairValue * (1 - w);
   }
 
-  gcResting(n) {
-    n.ownResting = n.ownResting.filter((o) => o.status === 'live');
+  /**
+   * 清掉已完结的挂单引用，并回收**主动单的残单**。
+   *
+   * 主动单（tryAggressive）的价格钉在「对手价 ∓1 分」，`impactCap` 只保证大部分能吃到，
+   * 超出的量必然留在盘口——那本身就是一张并不想要的挂单。旧实现里它靠 requote 的
+   * 「先撤后挂」顺手清掉；P1 把 inst/hot/small 的报价关掉（`quoteScaleOf === 0`）之后
+   * 这条清理路径就没了，于是竞价段（只入簿不撮合）挂出来的每一笔主动单都变成永久残单：
+   * 实测「低于现价 2.4% 的买单」恒为 753 张、一整天不动，**冻结投资者现金 26%~30%**。
+   *
+   * 所以给主动单打 `aggroTtl`，在这里按 tick 老化。两处刻意的设计：
+   * ① **竞价段不递减**——竞价要的是委托累积（见 `shouldRequote` 的注释），
+   *    在竞价里逐 tick 撤单会把虚拟成交价搅散；竞价结束进入连续竞价后才开始老化，
+   *    陈旧单 2 tick 内清干净；
+   * ② 撤不掉（竞价锁单窗口）时**保留引用**而不是丢弃，等锁单解除后下一 tick 再撤——
+   *    丢掉引用才是真的撤不掉了（就是"无主委托"的成因）。
+   */
+  gcResting(n, now = Date.now(), inAuction = null) {
+    // 竞价状态由调用方算一次传进来：`step` 每个 tick 要过 322 个账户，
+    // 每人算一次 `dayCycle.auction()` 是白扔掉的开销（实测均值从 16ms 涨到 28ms）
+    const auction =
+      inAuction == null ? (this.market.auctionKind ? !!this.market.auctionKind(now) : false) : inAuction;
+    const keep = [];
+    for (const o of n.ownResting) {
+      if (o.status !== 'live') continue;
+      if (o.aggroTtl != null) {
+        if (o.aggroTtl <= 0 && !auction) {
+          const r = this.market.cancel(n.acc, o.id, now, { internal: true });
+          if (r && r.ok) continue;
+        } else if (o.aggroTtl > 0) {
+          o.aggroTtl -= 1;
+        }
+      }
+      keep.push(o);
+    }
+    n.ownResting = keep;
+  }
+
+  /**
+   * 把主动单登记进 ownResting，并打上 TTL（见 `gcResting`）。
+   * 只用于 tryAggressive —— 报价单（requote/requoteMaker）有自己的撤挂节奏，
+   * 不该被 TTL 提前撤掉。
+   */
+  trackAggro(n, order) {
+    if (!order) return;
+    const ttl = config.npc.aggroTtlTicks;
+    if (ttl > 0) order.aggroTtl = ttl;
+    n.ownResting.push(order);
   }
 
   /**
@@ -1203,12 +1893,14 @@ class NpcManager {
    */
   recycleLiquidity(now = Date.now()) {
     const cfg = config.npc;
-    if (!this.npcs.length) return;
+    if (!this.npcs.length && !this.makers.length) return;
+    // 做市商上线后，钱的"活水"只补给自营：投资者是真实投资者，不该被系统注资
+    const pool = this.makers.length ? this.makers : this.npcs;
     if (this._topUpCool > 0) this._topUpCool -= 1;
     const lot = this.stock.lotSize;
     const need = (this.market.lastPrice || 1) * lot; // 挂一手需要的现金
     let cash = 0;
-    for (const n of this.npcs) cash += n.acc.cash;
+    for (const n of pool) cash += n.acc.cash;
     const floor = (cfg.liquidityFloor || 0) * this.capScale;
     const dry = !!cfg.liquidityFloor && cash < floor;
     // 集合竞价里簿是"只累积不撮合"的、开盘那一 tick 本来就空，不算症状；
@@ -1239,15 +1931,15 @@ class NpcManager {
       );
     }
     if (dry) {
-      const per = ((floor - cash) * cfg.liquidityRefill) / this.npcs.length;
-      for (const n of this.npcs) n.acc.cash = r2(n.acc.cash + per);
+      const per = ((floor - cash) * cfg.liquidityRefill) / pool.length;
+      for (const n of pool) n.acc.cash = r2(n.acc.cash + per);
       // 现金变化影响挂单冻结口径，存档器需要知道这些账户变了
-      for (const n of this.npcs) this.market.notifyChange(n.acc);
+      for (const n of pool) this.market.notifyChange(n.acc);
       return;
     }
     // 买盘空了：只给最穷的几个人头补到目标，然后歇一会儿
     const baseLots = cfg.liquidityTopUpLots != null ? cfg.liquidityTopUpLots : 8;
-    const heads = cfg.liquidityTopUpHeads != null ? cfg.liquidityTopUpHeads : 2;
+    const heads = Math.min(pool.length, cfg.liquidityTopUpHeads != null ? cfg.liquidityTopUpHeads : 2);
     const cd = cfg.liquidityTopUpCooldown != null ? cfg.liquidityTopUpCooldown : 12;
     if (heads <= 0) return; // 配 0 = 关掉这条（探针 A/B 用）
     // 补款目标按**缺口摊到本轮人头**，单人封顶 40 手：
@@ -1260,7 +1952,7 @@ class NpcManager {
     // 只补**还有买入空间**的账户：钱给了已经打满 longCapMult 的账户也进不了买盘，
     // 只会变成闲钱把池子现金越垫越高（进而抬高力量天平的"弹药"票）。
     // 这条同时给机制设了一个自然上界——全池买入空间被填满后它就不再注水
-    const poor = this.npcs
+    const poor = pool
       .filter((n) => n.acc.cash < target && this.longCapacity(n) >= lot)
       .sort((a, b) => a.acc.cash - b.acc.cash);
     if (!poor.length) {
@@ -1336,6 +2028,10 @@ class NpcManager {
       this.market.cancel(n.acc, o.id, now, { internal: true });
     }
     n.ownResting = n.ownResting.filter((o) => o.status === 'live');
+    // 只吃单的类型（做市商上线后是 inst/hot/small）：撤完旧单就结束，
+    // 不再往盘口上挂自己的量——盘口由 6 家自营铺
+    const qs = this.quoteScaleOf(n);
+    if (qs <= 0) return;
     // 上面保留下来的买单还在簿上，本 tick 不再重复挂一张（同一账户两张买单会虚增深度）
     const keptBid = n.ownResting.some(
       (o) => o.status === 'live' && (o.action === ACTIONS.BUY_OPEN || o.action === ACTIONS.BUY_CLOSE)
@@ -1392,7 +2088,7 @@ class NpcManager {
     const blockOpenBuy = wantShort || !!(ie && ie.suppressOpenBuy);
     if (!keptBid && (!wantShort || shortQty > 0) && bidPx > 0.01) {
       let qty = roundLot(
-        rand(rq[0], rq[1]) * this.qtyScale * reScale * (1 + tilt) * (ie ? ie.bidBoost : 1) * this._mul.qty,
+        rand(rq[0], rq[1]) * this.qtyScale * qs * reScale * (1 + tilt) * (ie ? ie.bidBoost : 1) * this._mul.qty,
         lot
       );
       const coverable = n.acc.coverableShort(this.stock.id);
@@ -1427,7 +2123,7 @@ class NpcManager {
     // 挤兑期间这一侧整个停掉：一边往上打一边挂卖单，等于自己给自己拆台。
     const sellable = n.acc.freeSellableLong(this.stock.id, now);
     let askQty = roundLot(
-      rand(rq[0], rq[1]) * this.qtyScale * (1 - tilt) * (ie ? ie.askBoost : 1) * this._mul.qty,
+      rand(rq[0], rq[1]) * this.qtyScale * qs * (1 - tilt) * (ie ? ie.askBoost : 1) * this._mul.qty,
       lot
     );
     if (!(ie && ie.suppressSell)) {
@@ -1516,13 +2212,13 @@ class NpcManager {
           if (qty >= lot) {
             const price = this.market.clampPrice(ask.price + 0.01);
             // 残单必须登记：impactCap 只保证"大部分成交"，超出最优档承接力的那部分会留在盘口。
-            // 不登记它就不在 ownResting 里，requote 撤不掉 → 竞价段（只入簿不撮合）每一笔主动单
-            // 都变成永久残单，而且**下一笔主动单会拿这笔远价当对手价再往外定一分**（试探档 ±8%
-            // 就是这么被滚出去的），收敛档撤不掉它们，竞价成交价于是被拖出 ±3%
+            // 不登记它就不在 ownResting 里，任何路径都撤不掉 → 竞价段（只入簿不撮合）每一笔
+            // 主动单都变成永久残单，而且**下一笔主动单会拿这笔远价当对手价再往外定一分**
+            //（试探档 ±8% 就是这么被滚出去的）。登记后由 gcResting 按 aggroTtl 回收
             const r = isCover
               ? this.market.place(n.acc, { action: ACTIONS.BUY_CLOSE, qty, price, now, noCooldown: true })
               : this.market.place(n.acc, this.buyOpenOpts(n, qty, price, now));
-            if (r && r.ok) n.ownResting.push(r.order);
+            if (r && r.ok) this.trackAggro(n, r.order);
           }
         }
       }
@@ -1566,7 +2262,7 @@ class NpcManager {
               now,
               noCooldown: true,
             });
-            if (r && r.ok) n.ownResting.push(r.order);
+            if (r && r.ok) this.trackAggro(n, r.order);
           }
         } else if (canShort && !n.acc.sideLock(this.stock.id).long) {
           // 开空同样要求多头端是空的（一手都不剩、也没有在途买开/买平之外的多头占用）
@@ -1583,7 +2279,7 @@ class NpcManager {
               now,
               noCooldown: true,
             });
-            if (r && r.ok) n.ownResting.push(r.order);
+            if (r && r.ok) this.trackAggro(n, r.order);
           }
         }
       }

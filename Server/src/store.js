@@ -10,6 +10,8 @@ class Account {
   constructor(name, isNPC = false, role = null) {
     this.name = name; // 账号：登录凭据（唯一、不可改），也是存档里各表的 account 键
     this.nick = null; // 昵称：展示名，开户时填、之后可改。null = 还没开完户
+    // NPC 的"常住"股票：只表示初始建仓在哪只，不限制它买什么（见 identity.js / 方案 §2）
+    this.homeStock = null;
     this.isNPC = isNPC;
     this.role = role || (isNPC ? 'npc' : 'player'); // inst / hot / big / mid / small / whale / player
     // AI 主力（大模型驱动的跨股机构）：isNPC + role=whale；标记只在内存派生，不落库
@@ -60,6 +62,8 @@ class Account {
     let l = this.ledger.get(stockId);
     if (!l) {
       l = {
+        // 开服建仓时在这只股票上的初始持股（十大股东的"变动"基准；玩家恒为 0）
+        originQty: 0,
         lendOffered: 0,
         lendInterestEarned: 0,
         lendInterestDebt: 0,
