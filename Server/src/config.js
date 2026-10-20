@@ -155,7 +155,10 @@ const config = {
       deposit: { limit: 10, windowMs: 60000 },
       state: { limit: 240, windowMs: 60000 },
       write: { limit: 30, windowMs: 60000 }, // 改昵称这类轻量写操作（开户/登录有自己的 login 档）
-      holders: { limit: 60, windowMs: 60000 }, // 股东占比走势（点击前十名时按需拉取）
+      // 股东榜按需拉取（前台 5 秒轮询 ≈ 15/分）+ 走势弹窗 + 玩家持仓弹窗共用一档。
+      // 按 IP 计：局域网多名玩家共用一个桶，60/分会被正常浏览打满（客户端触发过 429 自锁，见 2026-10-20），
+      // 放宽到 180/分给多玩家留余量；客户端另有失败退避，不会靠重试糊满桶
+      holders: { limit: 180, windowMs: 60000 },
       daily: { limit: 60, windowMs: 60000 }, // 日线（切到日线模式 / 换股票时按需拉取）
       admin: { limit: 10, windowMs: 60000 },
     },

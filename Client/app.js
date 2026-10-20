@@ -53,7 +53,10 @@
   // 股东榜改为按需拉取（10 只股票全推会把每帧撑爆）：进 tab / 切股票时拉，前台 5 秒刷新
   let holdersData = null; // /api/holders 的最近一次响应
   let holdersStockId = '';
-  let holdersAt = 0;
+  let holdersAt = 0; // 最近一次**成功**响应的时刻
+  let holdersTriedAt = 0; // 最近一次发起请求的时刻（成功失败都算），最小间隔防抖用
+  let holdersFails = 0; // 连续失败次数（限流 / 网络），驱动退避
+  let holdersPending = false; // 有请求在飞（加载中状态显示用）
   // 消息过滤：all = 全部，index = 只大盘，个股 stockId
   let newsFilter = 'all';
   // 图表模式：minute = 分时（tick 级走势），day/week/month = 日/周/月 K 线。选择记在本地，刷新后保持
@@ -2992,10 +2995,11 @@
   function renderHolders() {
     // 股东榜按需拉取：10 只股票 × 前 30 名每帧全推会把 SSE 帧撑爆。
     // 进 tab / 切股票时拉一次，前台每 5 秒刷新（见 tickUI）
-    const sid = (curMarket() || {}).stockId;
+    const m = curMarket();
+    const sid = (m || {}).stockId;
     const data = holdersData && holdersStockId === sid ? holdersData : null;
     const rows = (data && data.rows) || [];
-    const stock = marketList().find((m) => m.stockId === sid);
+    const stock = marketList().find((x) => x.stockId === sid);
     const float = (stock && stock.floatShares) || 1;
     const sumQty = rows.reduce((s, h) => s + h.qty, 0);
     // 「我」按**账号**认，不按昵称——昵称可重名、可改，用它比对会认错行
@@ -3004,7 +3008,7 @@
     $('holdersMeta').innerHTML = `
       <div class="item"><label>标的</label><span>${esc((stock && stock.name) || '--')}</span></div>
       <div class="item"><label>流通盘</label><span>${fmtQty(float)} 股</span></div>
-      <div class="item"><label>前十大合计</label><span>${((sumQty / float) * 100).toFixed(2)}%</span></div>
+      <div class="item"><label>前十大合计</label><span>${data ? ((sumQty / float) * 100).toFixed(2) + '%' : '--'}</span></div>
       <div class="item"><label>我的排名</label><span>${myRow ? '第 ' + (rows.indexOf(myRow) + 1) + ' 名' : '未进前十'}</span></div>
       <div class="item"><label>我的持股</label><span>${myRow ? fmtQty(myRow.qty) + ' 股（' + myRow.pct.toFixed(2) + '%）' : '--'}</span></div>
       <div class="item"><label>上次操作快照</label><span>${
@@ -3013,6 +3017,16 @@
           : '暂无，登录后自动记录'
       }</span></div>
     `;
+    // 空表要分清「还没拉到」和「真的没有」：数据不属于当前股票（在飞 / 防抖间隙 / 失败退避）
+    // 都是暂态，说「暂无数据」是撒谎；只有当前股票的响应确实给了空 rows 才是真空表。
+    // 指数没有股东榜，单独说明
+    const emptyHtml = m && m.isIndex
+      ? '<tr><td colspan="7" class="empty">大盘指数没有股东榜，选一只个股查看</td></tr>'
+      : data
+        ? '<tr><td colspan="7" class="empty">暂无数据</td></tr>'
+        : '<tr><td colspan="7" class="empty">' +
+          (holdersPending || holdersFails < 2 ? '加载中…' : '加载失败，自动重试中…') +
+          '</td></tr>';
     $('holdersBody').innerHTML =
       rows
         .map((h, i) => {
@@ -3029,7 +3043,7 @@
             <td class="delta-cell">${deltaCell(h.dQty, h.dPct, !!snap)}</td>
           </tr>`;
         })
-        .join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+        .join('') || emptyHtml;
 
     // 弹窗开着时，服务端又快照了一次（我刚操作过）就顺手刷新，免得看的是旧曲线
     if (holderHistName && !holderFetching) {
@@ -3042,19 +3056,42 @@
   /** 拉某只股票的前十大股东（进 tab / 切股票时强制拉，前台每 5 秒静默刷新） */
   function loadHolders(stockId, force) {
     if (!stockId) return;
-    if (!force && holdersStockId === stockId && Date.now() - holdersAt < 4000) return;
+    // 大盘指数没有股东榜（服务端必拒），直接不请求，省得白吃限流配额
+    if (state && state.index && stockId === state.index.stockId) return;
+    const now = Date.now();
+    // 失败退避：连续失败（429 限流 / 网络抖动）时把静默窗口逐次拉长（4s → 8s → …上限 20s）。
+    // 没有退避的话 tickUI 每 200ms 重发一次，5 发/秒正好把服务端限流桶顶死，永远 429 自锁——
+    // 玩家看到的就是股东 tab 一直「暂无数据」。失败后 holdersAt 不动，靠 holdersFails 拉长窗口。
+    const quiet = holdersFails ? Math.min(4000 + holdersFails * 4000, 20000) : 4000;
+    if (!force && holdersStockId === stockId && now - holdersAt < quiet) return;
+    // 最小请求间隔：无论 force 与否不重复发；失败时同样退避（700ms → …上限 5s），
+    // 换股后持续失败也不会以固定频率硬顶限流桶
+    const minGap = holdersFails ? Math.min(700 + holdersFails * 700, 5000) : 700;
+    if (now - holdersTriedAt < minGap) return;
+    holdersTriedAt = now;
+    holdersPending = true;
     apiGet('/api/holders?stock=' + encodeURIComponent(stockId))
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
-        if (!res || !res.ok) return;
-        // 期间用户可能已切走，丢弃过期响应
+        if (!res || !res.ok) {
+          holdersFails += 1; // 429 / 400 / 500：退避，tickUI 下轮再试
+          return;
+        }
+        // 期间用户可能已切走，丢弃过期响应（不算失败，不推进退避）
         if (res.stockId !== (curMarket() || {}).stockId) return;
+        holdersFails = 0;
         holdersData = res;
         holdersStockId = res.stockId;
         holdersAt = Date.now();
         renderHolders();
       })
-      .catch(() => {});
+      .catch(() => {
+        holdersFails += 1; // 网络错误同样退避
+      })
+      .finally(() => {
+        holdersPending = false;
+        renderHolders();
+      });
   }
 
   // ---------- 股东占比走势弹窗 ----------
