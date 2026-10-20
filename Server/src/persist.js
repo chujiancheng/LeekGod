@@ -500,6 +500,8 @@ class Persister {
     const daySettledRow = this.st.getMeta.get('day_settled');
     // 做空利息按游戏日结算：已收到第几个交易日，续跑时不许重复收同一天
     const lendSettledRow = this.st.getMeta.get('lend_settled');
+    // 空头存量披露水位线：{day, at, values:{stockId: qty}}，空/坏一律当「没披露过」
+    const shortPub = this.readJsonMeta('short_pub');
     const halt = this.readHalt();
     const accounts = this.st.allAccounts.all();
     const ledger = this.st.allLedger.all();
@@ -535,6 +537,8 @@ class Persister {
       // **-1 = 老档没有这条记录**（还没按日结过），不能写 0——0 是第 1 个交易日的合法水位线，
       // 写成 0 会让续跑后的第一个收盘以为「day 0 已经收过」而跳过
       lendSettled: lendSettledRow ? Number(lendSettledRow.value) : -1,
+      // 空头存量已披露到第几天、各股定格多少股（null = 还没披露过，展示层退回实时值）
+      shortPub,
       halt,
       accounts,
       ledger,
@@ -563,6 +567,21 @@ class Persister {
     // 坏值不记入 lastHalt，首个 commit 会把它覆盖掉
     this.lastHalt = halt ? row.value : '';
     return halt;
+  }
+
+  /**
+   * 读一条 JSON meta。存档坏掉/格式不对一律返回 null，由调用方按「没有这条记录」处理——
+   * 展示类的落盘状态（空头存量披露水位线）绝不能因为一行 JSON 解析失败卡住启动。
+   */
+  readJsonMeta(key) {
+    const row = this.st.getMeta.get(key);
+    if (!row) return null;
+    try {
+      const v = JSON.parse(row.value);
+      return v && typeof v === 'object' ? v : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   /** 玩家委托记录：活动委托用内存对象（状态会随成交变化），已完结的用库里的快照 */

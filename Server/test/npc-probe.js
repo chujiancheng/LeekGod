@@ -142,6 +142,9 @@ function run(seed) {
   let stalls = 0;
   let still = 0;
   const lastPx = new Map();
+  // 空头存量峰值只能逐 tick 自己记：`shortHistory` 已改成「每个交易日收盘一点」的
+  // 披露序列（融券 tab 用），探针跑几十个 tick 根本攒不出一个点
+  const shortPeak = new Map();
   let slowest = 0;
   let totalMs = 0;
   const t0 = realNow();
@@ -167,6 +170,7 @@ function run(seed) {
         if (m.book.bids.length === 0) emptyBid += 1;
         if (m.book.asks.length === 0) emptyAsk += 1;
       }
+      if (m.shortInterest > (shortPeak.get(st.id) || 0)) shortPeak.set(st.id, m.shortInterest);
       if (lastPx.get(st.id) === m.lastPrice) {
         still += 1;
         if (still === 300) stalls += 1; // 价格连续 300 tick 不动 = 冻结
@@ -203,7 +207,7 @@ function run(seed) {
       hi: Math.max(...px) / st.initPrice - 1,
       lo: Math.min(...px) / st.initPrice - 1,
       vol: mk.volume,
-      shortPeak: mk.shortHistory.reduce((a, p) => Math.max(a, p.qty), 0),
+      shortPeak: shortPeak.get(st.id) || 0,
     });
   }
   Math.random = realRandom;

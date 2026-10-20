@@ -38,6 +38,9 @@ function setTradeSeqBase(n) {
   if (Number.isFinite(v) && v > TRADE_SEQ) TRADE_SEQ = Math.trunc(v);
 }
 
+/** 空头存量披露序列保留多少个交易日（融券 tab 的折线；一个游戏日一点） */
+const SHORT_HISTORY_DAYS = 120;
+
 class Market {
   constructor(stock) {
     this.stock = stock;
@@ -55,7 +58,13 @@ class Market {
     // 资金流向（当日累计：外盘=主动买 / 内盘=主动卖）与已收盘的日线，见 flow.js
     flow.initFlow(this);
     this.orderSeq = 0;
-    this.shortInterest = 0; // 未平空单总量（虚拟流通增量）
+    this.shortInterest = 0; // 未平空单总量（虚拟流通增量）——**引擎内部实时口径**
+    // 对外披露的空头存量（融券 tab「空头总持仓」/ 开放平台 /holders 的 shortInterest）：
+    // 每个游戏日收盘日终结算时刷新一次，**日内冻结**。真实市场的融券余额就是盘后披露——
+    // 实时下发等于把机构今天偷偷建空的动向直接摊给玩家。撮合、利息、券源、风控
+    // 一律继续读实时的 shortInterest，披露值只喂展示层
+    this.shortInterestPub = 0;
+    this.shortInterestPubDay = -1; // 已披露到第几个交易日（-1 = 还没披露过）
     // 融券池：挂借总量 / 已借出 / 开单中占用。可借 = 总挂借 − 已借出 − 开单占用。
     // allowNakedShort=true 时开空不走池（lendBorrowed 仅统计借券开仓的部分）。
     this.lendTotal = 0;
@@ -70,8 +79,7 @@ class Market {
       : 0;
     // 最近一次日终结算实际收到的做空利息（0 = 这一天没有空头付息）
     this.lastLendCharge = 0;
-    this.shortHistory = []; // 空头仓位采样 [{t, qty}]，每 5 分钟一点，约 24h
-    this._lastShortSample = 0;
+    this.shortHistory = []; // 空头存量披露序列 [{t, day, qty}]，每个交易日收盘一点
     this.haltUntil = 0; // 停牌截止时间戳（0 = 正常交易），手动运营开关
     this.haltReason = '';
     // 交易日时钟（见 daycycle.js）。未挂载时退化为「永远处于连续交易」，
@@ -894,13 +902,23 @@ class Market {
     }
   }
 
-  /** 空头仓位 5 分钟采样（在 game.tick 里调用） */
-  sampleShortInterest(now = Date.now()) {
-    const interval = 5 * 60 * 1000;
-    if (now - this._lastShortSample < interval && this.shortHistory.length > 0) return;
-    this._lastShortSample = now;
-    this.shortHistory.push({ t: now, qty: this.shortInterest });
-    if (this.shortHistory.length > 300) this.shortHistory.shift(); // ~24h
+  /**
+   * 空头存量披露：**每个游戏日收盘日终结算时调用一次**（见 Game.settleDay）。
+   *
+   * 披露值（`shortInterestPub`）日内冻结，玩家在融券 tab 看到的「空头总持仓」就是它；
+   * `shortHistory` 随之从「5 分钟采样」变成「一天一点」的日频序列。
+   *
+   * 同一天重复调用（收盘与夜间两段 settleDay / 重启后补结算）直接返回 false 忽略——
+   * 与 `settleLendingInterest` 的 `lendSettledDay` 同一套去重思路，水位线只进不退。
+   */
+  publishShortInterest(day, now = Date.now()) {
+    const d = Number(day);
+    if (!Number.isFinite(d) || d <= this.shortInterestPubDay) return false;
+    this.shortInterestPubDay = d;
+    this.shortInterestPub = this.shortInterest;
+    this.shortHistory.push({ t: now, day: d, qty: this.shortInterestPub });
+    if (this.shortHistory.length > SHORT_HISTORY_DAYS) this.shortHistory.shift();
+    return true;
   }
 
   /**
@@ -2096,9 +2114,27 @@ class Market {
       settle: 'daily', // 计息口径：每个游戏日结算一次（收盘日终结算）
       settledDay: this.lendSettledDay, // -1 = 还没结过任何一天
       allowNakedShort: !!config.margin.allowNakedShort,
-      shortInterest: this.shortInterest,
+      // 空头总持仓：**收盘披露口径**，每个游戏日收盘后刷新一次、日内冻结（见
+      // publishShortInterest）。还没披露过（新开局第一天 / 从没到过收盘）是 `null`，
+      // 前端显示 `—`——既不能退回实时值（泄当日建空动向），也不能填 0（会被读成"零空头"）
+      shortInterest: this.pubShortInterest(),
+      shortInterestDay: this.shortInterestPubDay, // -1 = 还没披露过（此时 shortInterest 为 null）
       history: this.shortHistory,
     };
+  }
+
+  /**
+   * 对外可见的空头存量：已披露过就用披露值，**还没披露过返回 `null`（未知）**。
+   * 展示层（融券 tab、开放平台 holders）统一走这里，别各读各的字段。
+   *
+   * 这里**不能**退回实时值：那就是把当天机构偷偷建空的动向直接摊给玩家，
+   * 也正是这次改动要去掉的东西（新开局第一个交易日盘中尤其明显——NPC 建初始
+   * 空仓的那几十分钟恰好是玩家最爱盯盘的时候）。也不能填 0：0 是"确实没人做空"
+   * 的有效值，填 0 会让玩家把"还没披露"读成"零空头"。所以给 `null`，
+   * 前端显示 `—`，接口文档也写清楚以 `shortInterestDay` 判断。
+   */
+  pubShortInterest() {
+    return this.shortInterestPubDay < 0 ? null : this.shortInterestPub;
   }
 }
 

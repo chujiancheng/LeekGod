@@ -350,5 +350,45 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   wipe();
 }
 
+console.log('\n[13] 空头存量披露：收盘定格 + 跨重启保留');
+{
+  const file = path.join(os.tmpdir(), `gushen-shortpub-test-${process.pid}.db`);
+  const wipe = () => {
+    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(file + suffix, { force: true });
+  };
+  wipe();
+
+  const p = new Persister(file);
+  const g = new Game({ persist: p });
+  g.start();
+  g.day.reanchor(Date.now() - 120000);
+  g.stop();
+
+  P(g).shortInterest = 500000;
+  assert(P(g).pubShortInterest() === null, '还没到过收盘时玩家视野里是 null（不泄实时 500000）');
+  // 走真实的日终结算路径：披露挂在 settleDay 上，不是单独一个定时器
+  g.settleDay(Date.now(), { meta: true });
+  const pubDay = P(g).shortInterestPubDay;
+  assert(pubDay >= 0, `收盘结算触发了空头存量披露（第 ${pubDay} 个交易日）`);
+  assert(P(g).pubShortInterest() === 500000, `披露值定格在收盘时的实况（${P(g).pubShortInterest()}）`);
+  assert(P(g).lendingSnapshot().shortInterest === 500000, '融券快照（玩家所见）等于披露值');
+
+  // 收盘后机构继续建空：实时值变了，玩家视野里的数不该动
+  P(g).shortInterest = 900000;
+  assert(P(g).lendingSnapshot().shortInterest === 500000, '日内建空不进玩家视野（融券快照仍 500000）');
+  p.close();
+
+  const p2 = new Persister(file);
+  const g2 = new Game({ persist: p2 });
+  g2.start();
+  g2.day.reanchor(Date.now() - 120000);
+  g2.stop();
+  assert(P(g2).shortInterestPubDay === pubDay, `披露水位线跨重启保留（第 ${P(g2).shortInterestPubDay} 日）`);
+  assert(P(g2).pubShortInterest() === 500000, `披露值跨重启保留（不退回实时 ${P(g2).shortInterest}）`);
+  assert(P(g2).shortHistory.length === 1 && P(g2).shortHistory[0].qty === 500000, '折线补回最近一个披露点');
+  p2.close();
+  wipe();
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 if (failed > 0) process.exit(1);

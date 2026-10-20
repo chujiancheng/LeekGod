@@ -3256,13 +3256,22 @@
       return;
     }
     const float = m.floatShares || 1;
-    const shortPct = ((L.shortInterest / float) * 100).toFixed(2);
+    // 空头总持仓是**收盘披露口径**：服务端每个交易日收盘结算后刷新一次，日内冻结
+    // （`shortInterestDay` = 已披露到第几个交易日，-1 表示还没披露过）
+    // 还没披露过时服务端给 `null`（不是 0，也不是实时值）：显示 `—` +「未披露」角标。
+    // 老版本服务端不下发 `shortInterestDay`、`shortInterest` 恒为数字，走原样显示
+    const shortKnown = L.shortInterest !== null && L.shortInterest !== undefined;
+    const shortQty = shortKnown ? L.shortInterest : 0;
+    const shortVal = shortKnown
+      ? `${fmtQty(shortQty)} 股（${((shortQty / float) * 100).toFixed(2)}%）`
+      : '—';
+    const shortDayTag = L.shortInterestDay === -1 ? '<span class="sub-code">未披露</span>' : '';
     $('lendingMeta').innerHTML = `
       <div class="item"><label>标的</label><span>${esc(m.name)}</span></div>
       <div class="item"><label>可借券源</label><span>${fmtQty(L.available)} 股</span></div>
       <div class="item"><label>总挂借</label><span>${fmtQty(L.total)} 股</span></div>
       <div class="item"><label>已借出</label><span>${fmtQty(L.borrowed)} 股</span></div>
-      <div class="item"><label>空头总持仓</label><span>${fmtQty(L.shortInterest)} 股（${shortPct}%）</span></div>
+      <div class="item"><label title="每个交易日收盘结算后披露一次，日内不随成交变化（真实市场的融券余额也是盘后披露）">空头总持仓</label><span>${shortVal}${shortDayTag}</span></div>
       <div class="item"><label>当前日息</label><span class="${L.dailyRate > 0.3 ? 'down' : L.dailyRate > 0.15 ? '' : 'up'}">${Number(L.dailyRate || 0).toFixed(2)}%/日</span></div>
       <div class="item"><label>池子紧张度</label><span>${L.utilization.toFixed(1)}%</span></div>
       <div class="item"><label>计息方式</label><span>收盘结算（按持仓时长累计）</span></div>
@@ -3293,7 +3302,7 @@
     drawShortHistory(L.history || []);
   }
 
-  /** 空头仓位变化：5 分钟采样的简单折线 */
+  /** 空头仓位变化：一个交易日一点的日频折线（收盘披露，日内不更新） */
   function drawShortHistory(hist) {
     const canvas = $('shortHistChart');
     if (!canvas) return;
@@ -3320,7 +3329,13 @@
       ctx.fillStyle = withA(themeC.ink, .35);
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(hist && hist.length === 1 ? '采样中…（每 5 分钟一点）' : '暂无空头仓位采样', W / 2, H / 2);
+      ctx.fillText(
+        hist && hist.length === 1
+          ? '已披露 1 个交易日（每交易日收盘一点）'
+          : '暂无披露记录（每个交易日收盘更新）',
+        W / 2,
+        H / 2
+      );
       return;
     }
 
@@ -3354,19 +3369,21 @@
     ctx.fillStyle = withA(themeC.blue, .12);
     ctx.fill();
 
-    // 轴标
+    // 轴标：x 走**交易日号**（游戏日被压缩到几分钟，墙钟时间读不出"第几天"）
     ctx.fillStyle = withA(themeC.ink, .4);
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'right';
     ctx.fillText(fmtQty(hi), pad.l - 4, pad.t + 8);
     ctx.fillText(fmtQty(lo), pad.l - 4, pad.t + ih);
-    const t0 = new Date(hist[0].t);
-    const t1 = new Date(hist[hist.length - 1].t);
-    const hm = (d) => String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const dayLabel = (p) => {
+      if (p.day != null) return `第 ${p.day} 日`;
+      const d = new Date(p.t);
+      return `${d.getMonth() + 1}/${d.getDate()}`;
+    };
     ctx.textAlign = 'left';
-    ctx.fillText(hm(t0), pad.l, H - 6);
+    ctx.fillText(dayLabel(hist[0]), pad.l, H - 6);
     ctx.textAlign = 'right';
-    ctx.fillText(hm(t1), W - pad.r, H - 6);
+    ctx.fillText(dayLabel(hist[hist.length - 1]), W - pad.r, H - 6);
   }
 
   // 挂借 / 撤借操作（都带当前股票的 stockId：融券池是按股票隔离的）

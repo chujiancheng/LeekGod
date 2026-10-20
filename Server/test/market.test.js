@@ -1205,5 +1205,39 @@ console.log('\n[36] 平仓预留与在途委托恒等');
   assert(E.freeSellableLong(stock.id, 2000000, lockMs) === 900, '多头方向的幽灵预留同样被清掉');
 }
 
+// ---- 37. 空头存量按游戏日收盘披露 ----
+console.log('\n[37] 空头存量披露（收盘定格、日内冻结）');
+{
+  const { m } = fresh();
+  m.shortInterest = 1200;
+  assert(m.pubShortInterest() === null, '还没披露过时是 null（既不退回实时值，也不填 0）');
+  assert(m.lendingSnapshot().shortInterest === null, '融券快照同步给 null（前端显示 —）');
+  assert(m.lendingSnapshot().shortInterestDay === -1, '未披露时水位线是 -1');
+
+  assert(m.publishShortInterest(1, 1000) === true, '第 1 个交易日收盘披露一次');
+  assert(m.shortInterestPub === 1200 && m.shortInterestPubDay === 1, '披露值 = 收盘时的实时空头存量');
+
+  // 第二个交易日盘中机构继续加空：引擎内部看得到，玩家看不到
+  m.shortInterest = 5000;
+  assert(m.pubShortInterest() === 1200, '日内冻结：实时值变 5000，对外仍是 1200');
+  const L = m.lendingSnapshot();
+  assert(L.shortInterest === 1200 && L.shortInterestDay === 1, '融券快照走披露口径（shortInterest / shortInterestDay）');
+  assert(m.shortInterest === 5000, '引擎口径的 shortInterest 保持实时（撮合/利息/券源读它）');
+
+  assert(m.publishShortInterest(1, 2000) === false, '同一交易日重复披露被忽略（收盘+夜间两段 / 重启补结算）');
+  assert(m.shortHistory.length === 1, `重复披露不重复打点（${m.shortHistory.length} 点）`);
+  assert(m.publishShortInterest(0, 2500) === false, '水位线只进不退（更小的日期一律忽略）');
+
+  assert(m.publishShortInterest(2, 3000) === true, '次日收盘再披露一次');
+  assert(m.pubShortInterest() === 5000, '次日披露值刷新成 5000');
+  const h = m.shortHistory;
+  assert(h.length === 2 && h[0].day === 1 && h[1].day === 2, '折线一天一点（第 1 日 → 第 2 日）');
+  assert(h[0].qty === 1200 && h[1].qty === 5000, '折线逐日记的是各自的披露值');
+
+  for (let d = 3; d <= 140; d++) m.publishShortInterest(d, 1000 + d);
+  assert(m.shortHistory.length === 120, `历史只保留最近 120 个交易日（现 ${m.shortHistory.length} 点）`);
+  assert(m.shortHistory[m.shortHistory.length - 1].day === 140, '尾部是最新交易日');
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed > 0 ? 1 : 0);

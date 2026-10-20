@@ -171,7 +171,7 @@ src = src.replace(
     axisPhases, axisCloseAuctionSpan, axisAuctionMarks,
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
-    renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall,
+    renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall, renderLending,
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
     setIdentity, resetEggStream,
@@ -2605,6 +2605,47 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     api.setDmPack('不存在的系列');
     assert(api.dmPack() === 'classic', '未知系列 id 回退默认（别让整块面板空掉）');
     api.toggleEmotePad(false);
+  }
+
+  console.log('\n[25] 融券面板：空头总持仓走「收盘披露」口径');
+  {
+    const st = mkState(AUCTION_DAY, null);
+    st.markets[0].floatShares = 2000000;
+    st.markets[0].lending = {
+      enabled: true, total: 500000, borrowed: 200000, reserved: 0, available: 300000,
+      utilization: 40, dailyRate: 0.1, settle: 'daily', settledDay: 6,
+      allowNakedShort: false,
+      // 服务端下发的就是披露值：收盘定格 120000，日内实时值（比如已经 300000）不下发
+      shortInterest: 120000, shortInterestDay: 7,
+      history: [
+        { t: Date.now() - 86400000, day: 6, qty: 90000 },
+        { t: Date.now(), day: 7, qty: 120000 },
+      ],
+    };
+    api.setState(st);
+    api.renderLending();
+    const html = getEl('lendingMeta').innerHTML;
+    assert(/空头总持仓/.test(html), '面板仍显示「空头总持仓」这一项');
+    assert(/120,000/.test(html), '显示的是当天收盘定格的那个数');
+    assert(/6\.00%/.test(html), `占比按披露值算（120000 / 2000000 = 6.00%）`);
+    assert(!/未披露/.test(html), '已披露过就不带「未披露」角标');
+
+    // 新开局第一天（服务端 shortInterestDay = -1，shortInterest = null）：显示 —，不显示数字
+    st.markets[0].lending.shortInterestDay = -1;
+    st.markets[0].lending.shortInterest = null;
+    api.renderLending();
+    const html2 = getEl('lendingMeta').innerHTML;
+    assert(/未披露/.test(html2), '没披露过时打「未披露」角标');
+    assert(/>—</.test(html2), '没披露过时显示 —（不给数字，也不填 0）');
+    const row2 = html2.split('<div class="item">').find((x) => x.includes('空头总持仓')) || '';
+    assert(!/300,000|0\.00%/.test(row2), '「空头总持仓」这一项不拿实时值或 0 冒充收盘数据');
+
+    // 老版本服务端：不下发 shortInterestDay，shortInterest 恒为数字 → 原样显示、不挂角标
+    st.markets[0].lending.shortInterestDay = undefined;
+    st.markets[0].lending.shortInterest = 300000;
+    api.renderLending();
+    const html3 = getEl('lendingMeta').innerHTML;
+    assert(/300,000/.test(html3) && !/未披露/.test(html3), '老服务端兼容：照旧显示数字，不凭空挂角标');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

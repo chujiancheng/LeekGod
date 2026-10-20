@@ -367,6 +367,22 @@ class Game {
     }
     this.index.update(this.markets, Date.now());
 
+    // 空头存量披露水位线：meta 里存了「第几天关盘定格成多少股」。不恢复的话重启后
+    // 融券 tab 会退回「未披露」（—），当天已经公布过的数白丢一次，折线也会从零重新长
+    if (snap.shortPub && Number.isFinite(Number(snap.shortPub.day))) {
+      const day = Number(snap.shortPub.day);
+      const values = snap.shortPub.values || {};
+      for (const stock of this.stocks) {
+        const market = this.markets.get(stock.id);
+        const qty = Number(values[stock.id]);
+        if (values[stock.id] == null || !Number.isFinite(qty)) continue;
+        market.shortInterestPubDay = day;
+        market.shortInterestPub = qty;
+        // 折线补回最近一个披露点（时间取写入时刻），否则重启后历史曲线整段消失
+        market.shortHistory = [{ t: Number(snap.shortPub.at) || Date.now(), day, qty }];
+      }
+    }
+
     // 融券池聚合值从账户挂借量 + shortInterest 重建（挂借量已随 accounts 恢复）
     this.rebuildLendingPool();
 
@@ -642,8 +658,8 @@ class Game {
         // 做空欠息追缴：现金/保证金一恢复就补缴给出借方（不能等下一个收盘）
         market.collectLendingDebt();
       }
-      // 空头仓位 5 分钟采样（停牌也记，走势图不断点）
-      market.sampleShortInterest(now);
+      // 空头存量的**披露**不在这里做：它跟着日终结算走（见 settleDay.publishShortInterest），
+      // 日内冻结，每 tick 只推进实时值 shortInterest 供撮合/利息/风控使用
       // 东风人气热度推进（只影响散户 NPC 的跟风强度；无东风客户时恒为 0）
       market.updateDongfengHeat(now);
 
@@ -796,10 +812,28 @@ class Game {
       );
     }
     let canceled = 0;
+    let shortPublished = 0;
     for (const stock of this.stocks) {
-      canceled += this.markets
-        .get(stock.id)
-        .settleDay(now, { cancelOrders: opts.cancelOrders, day: completedDay }).canceled;
+      const m = this.markets.get(stock.id);
+      canceled += m.settleDay(now, { cancelOrders: opts.cancelOrders, day: completedDay }).canceled;
+      // 空头存量披露：收盘定格一次，融券 tab 的「空头总持仓」日内就冻在这个数上。
+      // 放在本股 settleDay 之后——收盘竞价与当日委托作废都已落定，这才是这一天的终值
+      if (m.publishShortInterest(completedDay, now)) shortPublished += 1;
+    }
+    if (shortPublished > 0) {
+      // 落 meta（十只股票一份，很小）：不落的话重启后玩家看到的是「未披露」，
+      // 已经公布过的那一天白丢。**故意不受 `opts.meta` 控制**——这条是展示状态，
+      // 漏写的代价（重启后倒退一天）比多写一行大；现在所有结算路径都传 meta: true，
+      // 两者实际等价，留成无条件是为了以后新增结算入口时不会静默丢披露
+      const values = {};
+      for (const stock of this.stocks) values[stock.id] = this.markets.get(stock.id).shortInterestPub;
+      this.persist?.setMeta(
+        'short_pub',
+        JSON.stringify({ day: completedDay, at: now, values })
+      );
+      logger.info(
+        `[我是股神] 第 ${completedDay} 个交易日空头存量已披露（${shortPublished} 只标的收盘定格）`
+      );
     }
     this.index.settleDay(now, { day: completedDay });
     // 彩蛋硬门槛一律挂在**收盘结算**上（方案 §2.1）：一天一个数、顺序确定、重启可复现。
@@ -2445,11 +2479,16 @@ class Game {
       if (acc.name === 'SYSTEM') continue;
       total += acc.longQty(stockId);
     }
+    const market = this.markets.get(stockId);
     return {
       stockId,
       longTotal: total,
       float: stock.floatShares,
-      shortInterest: this.markets.get(stockId).shortInterest,
+      // 与融券 tab 同一口径：收盘披露值，日内冻结（实时值只在引擎内部用）。
+      // 开放平台是玩家能拿到的口子，这里漏实时值的话这次改动就白做了。
+      // 还没到过收盘是 `null`（未知），配 `shortInterestDay: -1` 一起读
+      shortInterest: market.pubShortInterest(),
+      shortInterestDay: market.shortInterestPubDay,
     };
   }
 

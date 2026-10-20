@@ -381,7 +381,8 @@ curl -s -H "X-API-Key: $GUSHEN_API_KEY" \
         "enabled": true, "total": 800000, "borrowed": 120000, "reserved": 0,
         "available": 680000, "utilization": 15,
         "dailyRate": 0.13, "settle": "daily", "settledDay": 12,
-        "allowNakedShort": false, "shortInterest": 120000, "history": []
+        "allowNakedShort": false, "shortInterest": 120000, "shortInterestDay": 12,
+        "history": [ { "t": 1792480000000, "day": 12, "qty": 120000 } ]
       },
       "depth": {
         "bids": [ { "price": 20.04, "qty": 3000, "brokers": [ { "key": "huatai", "qty": 2000, "pct": 67 } ] } ],
@@ -949,7 +950,8 @@ Access-Control-Max-Age: 600
 { "enabled": true, "total": 800000, "borrowed": 120000, "reserved": 0,
   "available": 680000, "utilization": 15,
   "dailyRate": 0.13, "settle": "daily", "settledDay": 12,
-  "allowNakedShort": false, "shortInterest": 120000, "history": [] }
+  "allowNakedShort": false, "shortInterest": 120000, "shortInterestDay": 12,
+  "history": [ { "t": 1792480000000, "day": 12, "qty": 120000 } ] }
 ```
 
 | 字段 | 说明 |
@@ -964,8 +966,9 @@ Access-Control-Max-Age: 600
 | `settle` | 计息口径，恒为 `"daily"`：每个游戏日结算一次 |
 | `settledDay` | 已结算到第几个交易日（`-1` = 还没结过任何一天；收盘结算时它的值恒 ≥ 1） |
 | `allowNakedShort` | 是否允许无券开空 |
-| `shortInterest` | 未平空头总量 |
-| `history` | 空头仓位采样 `[{t, qty}]`，约 5 分钟一点 |
+| `shortInterest` | **空头总持仓（收盘披露口径）**：每个游戏日收盘结算后刷新一次，日内冻结。真实市场的融券余额也是盘后披露，所以这里拿不到盘中实时的建空动向。**`null` = 还没披露过**（新开局第一个交易日），不是 0、也不是实时值 |
+| `shortInterestDay` | 已披露到第几个交易日（`-1` = 还没披露过，此时 `shortInterest` 为 `null`） |
+| `history` | 空头存量披露序列 `[{t, day, qty}]`，**每个交易日一点**（保留最近 120 个交易日） |
 
 > 注意：某些券商的可借上限会按 `lendCapacityMul` 打折（例如招伤只有池子的 60%）。
 > `lending.available` 是**池子口径**；实际能借多少，以 `sell_open` 被拒时返回的
@@ -1074,7 +1077,8 @@ Access-Control-Max-Age: 600
   "stockId": "600001",
   "longTotal": 6200000,
   "float": 100000000,
-  "shortInterest": 120000
+  "shortInterest": 120000,
+  "shortInterestDay": 12
 }
 ```
 
@@ -1082,7 +1086,8 @@ Access-Control-Max-Age: 600
 |---|---|
 | `longTotal` | 全服账户的多头持仓合计（股，不含系统账户） |
 | `float` | 流通盘（股） |
-| `shortInterest` | 未平空头总量（股） |
+| `shortInterest` | 空头总持仓（股），与融券 tab 同口径：**每个交易日收盘后披露一次**，日内不变。`null` = 还没披露过（不是 0） |
+| `shortInterestDay` | 已披露到第几个交易日（`-1` = 还没披露过） |
 
 未知股票返回 `400` + `未知股票`。
 
