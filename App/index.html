@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#080b10">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>股神请就位</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/m/css/app.css">
+</head>
+<body>
+  <!-- 启动骨架：等首帧 state 之前不要白屏 -->
+  <div id="boot" class="boot">
+    <div class="boot-logo">股神<span>请就位</span></div>
+    <div class="boot-bar"><i></i></div>
+    <div class="boot-tip" id="bootTip">正在连接交易所…</div>
+  </div>
+
+  <!-- 登录 / 开户：全屏演出，登录成功后整体移除 -->
+  <div id="login" class="login" hidden>
+    <div class="login-glow"></div>
+    <div class="login-body" id="loginBody"></div>
+  </div>
+
+  <!-- 主壳 -->
+  <div id="shell" class="app" hidden>
+    <header class="app-header" id="appHeader"></header>
+    <main class="app-main" id="appMain"></main>
+    <nav class="tabbar" id="tabbar"></nav>
+  </div>
+
+  <!-- 详情页：从底部滑入的二级页（个股 / 排行详情等） -->
+  <section class="page" id="page" hidden></section>
+
+  <!-- 全局弹层 -->
+  <div class="sheet-mask" id="sheetMask" hidden></div>
+  <section class="sheet" id="sheet" hidden></section>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <script src="/m/js/core.js"></script>
+  <script src="/m/js/api.js"></script>
+  <script src="/m/js/chart.js"></script>
+  <script src="/m/js/view-login.js"></script>
+  <script src="/m/js/view-market.js"></script>
+  <script src="/m/js/view-stock.js"></script>
+  <script src="/m/js/view-trade.js"></script>
+  <script src="/m/js/view-rank.js"></script>
+  <script src="/m/js/view-me.js"></script>
+  <script src="/m/js/main.js"></script>
+</body>
+</html>
