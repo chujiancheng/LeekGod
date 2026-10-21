@@ -1438,9 +1438,188 @@ input::placeholder {
   font-variant-numeric: tabular-nums;
 }
 
-.rank-no.top1 { color: var(--gold); }
-.rank-no.top2 { color: #8a97a8; }
-.rank-no.top3 { color: #c07a4a; }
+/* 前三奖牌：金 / 银 / 铜圆徽章（比纯变色更醒目，配合行的 rtop-* 底色） */
+.rank-no.md1,
+.rank-no.md2,
+.rank-no.md3 {
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(24, 36, 56, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.rank-no.md1 { background: linear-gradient(135deg, #f6c453, #e8960f); }
+.rank-no.md2 { background: linear-gradient(135deg, #cdd6e0, #8493a5); }
+.rank-no.md3 { background: linear-gradient(135deg, #eaa06a, #b3662f); }
+
+/* 前三行：左侧色条 + 朝金色渐隐的底色（券商榜复用同一套） */
+.rank-row.rtop-1 {
+  background: linear-gradient(90deg, rgba(240, 178, 60, 0.14), rgba(240, 178, 60, 0) 70%);
+  box-shadow: inset 3px 0 0 #e8960f;
+}
+.rank-row.rtop-2 {
+  background: linear-gradient(90deg, rgba(132, 147, 165, 0.16), rgba(132, 147, 165, 0) 70%);
+  box-shadow: inset 3px 0 0 #8493a5;
+}
+.rank-row.rtop-3 {
+  background: linear-gradient(90deg, rgba(179, 102, 47, 0.12), rgba(179, 102, 47, 0) 70%);
+  box-shadow: inset 3px 0 0 #b3662f;
+}
+
+/* 玩家榜可点行：点开他的持仓（底部弹层） */
+.rank-row[data-account] {
+  cursor: pointer;
+}
+.rank-row[data-account]:active {
+  background: var(--bg-2);
+}
+.rank-arrow {
+  margin-left: -4px;
+  color: var(--txt-3);
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* 持仓弹层（排行 → 点玩家行） */
+.pos-loading {
+  padding: 26px 0;
+  text-align: center;
+  color: var(--txt-3);
+  font-size: 14px;
+}
+.pos-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.pos-head .ava {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+}
+.pos-head-main {
+  flex: 1;
+  min-width: 0;
+}
+.pos-head-name {
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pos-head-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pos-head-right {
+  flex-shrink: 0;
+  text-align: right;
+}
+.pos-eq {
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.pos-eq-label {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--txt-3);
+}
+.pos-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 12px 0;
+}
+.pos-stat {
+  background: var(--bg-2);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.pos-stat-label {
+  font-size: 11px;
+  color: var(--txt-3);
+}
+.pos-stat-val {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.pos-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.pos-row:last-child {
+  border-bottom: 0;
+}
+.pos-name {
+  width: 118px;
+  flex-shrink: 0;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pos-code {
+  margin-left: 5px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--txt-3);
+}
+.pos-side {
+  margin-left: 5px;
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+.pos-row.is-long .pos-side {
+  color: var(--up);
+  background: var(--up-soft);
+}
+.pos-row.is-short .pos-side {
+  color: var(--down);
+  background: var(--down-soft);
+}
+.pos-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+  color: var(--txt-2);
+  font-variant-numeric: tabular-nums;
+}
+.pos-right {
+  flex-shrink: 0;
+  text-align: right;
+}
+.pos-val {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.pos-pnl {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 
 .ava {
   width: 38px;

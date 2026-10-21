@@ -3860,8 +3860,14 @@
           p.realm && p.realm.idx > 0
             ? `<span class="realm-chip sm g-${esc(p.realm.group)}" title="${esc(p.realm.honor || '')}">${esc(p.realm.short || p.realm.name)}</span>`
             : '';
-        return `<tr${mine ? ' class="row-mine"' : ''}>
-          <td>${i + 1}</td>
+        // 前三给奖牌徽章 + 行高亮（纯展示，不动排序口径）
+        const topCls = i < 3 ? ` rank-top rank-top-${i + 1}` : '';
+        const noCell =
+          i < 3
+            ? `<span class="rank-medal rm${i + 1}" title="第 ${i + 1} 名">${i + 1}</span>`
+            : String(i + 1);
+        return `<tr class="${topCls.trim()}${mine ? ' row-mine' : ''}">
+          <td>${noCell}</td>
           <td>${avaHtml(p.ava, 22, p.realm && p.realm.group, p.name)}${esc(p.name)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
@@ -4002,7 +4008,7 @@
   }
 
   // ---------- 主页：交易大厅 ----------
-  const HOME_RANK_LIMIT = 5;
+  const HOME_RANK_LIMIT = 10;
   const HOME_NEWS_LIMIT = 4;
 
   /**

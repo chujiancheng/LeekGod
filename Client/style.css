@@ -512,6 +512,24 @@ input { font: inherit; color: inherit; }
 .grid-table .rank-pos-btn { flex: none; height: 22px; padding: 0 9px; white-space: nowrap; }
 .grid-table .rank-act-col, .grid-table .rank-act-cell { width: 62px; text-align: right; white-space: nowrap; }
 
+/* ---------- 玩家榜前三：奖牌徽章 + 行强调（纯展示，排序口径仍是权益） ---------- */
+.rank-medal {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  color: #fff; font-weight: 800; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .25), inset 0 1px 0 rgba(255, 255, 255, .35);
+}
+.rank-medal.rm1 { background: linear-gradient(135deg, #ffd257, #e8960f); }
+.rank-medal.rm2 { background: linear-gradient(135deg, #cdd6e0, #8493a5); }
+.rank-medal.rm3 { background: linear-gradient(135deg, #eaa06a, #b3662f); }
+.grid-table tr.rank-top td { background: color-mix(in srgb, var(--gold) 7%, transparent); }
+.grid-table tr.rank-top-1 td:first-child { box-shadow: inset 3px 0 0 var(--gold); }
+.grid-table tr.rank-top-2 td:first-child { box-shadow: inset 3px 0 0 #9fb0c3; }
+.grid-table tr.rank-top-3 td:first-child { box-shadow: inset 3px 0 0 #c07a4a; }
+/* 「我」的行底色优先级更高：既是前三又是我时保留蓝色认人 */
+.grid-table tr.rank-top.row-mine td { background: color-mix(in srgb, var(--blue) 12%, transparent); }
+
 /* ---------- 布局 ---------- */
 .app {
   height: 100vh;

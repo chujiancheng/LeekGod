@@ -2204,8 +2204,9 @@ class Game {
     };
   }
 
-  /** 玩家资产排行（组合口径：跨全部股票的总权益）。展示名走昵称，账号另带一份供前端自行识别 */
-  leaderboard(limit = 20) {
+  /** 玩家资产排行（组合口径：跨全部股票的总权益）。展示名走昵称，账号另带一份供前端自行识别。
+   *  50 行 ≈ 14KB/帧（700ms 一帧）：玩家要看的榜太短就没意思，帧大头始终是行情段，这个量级可接受 */
+  leaderboard(limit = 50) {
     const priceOf = (s) => this.markets.get(s).lastPrice;
     const all = this.store
       .players()
