@@ -96,6 +96,33 @@ set "VC=0"
 for /f "tokens=2 delims='" %%v in ('findstr /r /c:"^ *versionName " "%PROJ%\app\build.gradle"') do set "VER=%%v"
 for /f "tokens=2" %%c in ('findstr /r /c:"^ *versionCode " "%PROJ%\app\build.gradle"') do set "VC=%%c"
 echo  version : %VER% ^(versionCode = %VC%^)
+
+rem ---------------- 4b. effective server url ----------------
+rem  Priority: server.properties (local, gitignored) > local.properties > gradle.properties
+rem  Must match what app/build.gradle does, otherwise this banner lies.
+set "SURL="
+set "SSRC="
+if exist "%PROJ%\server.properties" (
+  for /f "usebackq tokens=2 delims==" %%a in (`findstr /b /c:"gushenServerUrl" "%PROJ%\server.properties"`) do (
+    set "SURL=%%a"
+    set "SSRC=server.properties"
+  )
+)
+if not defined SURL if exist "%PROJ%\local.properties" (
+  for /f "usebackq tokens=2 delims==" %%a in (`findstr /b /c:"gushenServerUrl" "%PROJ%\local.properties"`) do (
+    set "SURL=%%a"
+    set "SSRC=local.properties"
+  )
+)
+if not defined SURL (
+  for /f "usebackq tokens=2 delims==" %%a in (`findstr /b /c:"gushenServerUrl" "%PROJ%\gradle.properties"`) do (
+    set "SURL=%%a"
+    set "SSRC=gradle.properties (default, committed)"
+  )
+)
+if not defined SURL set "SURL=(build.gradle fallback)"
+if not defined SSRC set "SSRC=build.gradle fallback"
+echo  server  : %SURL%  ^<%SSRC%^>
 echo.
 
 rem ---------------- 5. build ----------------

@@ -1,5 +1,7 @@
 # 本地路径（不进 git）
 local.properties
+# 本机服务器地址（不进 git；入库的是 gradle.properties 里的默认值）
+server.properties
 # 签名信息（不进 git！丢了就没法给老用户升级，必须备份）
 keystore.properties
 keystore/*.jks

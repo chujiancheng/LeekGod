@@ -2,6 +2,24 @@ plugins {
     id 'com.android.application'
 }
 
+// 服务器地址三级来源（**前面的优先**，越靠前越"本机"）：
+//   1. server.properties  —— 本机配置文件，.gitignore 不进 git，换机器/换 WiFi 只改这里
+//   2. local.properties   —— 本机文件（存 sdk.dir），也允许写 gushenServerUrl
+//   3. gradle.properties  —— 入库默认值，给克隆仓库的人兜底
+// 值是编译进 APK 的常量，**改完必须重新打包**（跑 build-apk.bat）。
+def readLocalUrl = { String name ->
+    def f = rootProject.file(name)
+    if (!f.exists()) return null
+    def p = new Properties()
+    f.withInputStream { p.load(it) }
+    def v = p.getProperty('gushenServerUrl')
+    return v ? v.trim() : null
+}
+def serverUrl = readLocalUrl('server.properties')
+        ?: readLocalUrl('local.properties')
+        ?: (project.findProperty('gushenServerUrl') ?: 'http://192.168.1.9:3000')
+logger.lifecycle("[gushen] SERVER_URL = ${serverUrl}")
+
 android {
     namespace 'cn.gushen.leekgod'
     compileSdk 33
@@ -12,9 +30,8 @@ android {
         targetSdk 33
         versionCode 1
         versionName '1.0.0'
-        // 首次启动预填的服务器地址（gradle.properties 里改）
-        buildConfigField 'String', 'SERVER_URL',
-                "\"${project.findProperty('gushenServerUrl') ?: 'http://192.168.1.9:3000'}\""
+        // 首次启动预填的服务器地址（见上面的三级来源）
+        buildConfigField 'String', 'SERVER_URL', "\"${serverUrl}\""
     }
 
     // 纯 WebView 壳，零第三方依赖；签名信息在 keystore.properties（不进 git）

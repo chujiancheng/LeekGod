@@ -167,7 +167,8 @@ public class MainActivity extends Activity {
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
         input.setSingleLine(true);
-        input.setHint("例如 http://192.168.1.9:3000");
+        // hint 跟着打包时的地址走，别写死某个 IP（换了服务器/内网段会误导玩家）
+        input.setHint("例如 " + defaultUrl());
         input.setText(prefill == null ? "" : prefill);
         input.setSelection(input.getText().length());
 

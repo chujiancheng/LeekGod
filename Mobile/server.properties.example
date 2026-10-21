@@ -1,0 +1,14 @@
+# 服务器地址模板 —— 复制成 server.properties 后修改（server.properties 不进 git）
+#
+#   cd Mobile
+#   copy server.properties.example server.properties      (Windows)
+#   cp   server.properties.example server.properties      (Git Bash / macOS / Linux)
+#
+# 优先级：server.properties > local.properties > gradle.properties（入库默认值）
+# 地址是编译进 APK 的常量，改完要重新打包（Mobile/build-apk.bat）。
+#
+#   · 自己 / 同 WiFi 的朋友：本机内网 IP，例如 http://192.168.1.9:3000（ipconfig 看 IPv4）
+#   · 外网朋友：先做端口映射/内网穿透（frp、Tailscale 等），填公网地址
+#   · 模拟器连宿主机：http://10.0.2.2:3000
+#
+gushenServerUrl=http://192.168.1.9:3000

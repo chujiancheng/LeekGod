@@ -14,8 +14,13 @@
 
 发版前只需要改两处：
 
-1. `gradle.properties -> gushenServerUrl`：内置默认服务器地址（玩家首次启动会预填它）。
+1. **`server.properties -> gushenServerUrl`**：本机配置的服务器地址，**不进 git**（模板见 `server.properties.example`）。
+   App 首次启动会预填它。优先级：`server.properties` > `local.properties` > `gradle.properties`
+   （最后一层是入库的默认值，只给克隆仓库的人兜底，日常别去改它）。
+   改完 `build-apk.bat` 的第二行 banner 会打出当前生效的地址和来源，一眼能确认有没有改对。
 2. `app/build.gradle -> versionCode / versionName`：**升级必须递增 versionCode**。
+
+第一次在新机器上打包：`copy server.properties.example server.properties`，然后把地址改成你那台服务器。
 
 命令行用法：
 
@@ -28,6 +33,14 @@ build-apk.bat --no-pause  :: 跑完不停窗口（脚本/CI 里调用）
 前提：JDK 17 + Android SDK（本机在 `D:\andriod`，`local.properties` 已指好）。
 脚本内注释与输出保持纯 ASCII——`.bat` 里混中文再 `chcp 65001` 会让 cmd 行偏移错乱、
 把注释当命令执行，中文说明一律写在本文档。
+
+## 本机配置文件（都不进 git）
+
+| 文件 | 作用 | 模板 |
+|---|---|---|
+| `server.properties` | 服务器地址（编译进 APK） | `server.properties.example` |
+| `local.properties` | Android SDK 路径（`sdk.dir`），也可写 `gushenServerUrl` | — |
+| `keystore.properties` + `keystore/*.jks` | 签名，**丢了没法给老用户升级** | — |
 
 ## 签名（重要）
 
