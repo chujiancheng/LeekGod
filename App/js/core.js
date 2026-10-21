@@ -379,15 +379,24 @@ window.GS = window.GS || {};
 
   /* ------------------------------------------------------------ 页面骨架 */
 
-  /** 二级页头部（返回 + 标题 + 右侧插槽） */
-  function pageHead(title, sub, right) {
+  /** 二级页头部（返回 + 标题 + 右侧插槽）。
+   *  opt.tapId：把标题块包成按钮（个股页点股票名开公司档案用）；
+   *  opt.badge：名字右侧的常驻小角标（如「档案 ›」，纯展示）。 */
+  function pageHead(title, sub, right, opt) {
+    const o = opt || {};
+    const text =
+      '<div class="grow">' +
+        '<div class="head-title">' + esc(title) +
+          (o.badge ? '<span class="archive-tag">' + esc(o.badge) + '</span>' : '') +
+        '</div>' +
+        (sub ? '<div class="head-sub">' + esc(sub) + '</div>' : '') +
+      '</div>';
     return (
       '<div class="head-row">' +
         '<button class="icon-btn" data-page-back aria-label="返回">' + icon('back') + '</button>' +
-        '<div class="grow">' +
-          '<div class="head-title">' + esc(title) + '</div>' +
-          (sub ? '<div class="head-sub">' + esc(sub) + '</div>' : '') +
-        '</div>' +
+        (o.tapId
+          ? '<button class="head-tap" id="' + esc(o.tapId) + '" aria-label="查看公司档案">' + text + '</button>'
+          : text) +
         (right || '') +
       '</div>'
     );

@@ -41,8 +41,11 @@
         '</div>' +
       '</div>' +
       '<div class="hero" id="idxHero">' +
-        '<div class="hero-name"><span id="idxName">全村希望</span>' +
-          '<span class="tag" id="idxCode">999999</span></div>' +
+        '<button class="hero-name" id="idxArchive" aria-label="查看大盘档案">' +
+          '<span id="idxName">全村希望</span>' +
+          '<span class="tag" id="idxCode">999999</span>' +
+          '<span class="archive-tag">档案 ›</span>' +
+        '</button>' +
         '<div class="hero-price"><b class="num" id="idxLast">—</b>' +
           '<span class="hero-chg num" id="idxChg">—</span></div>' +
         '<div class="hero-spark"><canvas class="spark-canvas" id="idxSpark"></canvas></div>' +
@@ -64,6 +67,11 @@
     GS.core.on(root, '#mineCard', 'click', () => {
       GS.app.switchTo('me');
     });
+    // 指数 hero 名：打开大盘档案（股娘天团，立绘是全员合照）
+    GS.core.on(root, '#idxArchive', 'click', () => {
+      const idx = GS.core.S.state && GS.core.S.state.index;
+      if (GS.company && idx) GS.company.openProfile(idx.stockId);
+    });
 
     built = true;
     sig = '';
@@ -74,9 +82,15 @@
     const box = GS.core.$('stockList');
     if (!box) return;
     box.innerHTML = markets
-      .map(
-        (m) =>
+      .map((m) => {
+        // 公司徽记（档案数据里的手绘 SVG）：让列表一眼认出是哪家公司
+        const lore = GS.company && GS.company.loreOf ? GS.company.loreOf(m.stockId) : null;
+        const logo = lore && lore.logo
+          ? '<img class="stock-row-logo" src="' + esc(lore.logo) + '" alt="">'
+          : '';
+        return (
           '<div class="stock-row" data-stock="' + esc(m.stockId) + '">' +
+            logo +
             '<div class="stock-id">' +
               '<div class="stock-name">' + esc(m.name) + '</div>' +
               '<div class="stock-code">' + esc(m.stockId) + '</div>' +
@@ -87,7 +101,8 @@
               '<div class="pill flat num" data-pill="' + esc(m.stockId) + '">' + fmtPct(m.changePct) + '</div>' +
             '</div>' +
           '</div>'
-      )
+        );
+      })
       .join('');
 
     refs.clear();

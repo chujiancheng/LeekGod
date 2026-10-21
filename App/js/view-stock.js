@@ -45,12 +45,36 @@
 
   /* ---------------------------------------------------------------- 骨架 */
 
+  /** 公司档案入口行：徽记 + 拟人名预告（静态数据，open 时一次性填好，不进帧循环） */
+  function archiveEntryHtml(m) {
+    const lore = GS.company && GS.company.loreOf ? GS.company.loreOf(m.stockId) : null;
+    if (!lore) return '';
+    const logo = lore.logo
+      ? '<img class="co-entry-logo" src="' + esc(lore.logo) + '" alt="">'
+      : '';
+    return (
+      '<button class="co-entry" id="coEntry">' +
+        logo +
+        '<div class="grow">' +
+          '<div class="co-entry-name">公司档案 · 股娘图鉴</div>' +
+          '<div class="co-entry-sub">拟人 · ' + esc(lore.waifu) + ' · ' + esc(lore.title) + '</div>' +
+        '</div>' +
+        '<span class="co-entry-arrow">档案 ›</span>' +
+      '</button>'
+    );
+  }
+
   function skeleton(m) {
     const shareBtn = m
       ? '<button class="icon-btn" id="stockShare" aria-label="分享">' + GS.core.icon('share') + '</button>'
       : '';
+    // 「档案 ›」角标只在真有档案数据时挂（没有就别骗人点）
+    const hasLore = !!(m && GS.company && GS.company.loreOf && GS.company.loreOf(m.stockId));
     return (
-      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', shareBtn) +
+      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', shareBtn, {
+        tapId: 'stockArchive',
+        badge: hasLore ? '档案 ›' : '',
+      }) +
       '<div class="page-body" id="stockBody">' +
         '<div class="quote-head">' +
           '<div class="quote-line">' +
@@ -66,6 +90,8 @@
             '<span>市值<b class="num" id="qCap">—</b></span>' +
           '</div>' +
         '</div>' +
+
+        (m ? archiveEntryHtml(m) : '') +
 
         '<div class="stock-columns">' +
           '<div class="card chart-card">' +
@@ -128,6 +154,12 @@
         GS.core.bindPageBack(el.el);
         // 分享当前个股行情（头部右上角）
         GS.core.on(el.el, '#stockShare', 'click', () => GS.share.stockText(state.stockId));
+        // 公司档案两处入口：点头部股票名 / 点报价卡下的档案行
+        const openArchive = () => {
+          if (GS.company) GS.company.openProfile(state.stockId);
+        };
+        GS.core.on(el.el, '#stockArchive', 'click', openArchive);
+        GS.core.on(el.el, '#coEntry', 'click', openArchive);
         bindTabs(el.el);
         bindChartTouch(el.el);
         bindAct(el.el);

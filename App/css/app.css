@@ -2137,3 +2137,228 @@ input::placeholder {
   top: 0;
   opacity: 0;
 }
+
+/* ---------------------------------------------------------------- 公司档案 */
+
+/* 个股页头部：股票名整块可点（打开公司档案），button 复位成纯布局盒 */
+.head-tap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  align-self: stretch; /* 撑满 52px 头部高度，点哪都算 */
+  text-align: left;
+  border-radius: 12px;
+}
+
+.head-tap:active {
+  background: rgba(20, 30, 48, 0.06);
+}
+
+/* 「档案 ›」常驻小角标：名字旁的可点信号（网页端同款） */
+.archive-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--txt-3);
+  letter-spacing: 0.5px;
+  vertical-align: 2px;
+}
+
+.head-tap:active .archive-tag,
+.hero-name:active .archive-tag {
+  color: var(--gold);
+  border-color: var(--gold);
+}
+
+/* 首页指数 hero 名：也是按钮（大盘档案入口）。外扩 padding + 等量负 margin
+   把命中区撑到 44px 以上，四周净占位不变 */
+.hero-name {
+  width: auto;
+  text-align: left;
+  padding: 12px 10px;
+  margin: -12px -10px;
+  border-radius: 10px;
+}
+
+/* 个股页「公司档案」入口行：徽记 + 拟人名预告 */
+.co-entry {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: left;
+}
+
+.co-entry:active {
+  background: var(--bg-2);
+}
+
+.co-entry-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.co-entry-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.co-entry-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.co-entry-arrow {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--txt-3);
+}
+
+/* 首页股票行的公司徽记 */
+.stock-row-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+
+/* 档案弹层：色带 + 立绘 + 信息 + 8 格资料 + 全员合照入口 */
+.co-ribbon {
+  height: 6px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.co-portrait {
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  height: 240px;
+}
+
+.co-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  display: block;
+}
+
+.co-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 12px;
+}
+
+.co-logo {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+.co-name {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+}
+
+.co-code {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--txt-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.co-waifu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+/* 拟人胶囊：底色/描边由 JS 按公司主题色走 CSSOM 注入 */
+.co-waifu {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 11px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.co-title {
+  font-size: 12px;
+  color: var(--txt-3);
+}
+
+.co-intro {
+  margin: 10px 0 0;
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--txt-2);
+}
+
+.co-stats {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.co-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+
+.co-stat-label {
+  font-size: 11px;
+  color: var(--txt-3);
+}
+
+.co-stat b {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.co-poster-btn {
+  margin-top: 14px;
+}
+
+/* 全员合照：竖版海报完整展示（弹层内滚动） */
+.poster-img {
+  display: block;
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.co-poster-hint {
+  margin-top: 10px;
+}
