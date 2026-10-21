@@ -32,3 +32,4 @@ art/**/*.png
 
 # 智能体工作目录（记忆 + 临时产物，不入库）
 .workbuddy/
+generated-images/

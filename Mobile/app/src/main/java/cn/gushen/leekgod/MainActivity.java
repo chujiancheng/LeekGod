@@ -30,11 +30,11 @@ import android.widget.Toast;
  * 服务器地址存本地，首次启动预填 gradle.properties 里的 gushenServerUrl。
  *
  * 玩家可见行为：
- *  - 首次启动弹一次「服务器地址」输入框；
- *  - 断网 / 服务器不在时进入内置离线页，可一键重试或改地址；
+ *  - 首次启动直接用打包内置地址进游戏（不弹窗）；
+ *  - 「我的」页菜单「切换服务器」或断网离线页里的「改地址」可随时改；
  *  - 物理返回键：先关 App 内的弹层/二级页（复用页面自己的 GS.core 逻辑），
  *    到根部再按一次退出；
- *  - 隐藏入口：长按屏幕左上角 1.2 秒，随时改服务器地址。
+ *  - 隐藏入口：长按屏幕左上角 1.2 秒，也能改服务器地址。
  */
 public class MainActivity extends Activity {
 
@@ -56,7 +56,7 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
 
         web = new WebView(this);
-        web.setBackgroundColor(Color.parseColor("#080b10"));
+        web.setBackgroundColor(Color.parseColor("#f4f5f7"));
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);      // localStorage：登录态存这里
@@ -117,8 +117,8 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         String saved = prefs.getString(KEY_URL, "").trim();
-        if (saved.isEmpty()) askServer(defaultUrl());
-        else loadSite(saved);
+        // 首次安装不弹窗：没有本地存档就直接用打包内置地址进游戏
+        loadSite(saved.isEmpty() ? defaultUrl() : saved);
     }
 
     /** gradle.properties 里的内置默认地址 */
@@ -176,7 +176,7 @@ public class MainActivity extends Activity {
                 .setTitle("服务器地址")
                 .setMessage("填游戏服务器根地址，App 会加载它的移动端页面 /m/")
                 .setView(input)
-                .setCancelable(false)
+                .setCancelable(true)
                 .setPositiveButton("进入", (d, w) -> {
                     String v = input.getText().toString();
                     if (normalize(v) == null) {
@@ -186,7 +186,7 @@ public class MainActivity extends Activity {
                     }
                     loadSite(v);
                 })
-                .setNegativeButton("退出", (d, w) -> finish())
+                .setNegativeButton("取消", null)
                 .show();
     }
 

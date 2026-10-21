@@ -36,6 +36,9 @@
       else if (k === 'logout') logout();
       else if (k === 'portal') location.href = '/portal.html';
       else if (k === 'rules') openRules();
+      else if (k === 'server') {
+        try { window.AndroidHost.changeServer(); } catch (e) { /* 无桥忽略 */ }
+      }
     });
 
     built = true;
@@ -121,6 +124,17 @@
       { k: 'rules', icon: '📖', label: '交易规则', val: '' },
       { k: 'logout', icon: '🚪', label: '退出登录', val: '' },
     ];
+    // 壳 App 里才有 AndroidHost 桥：加「切换服务器」入口，展示当前地址
+    let host = null;
+    try { host = window.AndroidHost || null; } catch (e) { /* 浏览器无桥 */ }
+    if (host && typeof host.changeServer === 'function') {
+      let cur = '';
+      try { cur = String(host.server() || ''); } catch (e) { cur = ''; }
+      items.splice(4, 0, {
+        k: 'server', icon: '🛰', label: '切换服务器',
+        val: cur.replace(/^https?:\/\//, ''),
+      });
+    }
     box.innerHTML = items
       .map(
         (it) =>

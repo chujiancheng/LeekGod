@@ -6,13 +6,14 @@
   'use strict';
 
   const C = {
-    grid: 'rgba(255,255,255,0.055)',
-    axis: 'rgba(255,255,255,0.12)',
-    txt: '#66717f',
-    up: '#ff4d5e',
-    down: '#17c08a',
-    line: '#48c6ef',
-    gold: '#ffc94a',
+    grid: 'rgba(20,30,48,0.07)',
+    axis: 'rgba(20,30,48,0.12)',
+    txt: '#99a2ad',
+    up: '#e8413c',
+    down: '#0aa06e',
+    line: '#3c7cff',
+    avg: '#f0a020',
+    gold: '#dd9520',
   };
 
   /** 按像素比准备画布，返回 2d 上下文与逻辑尺寸 */
@@ -53,7 +54,7 @@
     const color = up ? C.up : C.down;
 
     // 基准虚线
-    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.strokeStyle = 'rgba(20,30,48,0.18)';
     ctx.setLineDash([2, 3]);
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -146,7 +147,7 @@
 
     // 基准价线 + 标签
     const yb = Y(base);
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.strokeStyle = 'rgba(20,30,48,0.28)';
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
     ctx.moveTo(0, yb);
@@ -154,13 +155,26 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const up = +pts[pts.length - 1].price >= base;
-    const main = up ? C.up : C.down;
+    // 分时主线固定东财蓝，均价线橙色（按成交量加权的累计均价）
+    const main = C.line;
+    let sumPV = 0;
+    let sumV = 0;
+    const avgY = pts.map((p, i) => {
+      const v = +p.vol || 0;
+      if (v > 0) {
+        sumPV += (+p.price) * v;
+        sumV += v;
+      } else {
+        sumPV += +p.price;
+        sumV += 1;
+      }
+      return Y(sumV ? sumPV / sumV : +p.price);
+    });
 
     // 面积渐变
     const g = ctx.createLinearGradient(0, 0, 0, priceH);
-    g.addColorStop(0, up ? 'rgba(255,77,94,0.30)' : 'rgba(23,192,138,0.30)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
+    g.addColorStop(0, 'rgba(60,124,255,0.14)');
+    g.addColorStop(1, 'rgba(60,124,255,0)');
     ctx.beginPath();
     ctx.moveTo(X(pts[0].t), priceH);
     pts.forEach((p) => ctx.lineTo(X(p.t), Y(+p.price)));
@@ -169,7 +183,18 @@
     ctx.fillStyle = g;
     ctx.fill();
 
-    // 折线
+    // 均价线（橙）
+    ctx.beginPath();
+    avgY.forEach((py, i) => {
+      const px = X(pts[i].t);
+      if (i) ctx.lineTo(px, py);
+      else ctx.moveTo(px, py);
+    });
+    ctx.strokeStyle = C.avg;
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    // 折线（蓝）
     ctx.beginPath();
     pts.forEach((p, i) => {
       const px = X(p.t);
@@ -190,15 +215,23 @@
       if (!vol) return;
       const bh = Math.max(1, (vol / vmax) * volH);
       const prev = i ? +pts[i - 1].price : +p.price;
-      ctx.fillStyle = +p.price >= prev ? 'rgba(255,77,94,0.55)' : 'rgba(23,192,138,0.55)';
+      ctx.fillStyle = +p.price >= prev ? 'rgba(232,65,60,0.5)' : 'rgba(10,160,110,0.5)';
       ctx.fillRect(X(p.t) - bw / 2, volTop + volH - bh, bw, bh);
     });
 
-    // 右侧价格刻度
-    ctx.fillStyle = C.txt;
+    // 四角标注（东财口径）：左上/左下价格，右上/右下涨跌幅，按相对昨收涨红跌绿
+    ctx.font = '10px -apple-system, sans-serif';
+    const pctOf = (v) => (((v - base) / base) * 100).toFixed(2) + '%';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = hi >= base ? C.up : C.down;
+    ctx.fillText(hi.toFixed(2), 2, 11);
+    ctx.fillStyle = lo >= base ? C.up : C.down;
+    ctx.fillText(lo.toFixed(2), 2, priceH - 3);
     ctx.textAlign = 'right';
-    ctx.fillText(hi.toFixed(2), w - 2, 11);
-    ctx.fillText(lo.toFixed(2), w - 2, priceH - 3);
+    ctx.fillStyle = hi >= base ? C.up : C.down;
+    ctx.fillText(pctOf(hi), w - 2, 11);
+    ctx.fillStyle = lo >= base ? C.up : C.down;
+    ctx.fillText(pctOf(lo), w - 2, priceH - 3);
 
     // 十字光标
     const points = pts.map((p) => ({ x: X(p.t), y: Y(+p.price), t: p.t, price: +p.price, vol: +p.vol || 0 }));
@@ -206,7 +239,7 @@
     if (o.cursor >= 0 && o.cursor < points.length) {
       hitIdx = o.cursor;
       const pt = points[hitIdx];
-      ctx.strokeStyle = 'rgba(255,255,255,0.42)';
+      ctx.strokeStyle = 'rgba(20,30,48,0.42)';
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
@@ -314,7 +347,7 @@
       ctx.fillRect(cx - bw / 2, top, bw, hh);
       // 量
       const bh = Math.max(1, ((+b.volume || 0) / vmax) * volH);
-      ctx.fillStyle = red ? 'rgba(255,77,94,0.5)' : 'rgba(23,192,138,0.5)';
+      ctx.fillStyle = red ? 'rgba(232,65,60,0.5)' : 'rgba(10,160,110,0.5)';
       ctx.fillRect(cx - bw / 2, volTop + volH - bh, bw, bh);
     });
 
@@ -332,7 +365,7 @@
 
     if (o.cursor >= 0 && o.cursor < points.length) {
       const pt = points[o.cursor];
-      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.strokeStyle = 'rgba(20,30,48,0.4)';
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(pt.x, 0);

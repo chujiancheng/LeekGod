@@ -6,7 +6,7 @@
   'use strict';
 
   const {
-    $, esc, fmtP, fmtPct, fmtChg, fmtQty, fmtAmt, fmtMoney, fmtTime, fmtLeft, cls, num,
+    $, esc, fmtP, fmtPct, fmtChg, fmtQty, fmtAmt, fmtMoney, fmtTime, fmtHM, fmtLeft, cls, num,
   } = GS.core;
 
   const state = {
@@ -48,22 +48,24 @@
           '</div>' +
         '</div>' +
 
-        '<div class="card chart-card">' +
-          '<div class="chart-tabs" id="chartTabs">' +
-            '<button data-mode="min" class="on">分时</button>' +
-            '<button data-mode="5d">五日</button>' +
-            '<button data-mode="day">日K</button>' +
+        '<div class="stock-columns">' +
+          '<div class="card chart-card">' +
+            '<div class="chart-tabs" id="chartTabs">' +
+              '<button data-mode="min" class="on">分时</button>' +
+              '<button data-mode="5d">五日</button>' +
+              '<button data-mode="day">日K</button>' +
+            '</div>' +
+            '<div class="chart-wrap" id="chartWrap">' +
+              '<canvas id="chartCanvas"></canvas>' +
+              '<div class="chart-tip" id="chartTip" hidden></div>' +
+            '</div>' +
           '</div>' +
-          '<div class="chart-wrap" id="chartWrap">' +
-            '<canvas id="chartCanvas"></canvas>' +
-            '<div class="chart-tip" id="chartTip" hidden></div>' +
+          '<div class="book-panel">' +
+            '<div class="book-panel-title">五档盘口</div>' +
+            '<div class="book" id="bookBox"></div>' +
+            '<div class="book-sub">分时成交</div>' +
+            '<div class="panel-ticker" id="tickerBox"></div>' +
           '</div>' +
-        '</div>' +
-
-        '<div class="card">' +
-          '<div class="card-head"><div class="card-title">五档盘口</div>' +
-            '<div class="card-more" id="bookMeta">—</div></div>' +
-          '<div class="book" id="bookBox"></div>' +
         '</div>' +
 
         '<div class="card">' +
@@ -72,12 +74,6 @@
           '<div class="flow-bar"><i id="flowOuter"></i><i id="flowInner"></i></div>' +
           '<div class="flow-legend"><span id="flowOuterTxt">外盘 —</span>' +
             '<span id="flowInnerTxt">内盘 —</span></div>' +
-        '</div>' +
-
-        '<div class="card">' +
-          '<div class="card-head"><div class="card-title">逐笔成交</div>' +
-            '<div class="card-more" id="tickCount">—</div></div>' +
-          '<div class="ticker" id="tickerBox"></div>' +
         '</div>' +
 
         '<div id="haltBox"></div>' +
@@ -295,10 +291,12 @@
 
     set('qBig', fmtP(m.last), 'quote-big num ' + cls(m.change));
     set('qChg', fmtChg(m.change) + '  ' + fmtPct(m.changePct), 'quote-chg num ' + cls(m.change));
-    set('qOpen', fmtP(m.open));
-    set('qHigh', fmtP(m.high));
-    set('qLow', fmtP(m.low));
-    set('qPrev', fmtP(m.prevClose));
+    // 报价格子按「相对昨收」涨红跌绿（东财口径）
+    const pc = num(m.prevClose);
+    set('qOpen', fmtP(m.open), 'num ' + cls(m.open - pc));
+    set('qHigh', fmtP(m.high), 'num ' + cls(m.high - pc));
+    set('qLow', fmtP(m.low), 'num ' + cls(m.low - pc));
+    set('qPrev', fmtP(m.prevClose), 'num flat');
     set('qTurn', fmtAmt(m.turnover));
     set('qCap', fmtAmt(m.marketCap));
 
@@ -347,8 +345,8 @@
 
     box.innerHTML =
       asksHtml +
-      '<div class="book-mid"><span>最新</span><span class="num ' + cls(m.change) + '">' +
-        fmtP(m.last) + '</span><span>涨停 ' + fmtP(m.band && m.band.up) + ' / 跌停 ' +
+      '<div class="book-mid"><span class="num ' + cls(m.change) + '">' +
+        fmtP(m.last) + '</span><span>停 ' + fmtP(m.band && m.band.up) + '/' +
         fmtP(m.band && m.band.down) + '</span></div>' +
       bidsHtml;
 
@@ -356,13 +354,6 @@
     box.querySelectorAll('.book-bar').forEach((el) => {
       el.style.width = (el.dataset.w || 0) + '%';
     });
-
-    const meta = $('bookMeta');
-    if (meta) {
-      const a = asks.reduce((s, r) => s + num(r.qty), 0);
-      const b = bids.reduce((s, r) => s + num(r.qty), 0);
-      meta.textContent = '买 ' + fmtQty(b) + ' / 卖 ' + fmtQty(a);
-    }
   }
 
   function renderFlow(m) {
@@ -392,13 +383,11 @@
   function renderTicker(m) {
     const box = $('tickerBox');
     if (!box) return;
-    const trades = (m.trades || []).slice(0, 24);
-    const cnt = $('tickCount');
-    if (cnt) cnt.textContent = trades.length ? '最新 ' + trades.length + ' 笔' : '';
+    const trades = (m.trades || []).slice(0, 14);
     if (!trades.length) {
       if (box.dataset.empty !== '1') {
         box.dataset.empty = '1';
-        box.innerHTML = '<div class="empty"><div class="empty-icon">·</div>暂无成交</div>';
+        box.innerHTML = '<div class="empty">暂无成交</div>';
       }
       return;
     }
@@ -408,7 +397,7 @@
         const dir = t.action === 'buy_open' || t.action === 'buy_close' ? 'up' : 'down';
         return (
           '<div class="tick-row">' +
-            '<span class="tick-time">' + fmtTime(t.ts || t.t || 0) + '</span>' +
+            '<span class="tick-time">' + fmtHM(t.ts || t.t || 0) + '</span>' +
             '<span class="' + dir + '">' + fmtP(t.price) + '</span>' +
             '<span class="tick-qty">' + fmtQty(t.qty) + '</span>' +
           '</div>'

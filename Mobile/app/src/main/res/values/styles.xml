@@ -5,6 +5,6 @@
         <item name="android:windowBackground">@color/boot_bg</item>
         <item name="android:statusBarColor">@color/boot_bg</item>
         <item name="android:navigationBarColor">@color/boot_bg</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

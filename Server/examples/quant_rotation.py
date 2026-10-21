@@ -50,7 +50,7 @@ from collections import deque
 # ============================================================
 # 直接改这里（不想用环境变量就填这三行）
 # ============================================================
-API_KEY = "gs_96e894f7_LLO0VTQ7-gaLnqO4_H7QJNEDwDdFKofK"                              # 填 gs_ 开头的那串，例：gs_3f2a9c1e_Bt8xQ2...
+API_KEY = "gs_a186ab55_uBpCEcFitU4TsNcalix24K_lz5a5WrVr"                              # 填 gs_ 开头的那串，例：gs_3f2a9c1e_Bt8xQ2...
 BASE_URL = "http://127.0.0.1:3000"         # 你打开游戏用的地址，带不带结尾 / 都行
 DRY_RUN_DEFAULT = False                     # True=只打印不下单；False=真下单
 
