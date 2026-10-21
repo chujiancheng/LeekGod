@@ -483,10 +483,18 @@
       ctx.fillText('数据不足，收盘结算后生成日线', w / 2, h / 2);
       return { points: [], hit: () => -1 };
     }
-    // 只画最近 N 根，保证蜡烛宽度可读
-    const maxBars = Math.max(20, Math.floor(w / 7));
-    const start = Math.max(0, bars.length - maxBars);
-    const view = bars.slice(start);
+    // 视窗：优先吃调用方给的 { start, count }（缩放/平移的唯一真源，网页版 klineView
+    // 同口径），没给就按宽度截尾部（默认一屏约 w/7 根，保证蜡烛宽度可读）
+    let start;
+    let count;
+    if (o.view && o.view.count > 0) {
+      count = Math.max(2, Math.min(Math.round(o.view.count), bars.length));
+      start = Math.max(0, Math.min(Math.round(o.view.start), bars.length - count));
+    } else {
+      count = Math.max(20, Math.floor(w / 7));
+      start = Math.max(0, bars.length - count);
+    }
+    const view = bars.slice(start, start + count);
 
     const tickH = 13;
     const volH = Math.max(20, h * 0.11);
@@ -506,9 +514,10 @@
       hi = Math.max(hi, +b.high);
       vmax = Math.max(vmax, +b.volume || 0);
     });
-    // 均线落在极值附近时别被裁掉
+    // 均线落在极值附近时别被裁掉（只看窗口内的根——平移/缩放后窗口外的不许压 y 轴）
+    const endI = start + view.length;
     mas.forEach((ma) => {
-      for (let i = start; i < bars.length; i += 1) {
+      for (let i = start; i < endI; i += 1) {
         const v = ma.arr[i];
         if (v == null) continue;
         lo = Math.min(lo, v);
@@ -566,7 +575,7 @@
       ctx.lineWidth = 1;
       ctx.beginPath();
       let started = false;
-      for (let i = start; i < bars.length; i += 1) {
+      for (let i = start; i < endI; i += 1) {
         const v = ma.arr[i];
         if (v == null) {
           started = false;
@@ -586,7 +595,7 @@
     // MACD(12,26,9)：按全量收盘价现算（EMA 要看历史才对，根数少不值得缓存），
     // 刻度取窗口内极值——否则会被窗口外的历史峰值压成一条平线
     const macd = computeMacd(bars.map((b) => ({ price: +b.close || 0 })));
-    drawMacdBand(ctx, macd, start, bars.length, macdTop, macdH, bw, xc, bars.length < MACD_MIN_BARS);
+    drawMacdBand(ctx, macd, start, endI, macdTop, macdH, bw, xc, bars.length < MACD_MIN_BARS);
 
     // 均线图例（左上角一行小字）
     ctx.font = '9px -apple-system, sans-serif';
@@ -643,7 +652,7 @@
       return Math.max(0, Math.min(view.length - 1, idx));
     }
 
-    return { points, hit, view, macd, total: bars.length, start };
+    return { points, hit, view, macd, total: bars.length, start, count: view.length, slot: step };
   }
 
   GS.chart = { spark, minute, daily, prep, computeMacd, MACD_MIN_BARS };

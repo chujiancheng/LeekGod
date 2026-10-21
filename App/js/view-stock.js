@@ -29,6 +29,20 @@
     buy_close: '买入平空',
   };
 
+  // K 线视窗（双指捏合缩放 + 单指拖动平移，网页版 klineView 同口径）：
+  //   count  = 屏上放几根（0 = 没调过，取默认值）
+  //   offset = 右端丢掉几根（0 = 贴最新一根；>0 = 正在翻历史）
+  // 一律**相对尾部**记：贴最新看的玩家 offset=0，新的一根进来视窗自动右移；
+  // 翻历史的玩家 offset>0，窗口内容原地不动，不会被新数据顶走。
+  const KVIEW_MIN_BARS = 15; // 最多放大到 15 根（再少就看不出形态了）
+  const kViews = {
+    day: { count: 0, offset: 0 },
+    week: { count: 0, offset: 0 },
+    month: { count: 0, offset: 0 },
+  };
+
+  const isKlineMode = () => state.mode !== 'min' && state.mode !== '5d';
+
   /* ---------------------------------------------------------------- 骨架 */
 
   function skeleton(m) {
@@ -197,49 +211,190 @@
     });
   }
 
+  /**
+   * K 线可视窗口（缩放/平移的唯一真源，网页版 klineView 同口径）。
+   * 越界就地夹回：count ∈ [min(KVIEW_MIN_BARS,total), total]，offset ∈ [0, total-count]。
+   * 注意不把夹过的值写回 kViews——kViews 记的是「玩家想要多少根」，不是「这只票能给多少根」。
+   * @returns {{start:number, count:number, total:number, offset:number}}
+   */
+  function klineViewOf(bars, w) {
+    const total = bars.length;
+    const st = kViews[state.mode] || (kViews[state.mode] = { count: 0, offset: 0 });
+    const defW = Math.max(20, Math.floor((w || 300) / 7));
+    const def = state.mode === 'day' ? Math.min(defW, total) : total;
+    const floor = Math.min(KVIEW_MIN_BARS, total);
+    let count = Math.round(st.count) || def;
+    count = Math.max(floor, Math.min(count, total));
+    let offset = Math.round(st.offset) || 0;
+    offset = Math.max(0, Math.min(offset, total - count));
+    const end = total - offset;
+    return { start: end - count, count, total, offset };
+  }
+
   function bindChartTouch(el) {
     const wrap = el.querySelector('#chartWrap');
     const tip = el.querySelector('#chartTip');
-    let dragging = false;
+    let touch = null; // 单指会话（K 线模式：拖动平移；点按看十字光标）
+    let pinch = null; // 双指会话（捏合缩放）
+    let lastTapT = 0;
+    let lastTapX = 0;
 
-    const move = (ev) => {
-      const t = ev.touches && ev.touches[0];
-      if (!t) return;
+    const barsNow = () => {
+      const m = GS.core.market(state.stockId);
+      return m ? klineSeriesOf(m) : [];
+    };
+    const dist2 = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+
+    /** 十字光标：clientX → 最近一根 bar，画竖线 + 弹 tooltip */
+    const cursorAt = (clientX) => {
       const rect = wrap.getBoundingClientRect();
-      const x = t.clientX - rect.left;
       const geo = state.geo;
       if (!geo || !geo.hit) return;
-      const idx = geo.hit(x);
+      const idx = geo.hit(clientX - rect.left);
       if (idx < 0) return;
       state.cursor = idx;
       draw();
       showTip(tip, idx);
     };
 
+    /** 分时/五日：单指即十字光标（旧口径） */
+    const moveCursor = (ev) => {
+      const t = ev.touches && ev.touches[0];
+      if (t) cursorAt(t.clientX);
+    };
+
+    /** 缩放到 nextCount 根，锚点 mx（画布内 x）下的那根不动（网页版 zoomKline 同口径） */
+    const applyZoom = (bars, nextCount, mx) => {
+      const total = bars.length;
+      if (total < 2) return;
+      const W = wrap.clientWidth || 300;
+      const v = klineViewOf(bars, W);
+      const floor = Math.min(KVIEW_MIN_BARS, total);
+      const next = Math.max(floor, Math.min(total, Math.round(nextCount)));
+      if (next === v.count) return;
+      const x = Math.max(0, Math.min(W, mx));
+      const vi = v.start + (x / W) * v.count; // 锚点下的「虚拟下标」（可小数）
+      const slot = W / next;
+      let start = Math.round(vi - x / slot);
+      start = Math.max(0, Math.min(start, total - next));
+      kViews[state.mode] = { count: next, offset: total - next - start };
+    };
+
     wrap.addEventListener(
       'touchstart',
       (ev) => {
-        dragging = true;
-        move(ev);
+        if (!isKlineMode()) {
+          moveCursor(ev);
+          return;
+        }
+        if (ev.touches.length === 1) {
+          const t = ev.touches[0];
+          touch = { x0: t.clientX, y0: t.clientY, lastX: t.clientX, t0: Date.now(), moved: false };
+        } else if (ev.touches.length === 2) {
+          touch = null;
+          tip.hidden = true;
+          const rect = wrap.getBoundingClientRect();
+          pinch = {
+            d0: dist2(ev.touches[0], ev.touches[1]),
+            mx: (ev.touches[0].clientX + ev.touches[1].clientX) / 2 - rect.left,
+          };
+        }
       },
       { passive: true }
     );
+
     wrap.addEventListener(
       'touchmove',
       (ev) => {
-        if (!dragging) return;
-        move(ev);
+        if (!isKlineMode()) {
+          moveCursor(ev);
+          return;
+        }
+        if (pinch && ev.touches.length === 2) {
+          const bars = barsNow();
+          if (bars.length < 2) return;
+          const d = dist2(ev.touches[0], ev.touches[1]);
+          if (d < 8) return;
+          const v = klineViewOf(bars, wrap.clientWidth);
+          // 双指张开 = 放大（屏上根数变少）；捏合 = 缩小（看到更多根）
+          applyZoom(bars, v.count * (pinch.d0 / d), pinch.mx);
+          state.cursor = -1;
+          tip.hidden = true;
+          draw();
+          return;
+        }
+        if (touch && ev.touches.length === 1) {
+          const t = ev.touches[0];
+          if (!touch.moved) {
+            if (Math.hypot(t.clientX - touch.x0, t.clientY - touch.y0) < 8) return;
+            touch.moved = true; // 手抖不算拖动
+          }
+          // 拖动平移：往右拖 = 右端多丢几根 = 看更早的（网页版同口径）
+          const bars = barsNow();
+          const geo = state.geo;
+          if (!geo || !geo.slot || bars.length < 2) return;
+          const v = klineViewOf(bars, wrap.clientWidth);
+          const offset = Math.max(
+            0,
+            Math.min(v.total - v.count, Math.round(v.offset + (t.clientX - touch.lastX) / geo.slot))
+          );
+          touch.lastX = t.clientX;
+          if (offset === v.offset) return;
+          kViews[state.mode] = { count: v.count, offset };
+          state.cursor = -1;
+          tip.hidden = true;
+          draw();
+        }
       },
       { passive: true }
     );
-    const end = () => {
-      dragging = false;
+
+    const clearCursor = () => {
       state.cursor = -1;
       tip.hidden = true;
       draw();
     };
-    wrap.addEventListener('touchend', end, { passive: true });
-    wrap.addEventListener('touchcancel', end, { passive: true });
+
+    wrap.addEventListener(
+      'touchend',
+      (ev) => {
+        if (!isKlineMode()) {
+          clearCursor();
+          return;
+        }
+        if (pinch) {
+          if (ev.touches.length < 2) pinch = null;
+          if (ev.touches.length <= 1) touch = null; // 抬起一指后不立刻转拖动，防跳
+          return;
+        }
+        if (touch && ev.touches.length === 0) {
+          const t = ev.changedTouches && ev.changedTouches[0];
+          const now = Date.now();
+          const isTap = !!t && !touch.moved && now - touch.t0 < 350;
+          if (isTap && now - lastTapT < 320 && Math.abs(t.clientX - lastTapX) < 48) {
+            // 双击：复位视窗（默认根数 + 贴最新一根）
+            kViews[state.mode] = { count: 0, offset: 0 };
+            clearCursor();
+          } else if (isTap) {
+            cursorAt(t.clientX); // 单击：十字光标
+          }
+          lastTapT = now;
+          lastTapX = t ? t.clientX : 0;
+          touch = null;
+        }
+      },
+      { passive: true }
+    );
+
+    wrap.addEventListener(
+      'touchcancel',
+      () => {
+        touch = null;
+        pinch = null;
+        if (!isKlineMode()) clearCursor();
+      },
+      { passive: true }
+    );
   }
 
   /** 分时点的时间文案：游戏内时刻（跨天补「N日」前缀），没有交易日时钟时退回墙钟 */
@@ -534,11 +689,17 @@
     const cvs = $('chartCanvas');
     const m = GS.core.market(state.stockId);
     if (!cvs || !m) return;
+    // K 线模式手勢（拖动平移/捏合缩放）由画布接管；切回分时/五日要摘掉，
+    // 否则 touch-action:none 一直挡着页面滚动
+    const wrapEl = cvs.parentElement;
+    if (wrapEl) wrapEl.classList.toggle('kline-mode', isKlineMode());
     state.lastDraw = Date.now();
 
-    if (state.mode !== 'min' && state.mode !== '5d') {
+    if (isKlineMode()) {
       ensureBars();
-      state.geo = GS.chart.daily(cvs, { bars: klineSeriesOf(m), cursor: state.cursor });
+      const bars = klineSeriesOf(m);
+      const view = bars.length >= 2 ? klineViewOf(bars, cvs.clientWidth || 300) : null;
+      state.geo = GS.chart.daily(cvs, { bars, cursor: state.cursor, view });
       return;
     }
 
@@ -985,5 +1146,10 @@
 
   /* ---------------------------------------------------------------- 导出 */
 
-  GS.viewStock = { open, close, redraw: draw, get stockId() { return state.stockId; } };
+  GS.viewStock = {
+    open, close, redraw: draw,
+    get stockId() { return state.stockId; },
+    // K 线视窗只读出口（验收脚本用；与网页版导出 klineView 同一个意图）
+    get kviews() { return kViews; },
+  };
 })(window.GS);

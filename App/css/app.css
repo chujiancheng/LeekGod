@@ -1023,6 +1023,12 @@ input::placeholder {
   display: block;
 }
 
+/* K 线模式（日/周/月）手势由画布自己接管：拖动平移 + 捏合缩放，
+   touch-action:none 不让页面滚动 / 浏览器双击缩放抢事件。分时/五日不带此类 */
+.chart-wrap.kline-mode {
+  touch-action: none;
+}
+
 .chart-tip {
   position: absolute;
   top: 4px;
