@@ -1114,6 +1114,37 @@ input::placeholder {
   to { transform: translateX(calc(-100vw - 100%)); }
 }
 
+/* 弹幕发送条：贴在图表卡内、图区下方 */
+.dm-send {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.dm-send input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 17px;
+  background: var(--bg-2);
+  font-size: 13px;
+  color: var(--txt);
+  outline: none;
+}
+
+.dm-send input:focus {
+  border-color: var(--violet);
+  background: var(--bg-1);
+}
+
+.dm-send .mini-btn {
+  flex-shrink: 0;
+}
+
 /* 底部买入卖出条：作为 .page 的最后一个 flex 子项常驻底部 */
 .act-bar {
   flex-shrink: 0;
@@ -1732,6 +1763,40 @@ input::placeholder {
   width: 52px;
   height: 52px;
   border-radius: 15px;
+}
+
+/* 看板娘：行情 hero 右上角常驻，压在迷你走势之上但不挡数据 */
+.hero-mascot {
+  position: absolute;
+  right: 6px;
+  top: 2px;
+  height: 88px;
+  width: auto;
+  max-width: 34%;
+  object-fit: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 4px 10px rgba(20, 30, 48, 0.16));
+}
+
+/* 换看板娘弹层：三列更宽松，描述一行小字 */
+.mascot-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.mascot-grid .ava-cell {
+  padding: 10px 6px;
+}
+
+.mascot-grid .ava-cell i {
+  font-style: normal;
+  font-size: 9px;
+  color: var(--txt-3);
+  text-align: center;
+}
+
+.mascot-grid .ava-cell.on {
+  border-color: var(--violet);
+  background: rgba(122, 108, 240, 0.08);
 }
 
 /* 骨架屏 */

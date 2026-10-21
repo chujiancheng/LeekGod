@@ -33,6 +33,7 @@
       const k = t.dataset.act;
       if (k === 'deposit') openDeposit();
       else if (k === 'nick') openNick();
+      else if (k === 'mascot') openMascot();
       else if (k === 'logout') logout();
       else if (k === 'portal') location.href = '/portal.html';
       else if (k === 'rules') openRules();
@@ -120,6 +121,7 @@
     const items = [
       { k: 'deposit', icon: '💰', label: '加钱', val: canDeposit ? '可用' : '未开放', off: !canDeposit },
       { k: 'nick', icon: '✏️', label: '改昵称', val: a.nick || '' },
+      { k: 'mascot', icon: '🎀', label: '换看板娘', val: mascotName() },
       { k: 'portal', icon: '🔑', label: '开放接口 API Key', val: '' },
       { k: 'rules', icon: '📖', label: '交易规则', val: '' },
       { k: 'logout', icon: '🚪', label: '退出登录', val: '' },
@@ -243,6 +245,50 @@
               GS.core.toast('网络异常', 'err');
             });
         };
+      },
+    });
+  }
+
+  /* ------------------------------------------------------------ 换看板娘 */
+
+  function mascotName() {
+    const hit = GS.core.MASCOTS.find((m) => m.id === GS.core.mascotId());
+    return hit ? hit.name : '';
+  }
+
+  /** 主页 hero 那张立绘跟着换（行情页不一定开着，找不到就算了，下一帧 update 会补） */
+  function applyMascotNow() {
+    const img = document.getElementById('heroMascot');
+    if (!img) return;
+    const mid = GS.core.mascotId();
+    img.dataset.k = mid;
+    img.src = GS.core.mascotImg(mid, true);
+    img.hidden = false;
+  }
+
+  function openMascot() {
+    const cur = GS.core.mascotId();
+    const cells = GS.core.MASCOTS.map((m) =>
+      '<button class="ava-cell' + (m.id === cur ? ' on' : '') + '" data-mascot="' + m.id + '">' +
+        '<img class="ava" src="' + GS.core.mascotImg(m.id, false) + '" alt="" loading="lazy">' +
+        '<span>' + esc(m.name) + '</span>' +
+        '<i>' + esc(m.desc) + '</i>' +
+      '</button>'
+    ).join('');
+
+    GS.core.sheet({
+      title: '换看板娘',
+      html:
+        '<div class="ava-grid mascot-grid">' + cells + '</div>' +
+        '<div class="hint">主页行情卡常驻，跟着你选的换。</div>',
+      onMount(ctl) {
+        GS.core.on(ctl.body, '[data-mascot]', 'click', (e, t) => {
+          GS.core.setMascot(t.dataset.mascot);
+          applyMascotNow();
+          ctl.body.querySelectorAll('.ava-cell').forEach((c) =>
+            c.classList.toggle('on', c === t));
+          GS.core.toast('看板娘换成了「' + mascotName() + '」', 'ok');
+        });
       },
     });
   }

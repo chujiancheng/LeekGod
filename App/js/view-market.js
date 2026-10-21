@@ -29,6 +29,7 @@
           '<span>最低<b class="num" id="idxLow">—</b></span>' +
           '<span>成交<b class="num" id="idxTurn">—</b></span>' +
         '</div>' +
+        '<img class="hero-mascot" id="heroMascot" alt="看板娘" hidden />' +
         '<div class="hero-spark"><canvas class="spark-canvas" id="idxSpark"></canvas></div>' +
       '</div>' +
       '<div class="sec-title">全部标的</div>' +
@@ -102,6 +103,15 @@
     if (!st) return;
     const markets = st.markets || [];
     const ids = markets.map((m) => m.stockId).join(',');
+
+    // 看板娘：只在选择变化时换图（换装入口在「我的」页）
+    const mid = GS.core.mascotId();
+    const mimg = GS.core.$('heroMascot');
+    if (mimg && mimg.dataset.k !== mid) {
+      mimg.dataset.k = mid;
+      mimg.src = GS.core.mascotImg(mid, true);
+      mimg.hidden = false;
+    }
 
     // 标的集合变了才重建列表
     if (ids !== sig) {

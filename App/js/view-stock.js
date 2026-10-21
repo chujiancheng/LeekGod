@@ -11,12 +11,14 @@
 
   const state = {
     stockId: '',
-    mode: 'min', // min | 5d | day
+    mode: 'min', // min | 5d | day | week | month
     cursor: -1,
     bars: null,
     barsFor: '',
+    barsDay: 0,
     unsub: null,
     dmSeen: new Set(),
+    dmWatchTimer: null,
     lastDraw: 0,
   };
 
@@ -54,10 +56,16 @@
               '<button data-mode="min" class="on">分时</button>' +
               '<button data-mode="5d">五日</button>' +
               '<button data-mode="day">日K</button>' +
+              '<button data-mode="week">周K</button>' +
+              '<button data-mode="month">月K</button>' +
             '</div>' +
             '<div class="chart-wrap" id="chartWrap">' +
               '<canvas id="chartCanvas"></canvas>' +
               '<div class="chart-tip" id="chartTip" hidden></div>' +
+            '</div>' +
+            '<div class="dm-send">' +
+              '<input id="dmInput" maxlength="60" placeholder="发条弹幕…" enterkeyhint="send">' +
+              '<button class="mini-btn" id="dmSend">发送</button>' +
             '</div>' +
           '</div>' +
           '<div class="book-panel">' +
@@ -93,6 +101,7 @@
     state.cursor = -1;
     state.bars = null;
     state.barsFor = '';
+    state.barsDay = 0;
     state.dmSeen.clear();
 
     const m = GS.core.market(state.stockId);
@@ -103,6 +112,7 @@
         bindTabs(el.el);
         bindChartTouch(el.el);
         bindAct(el.el);
+        bindDanmakuSend(el.el);
         draw();
       },
     });
@@ -113,13 +123,57 @@
     state.unsub = GS.core.subscribe(() => {
       tick();
     });
+    // 弹幕观看心跳（60s 一次，与网页版同口径）：没有它 watcher 过期后，
+    // 这只票就不再生成 NPC 弹幕——纯 App 玩家盯的票会整场冷清
+    const watchTick = () => {
+      GS.api
+        .getJSON('/api/danmaku/watch?stock=' + encodeURIComponent(state.stockId))
+        .catch(() => {});
+    };
+    watchTick();
+    state.dmWatchTimer = setInterval(watchTick, 60000);
     const prevClose = ctl.onClose;
     ctl.onClose = () => {
       if (state.unsub) state.unsub();
       state.unsub = null;
+      if (state.dmWatchTimer) {
+        clearInterval(state.dmWatchTimer);
+        state.dmWatchTimer = null;
+      }
       if (prevClose) prevClose();
     };
     return ctl;
+  }
+
+  /** 弹幕发送：POST /api/danmaku（长度/频率/敏感词由服务端判，错误信息直接展示） */
+  function bindDanmakuSend(el) {
+    const input = el.querySelector('#dmInput');
+    const btn = el.querySelector('#dmSend');
+    if (!input || !btn) return;
+    const send = () => {
+      const text = (input.value || '').trim();
+      if (!text) return;
+      btn.disabled = true;
+      GS.api
+        .postJSON('/api/danmaku', { stockId: state.stockId, text })
+        .then((r) => {
+          btn.disabled = false;
+          if (r && r.ok) {
+            input.value = '';
+            GS.core.toast('弹幕已发送', 'ok');
+            return;
+          }
+          GS.core.toast((r && r.error) || '发送失败', 'err');
+        })
+        .catch(() => {
+          btn.disabled = false;
+          GS.core.toast('网络异常', 'err');
+        });
+    };
+    GS.core.on(el, '#dmSend', 'click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') send();
+    });
   }
 
   function close() {
@@ -133,7 +187,7 @@
       state.mode = t.dataset.mode;
       state.cursor = -1;
       el.querySelectorAll('#chartTabs button').forEach((b) => b.classList.toggle('on', b === t));
-      if (state.mode === 'day') ensureBars();
+      if (state.mode !== 'min' && state.mode !== '5d') ensureBars();
       draw();
     });
   }
@@ -183,6 +237,18 @@
     wrap.addEventListener('touchcancel', end, { passive: true });
   }
 
+  /** 分时点的时间文案：游戏内时刻（跨天补「N日」前缀），没有交易日时钟时退回墙钟 */
+  function minuteTimeLabel(t, withSec) {
+    const g = clockAtAxis(axisCoord(t));
+    if (!g) return withSec ? fmtTime(t) : fmtHM(t);
+    const hm = GS.core.fmtHM(g.ms);
+    const hms = withSec
+      ? hm + ':' + String(Math.floor((g.ms % 60000) / 1000)).padStart(2, '0')
+      : hm;
+    const d = dayInfo();
+    return d && g.day !== d.day ? g.day + '日 ' + hms : hms;
+  }
+
   function showTip(tip, idx) {
     const geo = state.geo;
     if (!geo || !geo.points || !geo.points[idx]) {
@@ -190,10 +256,11 @@
       return;
     }
     const pt = geo.points[idx];
-    if (state.mode === 'day') {
+    if (state.mode !== 'min' && state.mode !== '5d') {
       const b = pt.bar || {};
+      const label = b.label || (b.day != null ? '第' + b.day + '天' : '');
       tip.innerHTML =
-        '<span>' + esc(b.day || '') + '</span>' +
+        '<span>' + esc(label) + (b.live ? ' · 实时' : '') + '</span>' +
         '<span>开 ' + fmtP(b.open) + '</span>' +
         '<span>高 ' + fmtP(b.high) + '</span>' +
         '<span>低 ' + fmtP(b.low) + '</span>' +
@@ -203,7 +270,7 @@
       const base = m ? num(m.prevClose) : 0;
       const pct = base ? ((pt.price - base) / base) * 100 : 0;
       tip.innerHTML =
-        '<span>' + fmtTime(pt.t) + '</span>' +
+        '<span>' + esc(minuteTimeLabel(pt.t, true)) + '</span>' +
         '<span class="' + cls(pt.price - base) + '">' + fmtP(pt.price) + '</span>' +
         '<span class="' + cls(pct) + '">' + fmtPct(pct) + '</span>' +
         (pt.vol ? '<span>量 ' + fmtQty(pt.vol) + '</span>' : '');
@@ -220,15 +287,218 @@
   /* -------------------------------------------------------------- 日线 */
 
   function ensureBars() {
-    if (state.barsFor === state.stockId && state.bars) return;
+    // 缓存作废的时机有两个（网页版同口径）：**跨天**（图里要多一根）与**进入夜间**
+    // （当日那根刚刚收盘定格，服务端已有真 K 线，不再让前端现拼的盖上去）
+    const day = GS.core.S.state && GS.core.S.state.day;
+    const today = (day && day.day) || 0;
+    const dayKey = today ? today + (day.phase === 'night' ? ':settled' : ':open') : '';
+    if (state.barsFor === state.stockId && state.bars && state.barsDay === dayKey) return;
     state.barsFor = state.stockId;
+    state.barsDay = dayKey;
     GS.api
-      .getJSON('/api/daily?stock=' + encodeURIComponent(state.stockId) + '&limit=120')
+      .getJSON('/api/daily?stock=' + encodeURIComponent(state.stockId) + '&limit=260')
       .then((r) => {
-        if (r && r.ok) state.bars = r.bars || [];
-        draw();
+        if (r && r.ok) {
+          state.bars = r.bars || [];
+          draw();
+        } else {
+          state.barsDay = 0; // 失败允许下次再试
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        state.barsDay = 0;
+      });
+  }
+
+  /* ------------------------------------------------- 分时压缩横轴（对齐网页版） */
+
+  /** 交易日时钟（服务端 day 未启用时为 null，横轴退化成墙钟） */
+  function dayInfo() {
+    const d = GS.core.S.state && GS.core.S.state.day;
+    return d && d.enabled && Array.isArray(d.phases) && d.phases.length ? d : null;
+  }
+
+  /** 不占横轴宽度的阶段：开盘集合竞价（只定价不连续成交）与休市（午休/夜间） */
+  const AXIS_ZERO_PHASES = ['auction', 'lunch', 'night'];
+
+  /** 该阶段在横轴上占的宽度（游戏内毫秒）；休市与开盘竞价 = 0 */
+  function axisPhaseWidth(p) {
+    return AXIS_ZERO_PHASES.indexOf(p && p.key) >= 0 ? 0 : Math.max(0, Number(p && p.gm) || 0);
+  }
+
+  /** 一个交易日在横轴上的总宽（= 240 分钟：上午 120 + 下午 117 + 收盘竞价 3） */
+  function axisDayWidth(phases) {
+    let w = 0;
+    for (const p of phases) w += axisPhaseWidth(p);
+    return w;
+  }
+
+  /**
+   * 墙钟 t → 压缩轴坐标（天序号 × 一天有效宽 + 阶段内进度）。
+   * 休市与开盘竞价宽 0，段内所有时刻塌到段首坐标——11:30 与 13:00 落在同一个 x 上，
+   * 曲线原地接续；隔夜跳空就是一根竖线。与网页版 axisAt 同一套逐阶段插值。
+   */
+  function axisAt(t) {
+    const d = dayInfo();
+    if (!d || !Number.isFinite(t)) return null;
+    const dayMs = Number(d.dayEndsAt) - Number(d.dayStartAt);
+    const dayW = axisDayWidth(d.phases);
+    if (!(dayMs > 0) || !(dayW > 0)) return null;
+    const dayOffset = Math.floor((t - d.dayStartAt) / dayMs);
+    const rest = t - d.dayStartAt - dayOffset * dayMs;
+    let acc = 0; // 墙钟累计
+    let aAcc = 0; // 轴坐标累计
+    for (let i = 0; i < d.phases.length; i += 1) {
+      const p = d.phases[i];
+      const ms = Number(p.ms) || 0;
+      const w = axisPhaseWidth(p);
+      const last = i === d.phases.length - 1;
+      if (rest < acc + ms || last) {
+        const frac = ms > 0 ? Math.max(0, Math.min(1, (rest - acc) / ms)) : 0;
+        return dayOffset * dayW + aAcc + frac * w;
+      }
+      acc += ms;
+      aAcc += w;
+    }
+    return null;
+  }
+
+  /** 分时横轴坐标：有阶段表时压掉休市，没有时就是墙钟本身 */
+  function axisCoord(t) {
+    const a = axisAt(t);
+    return a == null ? t : a;
+  }
+
+  /** 压缩轴坐标 → 游戏内时刻 { day, ms, seam }（seam = 午休压 0 宽后的接缝） */
+  function clockAtAxis(a, atDayEnd) {
+    const d = dayInfo();
+    if (!d || !Number.isFinite(a)) return null;
+    const on = d.phases.filter((p) => axisPhaseWidth(p) > 0);
+    if (!on.length) return null;
+    const dayW = axisDayWidth(d.phases);
+    let dayOffset = Math.floor(a / dayW);
+    let rest = a - dayOffset * dayW;
+    if (atDayEnd && rest < 1) {
+      dayOffset -= 1;
+      rest = dayW;
+    }
+    let aAcc = 0;
+    let prevEnd = null;
+    for (let i = 0; i < on.length; i += 1) {
+      const p = on[i];
+      const w = axisPhaseWidth(p);
+      const last = i === on.length - 1;
+      if (rest < aAcc + w || last) {
+        const frac = Math.max(0, Math.min(1, (rest - aAcc) / w));
+        const g = Number(p.g) || 0;
+        const gm = Number(p.gm) || 0;
+        const seam =
+          prevEnd != null && rest - aAcc < 1 && prevEnd !== g ? prevEnd : null;
+        return {
+          day: (Number(d.day) || 1) + dayOffset,
+          ms: (g + frac * gm) % 86400000,
+          seam,
+        };
+      }
+      prevEnd = (Number(p.g) + Number(p.gm)) % 86400000;
+      aAcc += w;
+    }
+    return null;
+  }
+
+  /** 刻度文案：游戏内时刻，接缝写「11:30/13:00」，跨天补「N日」前缀 */
+  function axisTimeLabel(a, atDayEnd) {
+    const c = clockAtAxis(a, atDayEnd);
+    if (!c) return GS.core.fmtHM(a); // 没有阶段表：a 就是墙钟
+    const hm = c.seam != null
+      ? GS.core.fmtHM(c.seam) + '/' + GS.core.fmtHM(c.ms)
+      : GS.core.fmtHM(c.ms);
+    const d = dayInfo();
+    return d && c.day !== d.day ? c.day + '日 ' + hm : hm;
+  }
+
+  /** 刻度步长：2~480 分钟里挑最小的一档，让一屏落 3~7 根刻度 */
+  function axisTickStep(dom) {
+    const ladder = [480, 240, 120, 60, 30, 20, 15, 10, 5, 2];
+    for (let i = ladder.length - 1; i >= 0; i -= 1) {
+      if (dom / (ladder[i] * 60000) <= 6) return ladder[i] * 60000;
+    }
+    return ladder[0] * 60000;
+  }
+
+  /* -------------------------------------------------------- K 线序列（对齐网页版） */
+
+  /** 一周几个交易日：与服务端 broker.weeklyPick 同源，配置缺失回落 7 */
+  function weekPer() {
+    const w = (GS.core.S.state && GS.core.S.state.rules && GS.core.S.state.rules.brokerMeta &&
+      GS.core.S.state.rules.brokerMeta.weekly) || {};
+    const per = Math.floor(Number(w.daysPerWeek));
+    return Number.isFinite(per) && per >= 1 ? per : 7;
+  }
+
+  /**
+   * 日线序列：已收盘的 K 线 + 当日实时现拼的那根（网页版 daySeriesOf 同口径）。
+   * 服务端要等收盘结算才定格，不现拼的话今天在图上是空的；今天已结算（盘里已有）
+   * 就不再拼，否则夜间会用归零行情盖掉刚收盘的真 K 线。
+   */
+  function daySeriesOf(m) {
+    const bars = (state.bars || []).slice();
+    const today = GS.core.S.state && GS.core.S.state.day && GS.core.S.state.day.day;
+    if (today && !bars.some((b) => +b.day === +today)) {
+      bars.push({
+        day: today,
+        open: m.open,
+        high: m.high,
+        low: m.low,
+        close: m.last,
+        volume: m.volume,
+        turnover: m.turnover,
+        live: true,
+      });
+    }
+    return bars;
+  }
+
+  /**
+   * K 线序列（按当前模式）：日线原样；周/月线把日线按交易日号聚合——
+   * 周 = 每 daysPerWeek 个交易日、月 = 每 4 周。开取期内第一根的开、
+   * 最后一根的收、高/低取极值、量额累加，与网页版 klineSeriesOf 同口径。
+   */
+  function klineSeriesOf(m) {
+    const days = daySeriesOf(m);
+    if (state.mode === 'day') return days;
+    const per = state.mode === 'week' ? weekPer() : weekPer() * 4;
+    const unit = state.mode === 'week' ? '周' : '月';
+    const out = [];
+    let cur = null;
+    let curIdx = -1;
+    for (const b of days) {
+      const idx = Math.floor((b.day - 1) / per);
+      if (!cur || idx !== curIdx) {
+        curIdx = idx;
+        cur = {
+          day: b.day,
+          label: '第' + (idx + 1) + unit,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+          volume: b.volume || 0,
+          turnover: b.turnover || 0,
+          live: !!b.live,
+        };
+        out.push(cur);
+      } else {
+        cur.high = Math.max(cur.high, b.high);
+        cur.low = Math.min(cur.low, b.low);
+        cur.close = b.close;
+        cur.volume += b.volume || 0;
+        cur.turnover += b.turnover || 0;
+        cur.live = !!b.live;
+        cur.day = b.day;
+      }
+    }
+    return out;
   }
 
   /* ---------------------------------------------------------------- 绘制 */
@@ -239,38 +509,65 @@
     if (!cvs || !m) return;
     state.lastDraw = Date.now();
 
-    if (state.mode === 'day') {
+    if (state.mode !== 'min' && state.mode !== '5d') {
       ensureBars();
-      state.geo = GS.chart.daily(cvs, { bars: state.bars || [], cursor: state.cursor });
+      state.geo = GS.chart.daily(cvs, { bars: klineSeriesOf(m), cursor: state.cursor });
       return;
     }
 
+    // 分时：按窗口裁点（当日 = 今天开盘起；五日 = 再往前 4 个交易日）
     let pts = GS.api.historyOf(state.stockId);
-    let from = 0;
-    let to = 0;
     const d = GS.core.S.state.day;
-    if (state.mode === 'min' && d && d.dayStartAt) {
-      from = d.dayStartAt;
-      to = d.dayEndsAt;
-      pts = pts.filter((p) => p.t >= from);
-    } else if (state.mode === '5d' && d && d.dayEndsAt) {
-      // 5 个交易日的近似窗口：按当日总时长 × 5 反推，超出部分自动裁掉
+    if (d && d.dayStartAt) {
       const dayMs = Math.max(1, num(d.dayEndsAt) - num(d.dayStartAt));
-      from = num(d.dayStartAt) - dayMs * 4;
-      to = d.dayEndsAt;
+      const from = state.mode === '5d' ? num(d.dayStartAt) - dayMs * 4 : num(d.dayStartAt);
       pts = pts.filter((p) => p.t >= from);
     }
-    if (pts.length && !from) {
-      from = pts[0].t;
-      to = pts[pts.length - 1].t;
+    if (pts.length < 2) {
+      state.geo = GS.chart.minute(cvs, { pts, prevClose: num(m.prevClose), cursor: state.cursor });
+      return;
     }
 
+    // 压缩横轴（网页版同口径）：休市/开盘竞价压 0 宽，右端固定压在今天收盘上——
+    // 开盘时曲线只占左边一小段、随时间往右生长，与真实行情软件的分时一致。
+    // 没有阶段表（交易日时钟未启用）时退化成墙钟贴合数据的旧口径。
+    const ax = dayInfo();
+    if (ax) {
+      const dayW = axisDayWidth(ax.phases);
+      const endA = axisCoord(Number(d.dayEndsAt)); // 今天收盘 = 今天轴末端
+      if (dayW > 0 && Number.isFinite(endA)) {
+        const days = state.mode === '5d' ? 5 : 1;
+        const a0 = endA - days * dayW;
+        pts = pts.map((p) => ({ t: p.t, price: p.price, vol: p.vol, a: axisCoord(p.t) }));
+        // 底部时间刻度：游戏内时刻（09:30 / 11:30·13:00 / 15:00），跨天补「N日」
+        const ticks = [];
+        const stepT = axisTickStep(endA - a0);
+        let prevLabel = '';
+        for (let k = 0, av = Math.ceil(a0 / stepT) * stepT; av <= endA + 1 && k < 12; k += 1, av += stepT) {
+          const label = axisTimeLabel(av, av >= endA - 1);
+          if (!label || label === prevLabel) continue;
+          prevLabel = label;
+          ticks.push({ a: av, label });
+        }
+        state.geo = GS.chart.minute(cvs, {
+          pts,
+          prevClose: num(m.prevClose),
+          cursor: state.cursor,
+          from: a0,
+          to: endA,
+          ticks,
+        });
+        return;
+      }
+    }
+
+    // 退化口径：墙钟贴合数据
     state.geo = GS.chart.minute(cvs, {
       pts,
       prevClose: num(m.prevClose),
       cursor: state.cursor,
-      from,
-      to,
+      from: pts[0].t,
+      to: pts[pts.length - 1].t,
     });
   }
 

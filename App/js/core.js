@@ -85,7 +85,40 @@ window.GS = window.GS || {};
     token: 'gushen_app_token',
     stock: 'gushen_app_stock',
     tab: 'gushen_app_tab',
+    mascot: 'gushen_app_mascot',
   };
+
+  /* ------------------------------------------------------------- 看板娘 */
+
+  /**
+   * 看板娘阵容（与网页端 MASCOTS 同一批立绘）：立绘 /img/mascot-<id>-256.png、
+   * 缩略图 -96.png，都由服务端同一套静态资源出。默认看盘少女。
+   */
+  const MASCOTS = [
+    { id: 'kanpan',  name: '看盘少女', desc: '盯盘不眨眼，只看涨' },
+    { id: 'sakura',  name: '和服猫耳少女', desc: '樱色原配' },
+    { id: 'magic',   name: '魔法少女', desc: '夜空原配' },
+    { id: 'maodiao', name: '耄耋猫', desc: '亏麻了，也要招财' },
+    { id: 'orange',  name: '丑橘猫', desc: '涨了！傻乐' },
+    { id: 'doro',    name: '小恶魔朵洛', desc: '举爪招涨' },
+    { id: 'duck',    name: '咕咕嘎嘎', desc: 'duck 不服' },
+    { id: 'knight',  name: '刀盾骑士', desc: '我的刀！我的盾！' },
+    { id: 'whale',   name: '小鲸鱼', desc: '深海捞涨点' },
+  ];
+  const MASCOT_DEFAULT = 'kanpan';
+
+  function mascotId() {
+    const v = store.get(KEY.mascot, MASCOT_DEFAULT);
+    return MASCOTS.some((m) => m.id === v) ? v : MASCOT_DEFAULT;
+  }
+
+  function setMascot(id) {
+    store.set(KEY.mascot, MASCOTS.some((m) => m.id === id) ? id : MASCOT_DEFAULT);
+  }
+
+  function mascotImg(id, big) {
+    return '/img/mascot-' + id + (big ? '-256' : '-96') + '.png';
+  }
 
   const store = {
     get(k, d) {
@@ -381,5 +414,6 @@ window.GS = window.GS || {};
     subscribe, emit, market, position, isTrading, serverNow, stockName,
     toast, sheet, closeSheet, openPage, closePage, bindBackKey,
     icon, pageHead, bindPageBack,
+    MASCOTS, mascotId, setMascot, mascotImg,
   };
 })(window.GS);

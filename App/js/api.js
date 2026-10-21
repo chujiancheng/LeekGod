@@ -85,8 +85,11 @@
 
   /* ------------------------------------------------------------ 分时缓存 */
 
-  const hist = new Map(); // stockId -> [{t, price, vol}]
+  const hist = new Map(); // stockId -> [{t, price, vol}]（跨天连续，与网页版同口径）
   const histPending = new Set();
+
+  /** 分时序列容量上限：与网页版一致（服务端保留约 2 小时 ≈ 10300 点） */
+  const HIST_MAX = 10300;
 
   function historyOf(stockId) {
     return hist.get(stockId) || [];
@@ -100,8 +103,23 @@
       .then((r) => {
         histPending.delete(stockId);
         if (r && r.ok && Array.isArray(r.priceHistory)) {
-          hist.set(stockId, r.priceHistory);
-          return r.priceHistory;
+          // 服务端全量覆盖本地累积的点；期间新到的点（时间戳更晚）保序接在尾部，不丢帧
+          const local = hist.get(stockId) || [];
+          const merged = r.priceHistory.slice();
+          const lastT = merged.length ? merged[merged.length - 1].t : 0;
+          for (const p of local) if (p.t > lastT) merged.push(p);
+          // 定格期（竞价/午休/夜间）：服务端序列里带着这一段的平线，落地前先塌成一个锚点，
+          // 否则休市期间进个股页会先看到一条爬到「现在」的水平线，等下一帧才收回去
+          const freezeAt = frozenPhaseStart();
+          if (freezeAt != null) {
+            const tail = merged.length ? merged[merged.length - 1] : null;
+            cutAfter(merged, freezeAt);
+            if (tail && merged.length && merged[merged.length - 1].t < freezeAt) {
+              merged.push({ t: freezeAt, price: tail.price, vol: tail.vol });
+            }
+          }
+          hist.set(stockId, merged);
+          return merged;
         }
         return historyOf(stockId);
       })
@@ -111,15 +129,77 @@
       });
   }
 
-  /** 逐帧把最新价补进分时缓存（不必每次拉接口） */
-  function appendTick(m) {
-    if (!m) return;
-    const arr = hist.get(m.stockId);
-    if (!arr) return;
-    const t = GS.core.serverNow();
+  /** 往某条序列尾部追加一个分时点（同时间戳覆盖，超长丢弃最旧的）— 与网页版 appendPoint 同口径 */
+  function appendPoint(map, stockId, t, price, vol) {
+    let arr = map.get(stockId);
+    if (!arr) {
+      arr = [];
+      map.set(stockId, arr);
+    }
     const last = arr[arr.length - 1];
-    if (last && t - last.t < 800) return;
-    arr.push({ t, price: m.last, vol: 0 });
+    if (!last || t > last.t) arr.push({ t, price, vol });
+    else if (t === last.t) arr[arr.length - 1] = { t, price, vol };
+    if (arr.length > HIST_MAX) arr.splice(0, arr.length - HIST_MAX);
+  }
+
+  /* ------------------------------------------------ 分时定格（竞价/午休/夜间） */
+
+  /**
+   * 与网页版同一套口径：只有连续竞价（trading 且非 auction）才让分时往后生长。
+   * 定格期整段只留阶段起点一个锚点，画面完全静止——否则休市期间照抄逐帧价格
+   * 会把线拉成越来越长的水平直线，x 轴跟着最新点一路右移，看起来像还在交易。
+   * 定格期返回本阶段**起点时刻**（phaseEndsAt − phaseMs 反推）；连续竞价返回 null。
+   */
+  function frozenPhaseStart() {
+    const d = S.state && S.state.day;
+    if (!d) return null;
+    if (d.trading && !d.auction) return null;
+    const end = Number(d.phaseEndsAt);
+    const ms = Number(d.phaseMs);
+    if (!Number.isFinite(end) || !Number.isFinite(ms) || ms <= 0) return null;
+    return end - ms;
+  }
+
+  /** 丢掉尾部所有落在 t 之后的点（定格里塌掉整段，阶段起点之前的历史保留） */
+  function cutAfter(arr, t) {
+    let n = arr.length;
+    while (n > 0 && arr[n - 1].t >= t) n -= 1;
+    if (n !== arr.length) arr.length = n;
+  }
+
+  /** 按帧记一个分时点：连续竞价正常追加，定格期只维护阶段起点那一个锚点 */
+  function addFramePoint(map, stockId, t, price, vol, freezeAt) {
+    if (freezeAt == null) {
+      appendPoint(map, stockId, t, price, vol);
+      return;
+    }
+    let arr = map.get(stockId);
+    if (!arr) {
+      arr = [];
+      map.set(stockId, arr);
+    }
+    cutAfter(arr, freezeAt);
+    appendPoint(map, stockId, Math.min(freezeAt, t), price, vol);
+  }
+
+  /**
+   * 逐帧把最新价补进分时缓存。与网页版同口径：吃服务端帧的 serverTime（不走本地插值，
+   * 本地插值在定格期会凭空造点）、每帧给**全市场**追加（切股票不用回头补）、
+   * 指数也记一条（个股页 hero 用得到）。
+   */
+  function appendTick(st) {
+    if (!st || !Array.isArray(st.markets)) return;
+    const t = Number(st.serverTime) || Date.now();
+    const freezeAt = frozenPhaseStart();
+    for (const m of st.markets) {
+      addFramePoint(hist, m.stockId, t, m.last, m.volume, freezeAt);
+      addFramePoint(sparks, m.stockId, t, m.last, m.volume, freezeAt);
+    }
+    // 指数也记一条：服务端 /api/sparks 不含指数，首页 hero 的迷你走势全靠这里养
+    if (st.index) {
+      addFramePoint(hist, st.index.stockId, t, st.index.last, 0, freezeAt);
+      addFramePoint(sparks, st.index.stockId, t, st.index.last, 0, freezeAt);
+    }
   }
 
   /* ------------------------------------------------------------ 迷你走势 */
@@ -198,7 +278,7 @@
           store.set(KEY.stock, S.stockId);
         }
       }
-      appendTick(GS.core.market(S.stockId));
+      appendTick(s);
       GS.core.emit();
     });
 
@@ -270,6 +350,7 @@
             if (s && s.ok !== false && s.markets) {
               S.state = s;
               S.stateAt = Date.now();
+              appendTick(s);
               GS.core.emit();
             }
           })

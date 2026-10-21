@@ -89,14 +89,16 @@
   /**
    * 分时图（上 72% 价格 + 下 24% 成交量）。
    * @param {HTMLCanvasElement} canvas
-   * @param {{pts:Array, prevClose:number, cursor:number, from:number, to:number}} o
+   * @param {{pts:Array, prevClose:number, cursor:number, from:number, to:number, ticks?:Array}} o
+   *   pts 的每一项可带 `a`（压缩横轴坐标，网页版同口径：休市/开盘竞价压 0 宽）；
+   *   from/to 是横轴域（轴坐标）；ticks 是 [{a, label}] 底部时间刻度（可选）。
    * @returns {{points:Array<{x:number,y:number}>, hit:Function}}
    */
   function minute(canvas, o) {
     const { ctx, w, h } = prep(canvas);
     const pts = o.pts || [];
-    const priceH = h * 0.7;
-    const volTop = h * 0.78;
+    const priceH = h * 0.68;
+    const volTop = h * 0.76;
     const volH = h * 0.16;
     const padL = 0;
     const padR = 0;
@@ -125,11 +127,12 @@
     lo = Math.min(lo, base) - span * 0.18;
     hi = Math.max(hi, base) + span * 0.18;
 
-    // 时间轴：优先用交易日窗口，没有就按点数均分
-    const t0 = o.from || pts[0].t;
-    const t1 = o.to || pts[pts.length - 1].t;
-    const spanT = Math.max(1, t1 - t0);
-    const X = (t) => ((t - t0) / spanT) * w;
+    // 横轴：优先用调用方给的压缩轴域（轴坐标），没有就按点数/墙钟均分
+    const ax = (p) => (p.a != null ? +p.a : +p.t);
+    const t0 = o.from != null ? +o.from : ax(pts[0]);
+    const t1 = o.to != null ? +o.to : ax(pts[pts.length - 1]);
+    const spanT = Math.max(1e-6, t1 - t0);
+    const X = (p) => ((ax(p) - t0) / spanT) * w;
     const Y = (v) => 6 + (1 - (v - lo) / (hi - lo)) * (priceH - 12);
 
     // 水平网格 3 条
@@ -176,9 +179,9 @@
     g.addColorStop(0, 'rgba(60,124,255,0.14)');
     g.addColorStop(1, 'rgba(60,124,255,0)');
     ctx.beginPath();
-    ctx.moveTo(X(pts[0].t), priceH);
-    pts.forEach((p) => ctx.lineTo(X(p.t), Y(+p.price)));
-    ctx.lineTo(X(pts[pts.length - 1].t), priceH);
+    ctx.moveTo(X(pts[0]), priceH);
+    pts.forEach((p) => ctx.lineTo(X(p), Y(+p.price)));
+    ctx.lineTo(X(pts[pts.length - 1]), priceH);
     ctx.closePath();
     ctx.fillStyle = g;
     ctx.fill();
@@ -197,7 +200,7 @@
     // 折线（蓝）
     ctx.beginPath();
     pts.forEach((p, i) => {
-      const px = X(p.t);
+      const px = X(p);
       const py = Y(+p.price);
       if (i) ctx.lineTo(px, py);
       else ctx.moveTo(px, py);
@@ -216,8 +219,26 @@
       const bh = Math.max(1, (vol / vmax) * volH);
       const prev = i ? +pts[i - 1].price : +p.price;
       ctx.fillStyle = +p.price >= prev ? 'rgba(232,65,60,0.5)' : 'rgba(10,160,110,0.5)';
-      ctx.fillRect(X(p.t) - bw / 2, volTop + volH - bh, bw, bh);
+      ctx.fillRect(X(p) - bw / 2, volTop + volH - bh, bw, bh);
     });
+
+    // 底部时间刻度（游戏内时刻，由调用方按压缩轴算好传进来）
+    if (Array.isArray(o.ticks) && o.ticks.length) {
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = C.txt;
+      o.ticks.forEach((tk) => {
+        const xx = ((+tk.a - t0) / spanT) * w;
+        const half = ctx.measureText(tk.label).width / 2 + 2;
+        if (xx < half || xx > w - half) return;
+        ctx.fillText(tk.label, Math.min(Math.max(xx, half), w - half), h - 2);
+        ctx.strokeStyle = C.grid;
+        ctx.beginPath();
+        ctx.moveTo(xx, 0);
+        ctx.lineTo(xx, volTop + volH);
+        ctx.stroke();
+      });
+    }
 
     // 四角标注（东财口径）：左上/左下价格，右上/右下涨跌幅，按相对昨收涨红跌绿
     ctx.font = '10px -apple-system, sans-serif';
@@ -234,7 +255,7 @@
     ctx.fillText(pctOf(lo), w - 2, priceH - 3);
 
     // 十字光标
-    const points = pts.map((p) => ({ x: X(p.t), y: Y(+p.price), t: p.t, price: +p.price, vol: +p.vol || 0 }));
+    const points = pts.map((p) => ({ x: X(p), y: Y(+p.price), t: p.t, price: +p.price, vol: +p.vol || 0 }));
     let hitIdx = -1;
     if (o.cursor >= 0 && o.cursor < points.length) {
       hitIdx = o.cursor;
@@ -277,9 +298,31 @@
 
   /* -------------------------------------------------------------- 日 K */
 
+  /** K 线均线周期与配色（东财常用口径：MA5 橙 / MA10 蓝 / MA20 紫 / MA60 绿） */
+  const MA_DEFS = [
+    { n: 5, c: '#f0a020' },
+    { n: 10, c: '#3c7cff' },
+    { n: 20, c: '#9b59d0' },
+    { n: 60, c: '#0aa06e' },
+  ];
+
+  /** 收盘价简单均线：与 bars 逐根对齐，不足周期的点为 null（不画） */
+  function maOf(bars, n) {
+    const out = new Array(bars.length).fill(null);
+    let acc = 0;
+    for (let i = 0; i < bars.length; i += 1) {
+      acc += +bars[i].close || 0;
+      if (i >= n) acc -= +bars[i - n].close || 0;
+      if (i >= n - 1) out[i] = acc / n;
+    }
+    return out;
+  }
+
   /**
-   * 日 K 蜡烛图（上 74% 蜡烛 + 下 16% 成交量）
-   * @param {{bars:Array, cursor:number}} o bars: [{open,high,low,close,volume}]
+   * K 线蜡烛图（上 74% 蜡烛 + 下 16% 成交量）。
+   * bars 支持两种来源：服务端已收盘日线，以及前端用实时行情现拼的当日 bar
+   * （b.live = true，与网页版 daySeriesOf 同口径）；周/月线的聚合 bar 带 label。
+   * @param {{bars:Array, cursor:number}} o
    */
   function daily(canvas, o) {
     const { ctx, w, h } = prep(canvas);
@@ -293,11 +336,15 @@
     }
     // 只画最近 N 根，保证蜡烛宽度可读
     const maxBars = Math.max(20, Math.floor(w / 7));
-    const view = bars.slice(Math.max(0, bars.length - maxBars));
+    const start = Math.max(0, bars.length - maxBars);
+    const view = bars.slice(start);
 
     const priceH = h * 0.72;
     const volTop = h * 0.8;
     const volH = h * 0.14;
+
+    // 均线按全量算（要看更早的收盘价才对），画的时候再按窗口取
+    const mas = MA_DEFS.map((d) => ({ n: d.n, c: d.c, arr: maOf(bars, d.n) }));
 
     let lo = Infinity;
     let hi = -Infinity;
@@ -307,6 +354,15 @@
       hi = Math.max(hi, +b.high);
       vmax = Math.max(vmax, +b.volume || 0);
     });
+    // 均线落在极值附近时别被裁掉
+    mas.forEach((ma) => {
+      for (let i = start; i < bars.length; i += 1) {
+        const v = ma.arr[i];
+        if (v == null) continue;
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+    });
     const span = Math.max(hi - lo, 0.02);
     lo -= span * 0.06;
     hi += span * 0.06;
@@ -314,6 +370,7 @@
     const step = w / view.length;
     const bw = Math.max(1.5, step * 0.62);
     const Y = (v) => 6 + (1 - (v - lo) / (hi - lo)) * (priceH - 12);
+    const xc = (i) => step * (i - start + 0.5);
 
     ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
@@ -326,7 +383,7 @@
     }
 
     view.forEach((b, i) => {
-      const cx = step * (i + 0.5);
+      const cx = xc(i + start);
       const o1 = +b.open;
       const c1 = +b.close;
       const red = c1 >= o1;
@@ -351,10 +408,60 @@
       ctx.fillRect(cx - bw / 2, volTop + volH - bh, bw, bh);
     });
 
+    // 均线组
+    mas.forEach((ma) => {
+      ctx.strokeStyle = ma.c;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let started = false;
+      for (let i = start; i < bars.length; i += 1) {
+        const v = ma.arr[i];
+        if (v == null) {
+          started = false;
+          continue;
+        }
+        const px = xc(i);
+        const py = Y(v);
+        if (started) ctx.lineTo(px, py);
+        else {
+          ctx.moveTo(px, py);
+          started = true;
+        }
+      }
+      ctx.stroke();
+    });
+
+    // 均线图例（左上角一行小字）
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    let lx = 4;
+    mas.forEach((ma) => {
+      const v = ma.arr[bars.length - 1];
+      const txt = 'MA' + ma.n + (v == null ? '' : ' ' + v.toFixed(2));
+      ctx.fillStyle = ma.c;
+      ctx.fillText(txt, lx, 10);
+      lx += ctx.measureText(txt).width + 8;
+    });
+
+    // 底部时间刻度（日K 读交易日号，周/月K 读期号 label）
+    ctx.fillStyle = C.txt;
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    const nTicks = Math.max(2, Math.min(6, Math.floor(w / 90)));
+    for (let k = 0; k < nTicks; k += 1) {
+      const idx = start + Math.round(((view.length - 1) * k) / Math.max(1, nTicks - 1));
+      const b = bars[idx];
+      if (!b) continue;
+      const label = b.label || (b.day != null ? '第' + b.day + '天' : '');
+      const xx = xc(idx);
+      const half = ctx.measureText(label).width / 2 + 2;
+      ctx.fillText(label, Math.min(Math.max(xx, half), w - half), h - 2);
+    }
+
     ctx.fillStyle = C.txt;
     ctx.font = '10px -apple-system, sans-serif';
     ctx.textAlign = 'right';
-    ctx.fillText(hi.toFixed(2), w - 2, 11);
+    ctx.fillText(hi.toFixed(2), w - 2, 22);
     ctx.fillText(lo.toFixed(2), w - 2, priceH - 3);
 
     const points = view.map((b, i) => ({
