@@ -2408,3 +2408,62 @@ input { font: inherit; color: inherit; }
   box-shadow: inset 2px 0 0 var(--gold);
   border-color: color-mix(in srgb, var(--gold) 26%, transparent);
 }
+
+/* ---------- 安卓 App 下载 ----------
+   两个入口：登录卡里的虚线胶囊（未登录也能看见）+ 主页 hero 按钮组。
+   弹层只讲三件事：多大 / 怎么装 / 装完怎么连服务器。
+   登录卡那个是 button，必须提权到 (0,2,0) 复位 `.login-card button` 的主按钮样式
+   （同 .theme-card 那条注释的坑：高度 42px、蓝色渐变、字距 2px 都会盖过来） */
+.login-card .app-dl-link {
+  height: auto;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  margin-top: 4px; padding: 9px 12px;
+  border: 1px dashed color-mix(in srgb, var(--gold) 34%, var(--line));
+  border-radius: 10px;
+  background: transparent;
+  color: color-mix(in srgb, var(--gold) 72%, var(--muted));
+  font-size: 12px; font-weight: 600; letter-spacing: .4px;
+}
+.login-card .app-dl-link:hover {
+  filter: none;
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 58%, transparent);
+  background: color-mix(in srgb, var(--gold) 6%, transparent);
+}
+.app-dl-arrow {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid currentColor; font-size: 11px; line-height: 1;
+}
+
+.app-dl-card { width: min(400px, 92vw); }
+.app-dl-icon {
+  display: flex; align-items: center; justify-content: center;
+  margin: 2px auto 0; width: 54px; height: 54px; border-radius: 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--blue) 30%, transparent),
+                              color-mix(in srgb, var(--gold) 22%, transparent));
+  border: 1px solid color-mix(in srgb, var(--gold) 30%, var(--line));
+}
+.app-dl-icon-glyph { font-size: 24px; font-weight: 800; color: var(--gold); line-height: 1; }
+.app-dl-meta {
+  color: var(--muted); font-size: 12px; line-height: 1.7; text-align: center;
+}
+.app-dl-meta b { color: var(--gold); font-weight: 600; }
+
+/* 下载主按钮是 <a>，不走 .login-card button 那条渐变规则，样式自己给全 */
+.deposit-card .app-dl-btn {
+  display: block; padding: 12px 16px; border-radius: 10px;
+  background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+  border: 1px solid color-mix(in srgb, var(--gold) 42%, transparent);
+  color: var(--on-grad); text-align: center; text-decoration: none;
+  font-size: 15px; font-weight: 700; letter-spacing: 2px;
+}
+.deposit-card .app-dl-btn:hover { filter: brightness(1.08); color: var(--on-grad); }
+
+.app-dl-hint {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--line); background: color-mix(in srgb, var(--ink) 3%, transparent);
+  color: var(--muted); font-size: 11px; line-height: 1.6; text-align: left;
+}
+.app-dl-hint b { color: color-mix(in srgb, var(--gold) 66%, var(--ink)); font-weight: 600; }

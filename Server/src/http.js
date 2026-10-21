@@ -16,6 +16,10 @@ const { logger } = require('./logger');
 const CLIENT_DIR = path.join(__dirname, '..', '..', 'Client');
 // App 客户端（移动端原生风格，挂在 /m 前缀）：独立目录、独立 MIME 白名单
 const APP_DIR = path.join(__dirname, '..', '..', 'App');
+// 安卓安装包目录：Mobile/build-apk.bat 的产物落在这里（output/ 不进 git）。
+// 用 GUSHEN_APK 可以指一个具体文件，方便把包放到别处（比如挂载盘）。
+const APK_DIR = path.join(__dirname, '..', '..', 'output');
+const APK_ENV_FILE = process.env.GUSHEN_APK || '';
 const APP_MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -153,6 +157,60 @@ function json(res, code, obj) {
 
 function clientIp(req) {
   return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+/**
+ * 找出当前要下发的安卓安装包。
+ *
+ * 顺序：`GUSHEN_APK` 指定的文件 → `output/` 下 mtime 最新的 `*.apk`。
+ * 取最新那个是为了「跑完 build-apk.bat 就自动生效」，不用改代码也不用重启
+ * （缓存只有 5 秒，发新版后最多 5 秒就换过来）。
+ * 找不到返回 null —— 上层据此给前端 `available:false`，把入口降级成「暂未提供」。
+ */
+let apkProbe = { at: 0, hit: null };
+function findApk() {
+  const now = Date.now();
+  if (now - apkProbe.at < 5000) return apkProbe.hit;
+
+  const describe = (file) => {
+    try {
+      const st = fs.statSync(file);
+      if (!st.isFile() || !st.size) return null;
+      const m = /(\d+\.\d+\.\d+)/.exec(path.basename(file));
+      const ver = m ? m[1] : '';
+      return {
+        file,
+        size: st.size,
+        mtime: st.mtime,
+        version: ver,
+        // 玩家落盘看到的文件名（中文），Content-Disposition 里走 filename*
+        name: `股神请就位${ver ? '-v' + ver : ''}.apk`,
+        ascii: `leekgod${ver ? '-v' + ver : ''}.apk`,
+      };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  let hit = null;
+  if (APK_ENV_FILE) {
+    // 明确指定了就只认它：指错了要 404 暴露出来，不能偷偷回落到 output/ 里那个旧包
+    hit = describe(APK_ENV_FILE);
+  } else {
+    try {
+      const cands = fs
+        .readdirSync(APK_DIR)
+        .filter((f) => /\.apk$/i.test(f))
+        .map((f) => describe(path.join(APK_DIR, f)))
+        .filter(Boolean)
+        .sort((a, b) => b.mtime - a.mtime);
+      hit = cands[0] || null;
+    } catch (e) {
+      hit = null;
+    }
+  }
+  apkProbe = { at: now, hit };
+  return hit;
 }
 
 /** 写接口要求 application/json（避免跨站表单/简单请求直达） */
@@ -403,6 +461,39 @@ function createServer(game, options) {
       // 顺序必须在静态资源与 404 之前，否则 /open/v1/* 会掉进静态白名单的兜底分支。
       if (p === openapi.PREFIX || p.startsWith(`${openapi.PREFIX}/`)) {
         return await open.handle(req, res, url, p);
+      }
+
+      // ---- 安卓安装包：网页端「下载 App」入口 ----
+      // 公开接口，**不要加令牌校验**：想装 App 的人多半还没登录网页版，堵在这里等于没入口。
+      // info 只暴露「有没有包 / 版本 / 大小 / 更新时间」，包本身直接读 output/ 里最新的那个。
+      if (p === '/api/app/info' && req.method === 'GET') {
+        const apk = findApk();
+        return json(res, 200, {
+          ok: true,
+          available: !!apk,
+          version: apk ? apk.version : '',
+          size: apk ? apk.size : 0,
+          updatedAt: apk ? apk.mtime.toISOString() : '',
+          url: apk ? '/api/app/download' : '',
+        });
+      }
+      if (p === '/api/app/download' && (req.method === 'GET' || req.method === 'HEAD')) {
+        const apk = findApk();
+        if (!apk) return json(res, 404, { ok: false, error: '暂未提供安卓安装包' });
+        res.writeHead(200, withSecurity({
+          'Content-Type': 'application/vnd.android.package-archive',
+          'Content-Length': String(apk.size),
+          // ASCII 名给老客户端兜底，中文名走 filename*（RFC 5987）
+          'Content-Disposition':
+            `attachment; filename="${apk.ascii}"; filename*=UTF-8''${encodeURIComponent(apk.name)}`,
+          'Cache-Control': 'no-cache',
+        }));
+        if (req.method === 'HEAD') return res.end();
+        const stream = fs.createReadStream(apk.file);
+        stream.on('error', () => {
+          try { res.destroy(); } catch (e) { /* 客户端已断开 */ }
+        });
+        return stream.pipe(res);
       }
 
       // ---- API ----

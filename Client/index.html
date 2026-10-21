@@ -52,6 +52,13 @@
       </div>
 
       <div class="login-hint err" id="loginErr" hidden></div>
+
+      <!-- 安卓 App 下载入口：登录前就要能点（想装 App 的人正是还没登录的那批）。
+           有没有包由 /api/app/info 决定，没包时弹层里降级成「暂未提供」，入口本身常驻 -->
+      <button class="app-dl-link" id="appDlBtn" type="button" title="下载安卓安装包">
+        <span class="app-dl-arrow" aria-hidden="true">↓</span>
+        <span>手机上玩更顺手 · 下载安卓 App</span>
+      </button>
     </div>
   </div>
 
@@ -198,6 +205,8 @@
             <button class="ghost-btn big" id="whalesBtn" title="查看 AI 主力的持仓、上一轮决策与权益">AI 主力</button>
             <!-- 开放平台：自助签发 API Key，跳独立页 /portal.html（需登录会话） -->
             <button class="ghost-btn big" id="portalBtn" title="用自己的量化策略接入：申请 API Key、查看与撤销">开放接口</button>
+            <!-- 安卓 App：和登录页那个入口同一个弹层，登录后也能随手装（/api/app/info 探测有无包） -->
+            <button class="ghost-btn big" id="downloadAppBtn" title="下载安卓安装包（手机装好后填服务器地址）">下载 App</button>
           </div>
         </div>
         <!-- 吉祥物立绘：站问候语与市场概览之间的空档，脚踩面板下边缘（只有二次元主题会显示，applyMascot 控制） -->
@@ -707,6 +716,27 @@
     <div class="poster-card">
       <img class="poster-img" src="/img/waifu-group-poster.png" alt="股娘全员合照海报：十家上市公司拟人齐聚行情大屏前" />
       <button class="deposit-cancel poster-close" id="posterCloseBtn">关闭合照</button>
+    </div>
+  </div>
+
+  <!-- 安卓 App 下载弹窗：登录页入口 + 主页「下载 App」共用。
+       包由 Mobile/build-apk.bat 产出到 output/，/api/app/info 探测有没有包；
+       没包时这里降级成一句「暂未提供」，下载按钮整个不出现 -->
+  <div id="appDlOverlay" class="overlay deposit-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="appDlTitle">
+    <div class="login-card deposit-card app-dl-card">
+      <div class="deposit-title" id="appDlTitle">装个 App，随手盯盘</div>
+      <div class="login-sub">安卓安装包 · 和网页版同一套账号，数据互通</div>
+      <div class="app-dl-icon" aria-hidden="true">
+        <span class="app-dl-icon-glyph">↓</span>
+      </div>
+      <div class="app-dl-meta" id="appDlMeta">正在检查安装包…</div>
+      <a class="app-dl-btn" id="appDlDownload" href="/api/app/download" rel="noopener" hidden>下载 APK</a>
+      <div class="app-dl-hint">
+        <div><b>第一次装</b>：手机会提示「未知来源」，允许一次即可。</div>
+        <div><b>连服务器</b>：App 首次启动会让你填地址，填现在这个网址就行（手机要和服务器在同一个 WiFi）。</div>
+        <div><b>发新版</b>：回这里重新下载覆盖安装，账号和持仓都在服务端，不会丢。</div>
+      </div>
+      <button class="deposit-cancel" id="appDlCloseBtn">先不装</button>
     </div>
   </div>
 

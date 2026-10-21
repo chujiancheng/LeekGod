@@ -4800,6 +4800,76 @@
     });
   }
 
+  // ---------- 安卓 App 下载 ----------
+  // 包是打包脚本产出的静态文件（不是游戏数据），/api/app/info 只回答「有没有 / 多大 / 什么版本」。
+  // 登录页与主页两个入口共用这一个弹层，所以探测结果缓存一次就够（appDlLoaded）。
+  let appDlLoaded = false;
+
+  function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+    if (v >= 1024) return Math.round(v / 1024) + ' KB';
+    return v + ' B';
+  }
+
+  function fmtDay(iso) {
+    const d = new Date(iso);
+    if (!iso || isNaN(d.getTime())) return '--';
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  async function loadAppDownload(force) {
+    const meta = $('appDlMeta');
+    const btn = $('appDlDownload');
+    if (!meta || !btn) return;
+    if (appDlLoaded && !force) return;
+    meta.textContent = '正在检查安装包…';
+    btn.hidden = true;
+    try {
+      const res = await apiGet('/api/app/info');
+      const info = await res.json();
+      appDlLoaded = true;
+      if (!info || !info.available) {
+        // 没包不算错误：刚克隆下来的仓库本来就没有 output/，说清楚就行
+        meta.textContent = '服务器上还没有可下载的安装包，先用网页版吧。';
+        return;
+      }
+      meta.innerHTML = `版本 <b>v${esc(info.version || '?')}</b> · ${esc(fmtBytes(info.size))}`
+        + `<br>更新于 ${esc(fmtDay(info.updatedAt))}`;
+      // 带版本号查询串：换了包之后浏览器不会拿上一版缓存
+      btn.href = `${info.url}?v=${encodeURIComponent(info.version || '')}`;
+      btn.hidden = false;
+    } catch (e) {
+      appDlLoaded = false;
+      meta.textContent = '检查失败，看看网络，或者等一下再点一次。';
+    }
+  }
+
+  function openAppDownload() {
+    $('appDlOverlay').classList.remove('hidden');
+    loadAppDownload(false);
+  }
+
+  function closeAppDownload() {
+    $('appDlOverlay').classList.add('hidden');
+  }
+
+  function bindAppDownload() {
+    const entry = $('appDlBtn');
+    if (entry) entry.addEventListener('click', openAppDownload);
+    const homeEntry = $('downloadAppBtn');
+    if (homeEntry) homeEntry.addEventListener('click', openAppDownload);
+    $('appDlCloseBtn').addEventListener('click', closeAppDownload);
+    // 点遮罩空白处关闭（点卡片本身不关）
+    $('appDlOverlay').addEventListener('click', (e) => {
+      if (e.target === $('appDlOverlay')) closeAppDownload();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !$('appDlOverlay').classList.contains('hidden')) closeAppDownload();
+    });
+  }
+
   function renderHome() {
     const a = state && state.account;
     if (!a) return;
@@ -7483,6 +7553,7 @@
     bindEggs();
     bindCompanyProfile();
     bindRules();
+    bindAppDownload();
     renderChartMode();
     // 恢复上次的主题与吉祥物（都没选过=默认：深夜终端 + 跟随主题）
     try { currentMascot = localStorage.getItem(MASCOT_KEY); } catch (e) { /* 忽略 */ }

@@ -6,6 +6,8 @@
 ## 发布流程（一键打包）
 
 **双击 `Mobile\build-apk.bat` 即可**，产物自动落到 `output\LeekGod-v<版本>.apk`。
+落进 `output/` 之后，网页端（`Client/`）的「下载 App」入口会**自动提供这个最新包**
+（服务端扫 `output/*.apk` 取最新，`GUSHEN_APK` 环境变量可以指到别处），不用再手动分发。
 
 脚本会自动探测 JDK 17 / Android SDK / Gradle 8.x（找不到再退回 `JAVA_HOME`、`ANDROID_HOME`、
 `local.properties`、常见安装路径），构建完自动验签、归档，并把大小打出来。
