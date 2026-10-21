@@ -45,6 +45,7 @@
           '<span class="tag" id="idxCode">999999</span></div>' +
         '<div class="hero-price"><b class="num" id="idxLast">—</b>' +
           '<span class="hero-chg num" id="idxChg">—</span></div>' +
+        '<div class="hero-spark"><canvas class="spark-canvas" id="idxSpark"></canvas></div>' +
         '<div class="hero-meta">' +
           '<span>今开<b class="num" id="idxOpen">—</b></span>' +
           '<span>最高<b class="num" id="idxHigh">—</b></span>' +
@@ -52,7 +53,6 @@
           '<span>成交<b class="num" id="idxTurn">—</b></span>' +
         '</div>' +
         '<img class="hero-mascot" id="heroMascot" alt="看板娘" hidden />' +
-        '<div class="hero-spark"><canvas class="spark-canvas" id="idxSpark"></canvas></div>' +
       '</div>' +
       '<div class="sec-title">全部标的</div>' +
       '<div class="card card-flat"><div class="stock-list" id="stockList"></div></div>' +

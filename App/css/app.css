@@ -785,6 +785,9 @@ input::placeholder {
   align-items: baseline;
   gap: 10px;
   margin-top: 8px;
+  /* 右侧留出看板娘的位置，大字不钻到立绘底下；立绘实际宽约 24% */
+  padding-right: 27%;
+  white-space: nowrap;
 }
 
 .hero-price b {
@@ -800,10 +803,12 @@ input::placeholder {
 
 .hero-meta {
   display: flex;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 10px;
   font-size: 11px;
   color: var(--txt-3);
+  white-space: nowrap;
 }
 
 .hero-meta b {
@@ -811,13 +816,10 @@ input::placeholder {
   font-weight: 600;
 }
 
+/* 迷你走势独占一条整宽横带（不再 absolute 压在指标行上） */
 .hero-spark {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 58%;
-  height: 62%;
-  opacity: 0.85;
+  height: 64px;
+  margin-top: 10px;
   pointer-events: none;
 }
 
@@ -2037,14 +2039,14 @@ input::placeholder {
   border-radius: 15px;
 }
 
-/* 看板娘：行情 hero 右上角常驻，压在迷你走势之上但不挡数据 */
+/* 看板娘：行情 hero 右上角常驻（只与名称/价格区并排，不压走势与指标行） */
 .hero-mascot {
   position: absolute;
   right: 6px;
-  top: 2px;
-  height: 88px;
+  top: 4px;
+  height: 78px;
   width: auto;
-  max-width: 34%;
+  max-width: 32%;
   object-fit: contain;
   pointer-events: none;
   filter: drop-shadow(0 4px 10px rgba(20, 30, 48, 0.16));
