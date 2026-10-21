@@ -1,0 +1,53 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'cn.gushen.leekgod'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'cn.gushen.leekgod'
+        minSdk 24          // Android 7.0
+        targetSdk 33
+        versionCode 1
+        versionName '1.0.0'
+        // 首次启动预填的服务器地址（gradle.properties 里改）
+        buildConfigField 'String', 'SERVER_URL',
+                "\"${project.findProperty('gushenServerUrl') ?: 'http://192.168.1.9:3000'}\""
+    }
+
+    // 纯 WebView 壳，零第三方依赖；签名信息在 keystore.properties（不进 git）
+    def ksProps = new Properties()
+    def ksFile = rootProject.file('keystore.properties')
+    if (ksFile.exists()) {
+        ksProps.load(new FileInputStream(ksFile))
+        signingConfigs {
+            release {
+                storeFile rootProject.file(ksProps['storeFile'])
+                storePassword ksProps['storePassword']
+                keyAlias ksProps['keyAlias']
+                keyPassword ksProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (ksFile.exists()) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+
+    // 纯 WebView 壳没有资源/清单可 lint，关掉省一次 lint 依赖解析
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}

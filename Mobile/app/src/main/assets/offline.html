@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>连不上服务器</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{background:#080b10;color:#d8dee6;display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-align:center}
+  .box{padding:32px}
+  .logo{font-size:34px;font-weight:800;letter-spacing:2px}
+  .logo b{color:#ffc94a}
+  .sub{font-size:12px;letter-spacing:6px;color:#66717f;margin:8px 0 28px}
+  .tip{font-size:14px;color:#8a95a3;line-height:1.8;margin-bottom:6px}
+  .addr{font-size:13px;color:#48c6ef;margin-bottom:32px;word-break:break-all}
+  button{display:block;width:200px;margin:12px auto;padding:12px 0;border:0;border-radius:12px;
+         font-size:15px;font-weight:600;background:#1d2733;color:#d8dee6}
+  button.primary{background:linear-gradient(135deg,#f5455c,#ff7a45);color:#fff}
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">股神<b>请就位</b></div>
+    <div class="sub">韭 菜 进 化 论</div>
+    <div class="tip">连不上交易所服务器<br>确认服务器开着、手机和它在同一个网络</div>
+    <div class="addr" id="addr"></div>
+    <button class="primary" onclick="AndroidHost.retry()">重试</button>
+    <button onclick="AndroidHost.changeServer()">换服务器地址</button>
+  </div>
+  <script>
+    try { document.getElementById('addr').textContent = AndroidHost.server(); } catch (e) {}
+  </script>
+</body>
+</html>
