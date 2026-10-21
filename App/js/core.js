@@ -366,6 +366,7 @@ window.GS = window.GS || {};
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
     refresh: '<path d="M20 11a8 8 0 10-2.3 6.7"/><path d="M20 5v6h-6"/>',
     bell: '<path d="M6 9a6 6 0 1112 0c0 4 1.5 5.5 2 6H4c.5-.5 2-2 2-6z"/><path d="M10 20h4"/>',
+    share: '<circle cx="6" cy="12" r="2.6"/><circle cx="17" cy="6" r="2.6"/><circle cx="17" cy="18" r="2.6"/><path d="M8.3 10.8l6.4-3.6M8.3 13.2l6.4 3.6"/>',
   };
 
   function icon(name, extra) {

@@ -23,5 +23,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 分享图片：只读暴露 cacheDir/share/ 下的文件给系统分享面板（见 ShareFileProvider） -->
+        <provider
+            android:name=".ShareFileProvider"
+            android:authorities="cn.gushen.leekgod.share"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

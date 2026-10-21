@@ -2100,3 +2100,30 @@ input::placeholder {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ---------------------------------------------------------------- 分享 */
+
+/* 资产卡右上角的「晒战绩」小按钮 */
+.asset-hero {
+  position: relative;
+}
+.share-fab {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+/* 排行页「晒排名」行：靠右、贴着榜单上方 */
+.rank-share {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 2px 10px;
+}
+
+/* 复制兜底用的隐藏 textarea（不能 display:none，否则选不中） */
+.share-copy-ta {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  opacity: 0;
+}

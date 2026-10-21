@@ -35,6 +35,7 @@
       else if (k === 'nick') openNick();
       else if (k === 'mascot') openMascot();
       else if (k === 'logout') logout();
+      else if (k === 'invite') GS.share.inviteText();
       else if (k === 'portal') location.href = '/portal.html';
       else if (k === 'rules') openRules();
       else if (k === 'server') {
@@ -123,6 +124,7 @@
       { k: 'deposit', icon: '💰', label: '加钱', val: canDeposit ? '可用' : '未开放', off: !canDeposit },
       { k: 'nick', icon: '✏️', label: '改昵称', val: a.nick || '' },
       { k: 'mascot', icon: '🎀', label: '换看板娘', val: mascotName() },
+      { k: 'invite', icon: '📣', label: '邀请好友', val: '' },
       { k: 'portal', icon: '🔑', label: '开放接口 API Key', val: '' },
       { k: 'rules', icon: '📖', label: '交易规则', val: '' },
       { k: 'logout', icon: '🚪', label: '退出登录', val: '' },

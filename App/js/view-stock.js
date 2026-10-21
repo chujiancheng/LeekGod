@@ -32,8 +32,11 @@
   /* ---------------------------------------------------------------- 骨架 */
 
   function skeleton(m) {
+    const shareBtn = m
+      ? '<button class="icon-btn" id="stockShare" aria-label="分享">' + GS.core.icon('share') + '</button>'
+      : '';
     return (
-      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', '') +
+      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', shareBtn) +
       '<div class="page-body" id="stockBody">' +
         '<div class="quote-head">' +
           '<div class="quote-line">' +
@@ -109,6 +112,8 @@
       html: skeleton(m),
       onMount(el) {
         GS.core.bindPageBack(el.el);
+        // 分享当前个股行情（头部右上角）
+        GS.core.on(el.el, '#stockShare', 'click', () => GS.share.stockText(state.stockId));
         bindTabs(el.el);
         bindChartTouch(el.el);
         bindAct(el.el);

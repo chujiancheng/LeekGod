@@ -25,6 +25,7 @@
         '<div class="asset-label">总资产（元）</div>' +
         '<div class="asset-value num" id="asEquity">—</div>' +
         '<div class="asset-pnl num" id="asPnl">—</div>' +
+        '<button class="mini-btn share-fab" id="asShare">晒战绩</button>' +
         '<div class="stat-grid">' +
           '<div class="stat-cell"><span>可用</span><b class="num" id="asCash">—</b></div>' +
           '<div class="stat-cell"><span>冻结</span><b class="num" id="asFrozen">—</b></div>' +
@@ -45,6 +46,9 @@
       root.querySelectorAll('#tradeSeg button').forEach((b) => b.classList.toggle('on', b === t));
       renderList();
     });
+
+    // 晒战绩：canvas 生成战绩卡 → 系统分享面板（App 内）/ 下载（浏览器）
+    GS.core.on(root, '#asShare', 'click', () => GS.share.shareStatCard());
 
     GS.core.on(root, '[data-goto]', 'click', (e, t) => {
       if (t.dataset.goto === 'deposit') GS.viewMe.openDeposit();

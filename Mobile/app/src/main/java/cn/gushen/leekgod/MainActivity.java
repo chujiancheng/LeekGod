@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
+import android.util.Base64;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -22,6 +23,9 @@ import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
 
 /**
  * 股神请就位 —— Android WebView 壳。
@@ -234,6 +238,67 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String server() {
             return base;
+        }
+
+        /**
+         * 分享文字：拉起系统分享面板，用户在里头选微信/QQ/朋友圈等。
+         * 零依赖方案（不走微信 OpenSDK）：微信收到的链接是纯文本，无富卡片样式。
+         */
+        @JavascriptInterface
+        public void shareText(String text) {
+            final String t = text == null ? "" : text.trim();
+            if (t.isEmpty()) return;
+            runOnUiThread(() -> {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType("text/plain");
+                i.putExtra(Intent.EXTRA_TEXT, t);
+                try {
+                    startActivity(Intent.createChooser(i, "分享到"));
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
+        /**
+         * 分享图片：前端 canvas 导出的 PNG base64。
+         * 落到 cacheDir/share/ 再经 ShareFileProvider 以 content:// 发出
+         * （targetSdk 24+ 不允许 file:// 跨应用，又不引 androidx，就自己写了 20 行 Provider）。
+         */
+        @JavascriptInterface
+        public void shareImage(String base64Png, String fileName) {
+            if (base64Png == null || base64Png.isEmpty()) return;
+            // 文件名白名单：只留字母数字._-，防路径穿越，也防 JS 里传奇怪字符
+            String name = (fileName == null ? "" : fileName).replaceAll("[^A-Za-z0-9._-]", "");
+            if (name.isEmpty()) name = "share.png";
+            final byte[] data;
+            try {
+                data = Base64.decode(base64Png, Base64.DEFAULT);
+            } catch (IllegalArgumentException e) {
+                return;
+            }
+            final String safeName = name;
+            runOnUiThread(() -> {
+                File out = null;
+                try {
+                    File dir = new File(getCacheDir(), "share");
+                    if (!dir.exists()) dir.mkdirs();
+                    out = new File(dir, safeName);
+                    try (FileOutputStream fos = new FileOutputStream(out)) {
+                        fos.write(data);
+                    }
+                    Uri uri = Uri.parse("content://cn.gushen.leekgod.share/" + safeName);
+                    Intent i = new Intent(Intent.ACTION_SEND);
+                    i.setType("image/png");
+                    i.putExtra(Intent.EXTRA_STREAM, uri);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent chooser = Intent.createChooser(i, "分享到");
+                    chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(chooser);
+                } catch (Exception e) {
+                    if (out != null) out.delete();
+                    Toast.makeText(MainActivity.this, "分享失败", Toast.LENGTH_SHORT).show();
+                }
+            });
         }
     }
 }

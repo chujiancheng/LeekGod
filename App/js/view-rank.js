@@ -17,6 +17,9 @@
         '<button data-tab="player" class="on">玩家榜</button>' +
         '<button data-tab="broker">券商榜</button>' +
       '</div>' +
+      '<div class="rank-share" id="rankShareRow" hidden>' +
+        '<button class="mini-btn" id="rankShare">晒排名</button>' +
+      '</div>' +
       '<div class="card card-flat" id="rankList"></div>' +
       '<div class="hint">按总资产排序，点玩家可看持仓。榜上会显示昵称与头像，账户名不公开。</div>';
 
@@ -25,6 +28,7 @@
       root.querySelectorAll('#rankSeg button').forEach((b) => b.classList.toggle('on', b === t));
       renderList();
     });
+    GS.core.on(root, '#rankShare', 'click', () => GS.share.rankText());
     // 榜单每帧整块重写 innerHTML，事件只能挂在容器上（委托到 root）
     GS.core.on(root, '#rankList .rank-row[data-account]', 'click', (e, t) => {
       openPositions(t.dataset.account, t.dataset.nick);
@@ -45,6 +49,12 @@
 
     if (tab === 'player') {
       const players = (st.players || []).slice();
+      // 晒排名：只有玩家榜、且自己上榜时亮出来
+      const shareRow = $('rankShareRow');
+      if (shareRow) {
+        shareRow.hidden = tab !== 'player' ||
+          !players.some((p) => p.account === GS.core.S.account);
+      }
       if (!players.length) {
         box.innerHTML = '<div class="empty"><div class="empty-icon">🏆</div>榜上还没有人</div>';
         return;
@@ -87,6 +97,9 @@
       box.innerHTML = '<div class="empty"><div class="empty-icon">🏦</div>暂无数据</div>';
       return;
     }
+    // 券商榜没有「我的排名」，晒排名行藏起来
+    const shareRow = $('rankShareRow');
+    if (shareRow) shareRow.hidden = true;
     box.innerHTML = board
       .map((b, i) => {
         return (
