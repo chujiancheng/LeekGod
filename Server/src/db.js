@@ -10,6 +10,8 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 11：头像（accounts 加 avatar / broker_seen 两列，见 Doc/头像方案.md）
+// 10：夜间休市行情头按「刚收盘这一天」的定格值下发（market_state 加 closed_day）
 // 9：NPC 真实身份（accounts 加 home_stock；stock_ledger 加 origin_qty）
 //    **故意不提供 8 → 9 的迁移**：这一版把 NPC 的名字从「大米·游资1」换成真人名，
 //    并让账户可以跨股票交易，老档里的名字既是主键又是流水引用，迁不动也没必要迁
@@ -21,7 +23,7 @@ const { logger } = require('./logger');
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -71,7 +73,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   free_interest_day  INTEGER,
   -- 彩蛋里程碑（JSON）：{seq, fired[], titles[], peakEquity, maxDrawdown, drawdownArmed, dayEvaluated}
   -- 与券商那几列同规矩：**只对玩家写入**，NPC 一律 NULL（逐 tick 标脏是项目禁忌）
-  milestones         TEXT
+  milestones         TEXT,
+  -- 头像：玩家自选的脸（目录里的 key，见 config.avatar.catalog）。
+  -- NULL = 从没主动选过 → 按 hash('ava:' + 账号) 确定性派生一张（永不裂图，也不用写库）。
+  -- 不存 URL / 路径 / base64：拼图是客户端的事（Doc/头像方案.md §6.3）
+  avatar             TEXT,
+  -- 待过的券商 key（逗号分隔，去重、只增不减）：券商组头像的解锁依据。
+  -- 转户不收回旧门派脸，这列就是「曾用门派」的唯一凭据。NPC 一律 NULL
+  broker_seen        TEXT
 );
 
 -- 按股票的账户明细：融券挂借与各类利息累计（都已经是「按股票」的口径）
@@ -341,10 +350,24 @@ const MIGRATION_10 = `
 ALTER TABLE market_state ADD COLUMN closed_day TEXT;
 `;
 
+/**
+ * 版本 10 → 11 的**原地升级**：头像两列。
+ *
+ * 两条都是纯 `ADD COLUMN`（可空、无默认值），与 v4/v5/v6 那批同款——
+ * **在跑的那一局能原地升上来**，不用删档。
+ * - `avatar` 为 NULL 表示「从没主动选过」：按账号哈希派生一张基础脸，不写库；
+ * - `broker_seen` 为 NULL 表示「还没记录过门派」：老档当前券商由 `avatar.brokerSeenOf`
+ *   兜底并进（否则升级当天门派组头像会整组锁死）。
+ */
+const MIGRATION_11 = `
+ALTER TABLE accounts ADD COLUMN avatar TEXT;
+ALTER TABLE accounts ADD COLUMN broker_seen TEXT;
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支。
 // **9 故意缺席**：NPC 改真名 + 允许跨股，老档的账户名既是主键又是流水引用，迁不动
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10, 11: MIGRATION_11 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;
@@ -357,6 +380,27 @@ function rebuildHint(file, from, to) {
     `确认不需要旧数据后，删掉这三个文件重开新局：\n` +
     `  ${abs}\n  ${abs}-wal\n  ${abs}-shm`
   );
+}
+
+/**
+ * 逐条执行迁移语句，并把 `ADD COLUMN` 做成幂等。
+ *
+ * 为什么需要：`openDatabase` 是**先** `db.exec(DDL)`（按最新结构建缺表）**再**逐级迁移。
+ * 于是"老档缺这张表"时，DDL 已经按最新结构把表建出来了，迁移里的
+ * `ALTER TABLE ... ADD COLUMN` 就会撞 `duplicate column name`（v9 档只有 meta 的合成档
+ * 就走这条路）。SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，所以在这里按 PRAGMA 挡一道。
+ */
+function execMigration(db, sql) {
+  for (const raw of String(sql).split(';')) {
+    const stmt = raw.trim();
+    if (!stmt) continue;
+    const m = /^ALTER\s+TABLE\s+([A-Za-z_]\w*)\s+ADD\s+COLUMN\s+([A-Za-z_]\w*)/i.exec(stmt);
+    if (m) {
+      const cols = db.prepare(`PRAGMA table_info(${m[1]})`).all().map((c) => c.name);
+      if (cols.includes(m[2])) continue; // DDL 已经把这一列建出来了
+    }
+    db.exec(stmt);
+  }
 }
 
 /**
@@ -398,7 +442,7 @@ function openDatabase(file) {
       db.close();
       throw new Error(rebuildHint(file, from0, SCHEMA_VERSION));
     }
-    db.exec(sql);
+    execMigration(db, sql);
     from += 1;
   }
   db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION));

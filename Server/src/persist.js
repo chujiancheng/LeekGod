@@ -44,11 +44,11 @@ class Persister {
         INSERT INTO accounts
           (name, is_npc, role, nick, home_stock, cash, order_frozen, short_margin, realized_pnl, initial_long, last_order_at, created_at, deposited,
            broker, broker_changed_at, broker_since_day, broker_stats, free_reselect_used, coupon_used_day, free_interest_day,
-           milestones)
+           milestones, avatar, broker_seen)
         VALUES
           (@name, @is_npc, @role, @nick, @home_stock, @cash, @order_frozen, @short_margin, @realized_pnl, @initial_long, @last_order_at, @created_at, @deposited,
            @broker, @broker_changed_at, @broker_since_day, @broker_stats, @free_reselect_used, @coupon_used_day, @free_interest_day,
-           @milestones)
+           @milestones, @avatar, @broker_seen)
         ON CONFLICT(name) DO UPDATE SET
           is_npc = @is_npc, role = @role, nick = @nick, home_stock = @home_stock, cash = @cash, order_frozen = @order_frozen,
           short_margin = @short_margin, realized_pnl = @realized_pnl,
@@ -56,7 +56,7 @@ class Persister {
           broker = @broker, broker_changed_at = @broker_changed_at, broker_since_day = @broker_since_day,
           broker_stats = @broker_stats, free_reselect_used = @free_reselect_used,
           coupon_used_day = @coupon_used_day, free_interest_day = @free_interest_day,
-          milestones = @milestones
+          milestones = @milestones, avatar = @avatar, broker_seen = @broker_seen
       `),
       delLedger: db.prepare('DELETE FROM stock_ledger WHERE account = ?'),
       insLedger: db.prepare(`
@@ -441,6 +441,12 @@ class Persister {
       // 彩蛋里程碑：**NPC 写 NULL**（与券商那几列同规矩）——写它等于让 3160 个 NPC
       // 每 tick 都有变化可写，踩的就是「NPC 逐 tick 标脏」这条禁忌
       milestones: isNpc || !acc.milestones ? null : milestones.serialize(acc.milestones),
+      // 头像与「待过的券商」：同样**只对玩家写**。NPC 的脸是现算的派生脸（avatar.of），
+      // 落盘等于每 tick 都有变化可写；`broker_seen` 去重后是逗号串，空数组写 NULL
+      avatar: isNpc ? null : acc.avatar || null,
+      broker_seen: isNpc || !Array.isArray(acc.brokerSeen) || !acc.brokerSeen.length
+        ? null
+        : acc.brokerSeen.join(','),
     });
 
     // 按股票的融券/融资计息明细：整段重写（行数很少，省去逐行 diff 的复杂度）。

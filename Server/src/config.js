@@ -1301,6 +1301,51 @@ const config = {
   },
 
   // ------------------------------------------------------------------
+  // 头像（脸面）—— 见 Doc/头像方案.md
+  //
+  // 三层合成：底图（玩家在这里选）+ 境界色环（`realm.group`，客户端 CSS 变量）+ 券商角标
+  // （`brokers.list.*.color`）。服务端**只存 key、只发 key，永不发路径**——拼 URL 是客户端的事，
+  // 配置里一旦能写 URL，`img-src 'self'` 的白名单就形同虚设（方案 §6.3）。
+  //
+  // 三条纪律（改这个目录前先读一遍）：
+  // ① key 一旦上线**永不删除、永不复用**：老档里存着它，删了就是裂图（读到未知 key 回落派生脸）；
+  // ② 头像是**静态身份**（长相 / 门派 / 段位），不许编码任何日内状态（盈亏 / 爆仓 / 方向）——
+  //    情报红线，见方案 §2.3；
+  // ③ 漏登记图片 = 线上 404 裂图：`http.js` 会循环这个 catalog 注册 `-96` / `-192` 两档。
+  // ------------------------------------------------------------------
+  avatar: {
+    enabled: true,
+    // 按组下发（客户端弹层按组渲染锁卡）。id 必须与 catalog 的 group 对得上，require 时校验。
+    // **只列已经有素材的组**：空组/半成品组会在弹层里显示成一片灰格子，比不做还难看
+    groups: [
+      { id: 'base', label: '基础', hint: '开户即全部解锁' },
+    ],
+    // 目录：当前只有**基础 12 张**（素材已进 Client/img，两档齐全）。
+    // 待补（代码已就绪，只差素材 + 下面两行配置，不用改任何判定逻辑）：
+    //   门派 6 张：{ key:'broker-zhongxin', group:'broker', value:'zhongxin', name:'钟信门面' } …
+    //   境界 9 张：{ key:'realm-lianqi', group:'realm', value:'lianqi', name:'炼气·青衫' } …
+    //   彩蛋 6 张：{ key:'egg-a07', group:'egg', value:'A07', name:'千万身家' } …
+    // 补组时记得同时往 groups 里加一条（group id / label / hint），否则 require 直接报错。
+    // `value` 只有 broker / realm / egg 三组需要（分别指向券商 key / 大境界 key / 彩蛋 id）。
+    // **每张 key 必须在 Client/img 里有 `-96` 与 `-192` 两档图**，缺一张就启动失败（防裂图）。
+    catalog: [
+      // ---- 基础组：按「姿态」分类，不按资金量（那是境界干的活）----
+      { key: 'clipper', group: 'base', name: '韭菜本菜' },
+      { key: 'bull', group: 'base', name: '死多头' },
+      { key: 'bear', group: 'base', name: '大空头' },
+      { key: 'zen', group: 'base', name: '佛系持仓' },
+      { key: 'yolo', group: 'base', name: '梭哈党' },
+      { key: 'keyboard', group: 'base', name: '键盘股神' },
+      { key: 'auntie', group: 'base', name: '广场舞大妈' },
+      { key: 'quant', group: 'base', name: '量化小哥' },
+      { key: 'old', group: 'base', name: '老股民' },
+      { key: 'student', group: 'base', name: '学生党' },
+      { key: 'night', group: 'base', name: '夜盘人格' },
+      { key: 'bagholder', group: 'base', name: '高位接盘侠' },
+    ],
+  },
+
+  // ------------------------------------------------------------------
   // 券商（出身门派）
   //
   // 设计见 Doc/券商方案.md。三条硬约束写在代码里：

@@ -119,6 +119,16 @@
         </span>
         <span class="clock" id="clock">--:--:--</span>
         <!-- 身份：给人看的是昵称，账号放在 title 里（账号才是登录凭据） -->
+        <!-- 头像（Doc/头像方案.md §7.1）：26px，**唯一入口**，点它开「换一张脸」。
+             语义是「别人看你的脸」（榜单/股东榜/弹幕），与「外观 · 吉祥物」那种只有自己
+             看得见的桌面摆件分家，别把两个入口混成一个。
+             环色由 .ava.g-<realm.group> 的 --rtone 决定，**不写内联 style**（CSP）。
+             `ava` / `s26` 两个类不能省：环的 box-shadow 与环宽都挂在 `.ava` 上 -->
+        <button class="ava ava-top s26 g-mortal" id="avaBtn" type="button" title="换一张脸" hidden>
+          <img class="ava-img" id="avaImg" alt="" width="26" height="26" decoding="async" />
+          <span class="ava-ch" id="avaCh" hidden>韭</span>
+          <span class="ava-new" id="avaNew" hidden title="新：给你配了张脸"></span>
+        </button>
         <span class="who" id="whoName" title="账号">--</span>
         <!-- 修仙境界徽标（Doc/头衔方案.md §6.1）：只显示**收盘已确认**的境界，
              盘中越过下一档只用光晕提示，不在这里跳 -->
@@ -648,6 +658,17 @@
       <div class="nick-hint" id="nickEditHint"></div>
       <button id="nickSaveBtn">保存</button>
       <button class="deposit-cancel" id="nickCancelBtn">取消</button>
+    </div>
+  </div>
+
+  <!-- 换一张脸（Doc/头像方案.md §7.4）：入口只有顶栏 26px 那个头像，不做二级入口，
+       免得和「外观 / 吉祥物」弹层打架。锁卡点击只出文案、不发请求（服务端仍会校验） -->
+  <div id="avaOverlay" class="overlay deposit-overlay hidden">
+    <div class="login-card deposit-card ava-card">
+      <div class="deposit-title">换一张脸</div>
+      <div class="login-sub">别人在排行榜、股东榜、持仓弹窗里看到的就是它。名字可以重，脸很难重。</div>
+      <div class="ava-groups" id="avaGroups"></div>
+      <button class="deposit-cancel" id="avaCloseBtn">关闭</button>
     </div>
   </div>
 

@@ -287,7 +287,8 @@ const api = async (method, p, { key, body, headers } = {}) => {
   // ============================================================
   console.log('\n[9] 存档版本');
   const v = Number(persist.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value);
-  assert(v === 10 && SCHEMA_VERSION === 10, `schema 版本 10（${v}）`);
+  // 跟着 SCHEMA_VERSION 走：11 = 头像两列（accounts.avatar / broker_seen）
+  assert(v === 11 && SCHEMA_VERSION === 11, `schema 版本 11（${v}）`);
   const table = persist.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'").get();
   assert(!!table, 'api_keys 表已建');
 

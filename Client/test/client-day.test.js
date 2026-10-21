@@ -182,6 +182,18 @@ src = src.replace(
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
     renderRealmChip, rulesRealmHtml,
+    // 头像（Doc/头像方案.md）：顶栏只认 account.avatar.key，环色走 class 不写内联 style
+    renderTopAvatar, avaHtml, avaCellsHtml, avaCellClick, onAvaImgError, bindAvaFallback,
+    avatarSrcOf: avatarSrc, openAvaOverlay, pickAvatar, renderAvaCells, markAvaSeen,
+    setAvatarCatalog: (v) => { avatarCatalog = v; },
+    avatarCatalogOf: () => avatarCatalog,
+    setAvaTopSig: (v) => { avaTopSig = v; },
+    setAvaIntroShown: (v) => { avaIntroShown = v; },
+    avaSeenStored: () => localStorage.getItem('gushen_ava_seen'),
+    avaBtn: () => { const b = $('avaBtn'); return { hidden: !!b.hidden, cls: b.className, title: b.title }; },
+    avaImg: () => ({ src: $('avaImg').src || '', hidden: !!$('avaImg').hidden }),
+    avaCh: () => ({ hidden: !!$('avaCh').hidden, text: $('avaCh').textContent }),
+    avaNewHidden: () => !!$('avaNew').hidden,
     setIdentity, resetEggStream,
     eggState: () => ({ lastSeq: lastEggSeq, queued: eggQueue.length, busy: eggBusy }),
     eggTimerInfo: () => (eggTimer == null ? null : __timers.get(eggTimer) || null),
@@ -2786,6 +2798,129 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     api.renderLending();
     const html3 = getEl('lendingMeta').innerHTML;
     assert(/300,000/.test(html3) && !/未披露/.test(html3), '老服务端兼容：照旧显示数字，不凭空挂角标');
+  }
+
+  // ============================================================
+  console.log('\n[26] 头像：顶栏按 account.avatar.key 渲染、环色走 class、锁卡不发请求');
+  {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    ['avaBtn', 'avaImg', 'avaCh', 'avaNew', 'avaOverlay', 'avaGroups', 'avaCloseBtn'].forEach((id) => {
+      assert(html.indexOf(`id="${id}"`) >= 0, `HTML 里有 #${id}（六个落点里顶栏与弹层的骨架）`);
+    });
+    // 入口只有一个：顶栏头像。它必须在昵称左边（顺序即布局）
+    const topRight = (html.match(/<div class="top-right">([\s\S]*?)<\/header>/) || [])[1] || '';
+    assert(topRight.indexOf('id="avaBtn"') >= 0 && topRight.indexOf('id="avaBtn"') < topRight.indexOf('id="whoName"'),
+      '顶栏头像在昵称左侧（唯一入口）');
+
+    const mkAvatarState = (avat, extraRules) => {
+      const st = mkState(AUCTION_DAY, null);
+      st.account.avatar = avat;
+      st.account.realm = { idx: 10, name: '结丹中期', group: 'jindan', honor: '金丹真人' };
+      st.rules.avatar = extraRules === undefined
+        ? {
+            enabled: true,
+            groups: [
+              {
+                id: 'base', label: '基础', hint: '开户即全部解锁',
+                rows: [
+                  { key: 'bull', name: '死多头', unlock: { type: 'base', value: null, text: '' } },
+                  { key: 'bear', name: '大空头', unlock: { type: 'base', value: null, text: '' } },
+                ],
+              },
+              {
+                id: 'broker', label: '门派', hint: '',
+                rows: [{ key: 'broker-huatai', name: '滑泰快枪手', unlock: { type: 'broker', value: 'huatai', text: '转户到滑泰证券后解锁' } }],
+              },
+            ],
+          }
+        : extraRules;
+      return st;
+    };
+
+    // ---- ① 顶栏头像按 key 渲染，环色 = 境界分组（class，不是内联 style）----
+    api.setState(mkAvatarState({ key: 'bull', name: '死多头', chosen: false, unlocked: ['bull', 'bear'] }));
+    api.setAvatarCatalog(api.setState ? undefined : undefined); // 目录由 onState 缓存，这里直接注入
+    api.setAvatarCatalog(mkAvatarState(null).rules.avatar);
+    api.setAvaTopSig('');
+    api.renderTopAvatar();
+    const btn = api.avaBtn();
+    assert(!btn.hidden, '顶栏头像可见');
+    assert(/g-jindan/.test(btn.cls), `环色 class = g-jindan（实际 ${btn.cls}）`);
+    assert(api.avaImg().src === '/img/avatar-bull-96.png', `≤40px 取 -96 档（${api.avaImg().src}）`);
+    assert(/换一张脸/.test(btn.title), 'title 说明这是换脸入口');
+    const topHtml = api.avaHtml('bull', 26, 'jindan', '死多头');
+    assert(topHtml.indexOf('style=') < 0, '头像 HTML 里**没有内联 style**（CSP style-src self 会静默拦掉）');
+    assert(/g-jindan/.test(topHtml), '环色靠 g-<group> class 传递');
+    assert(new RegExp(`avatar-bull-96\\.png`).test(topHtml), '26px 用 96 档');
+    assert(new RegExp(`avatar-bull-192\\.png`).test(api.avaHtml('bull', 64, 'jindan', '死多头')), '64px 用 192 档');
+
+    // ---- ② 排行榜行带头像；「我」按账号认 ----
+    const st = mkAvatarState({ key: 'bull', name: '死多头', chosen: true, unlocked: ['bull', 'bear'] });
+    st.players = [
+      { account: 'user001', name: '老王', equity: 1100000, ava: 'bull', broker: 'zhongxin', brokerRank: 1, star: 1, realm: { idx: 10, group: 'jindan', name: '结丹中期', short: '金丹' } },
+      { account: 'user002', name: '老王', equity: 1000000, ava: 'bear', broker: 'huatai', brokerRank: 1, star: 1, realm: null },
+    ];
+    api.setState(st);
+    api.setBrokers({ zhongxin: { name: '钟信证券', abbr: '钟信' }, huatai: { name: '滑泰证券', abbr: '滑泰' } });
+    const rows = api.rankRowsHtml(20);
+    assert(/avatar-bull-96\.png/.test(rows) && /avatar-bear-96\.png/.test(rows), '两个重名「老王」靠头像区分');
+    assert((rows.match(/class="ava s22/g) || []).length === 2, '排行榜每行一个 22px 头像');
+
+    // ---- ③ 锁卡：只出文案、不发请求 ----
+    resetFetch();
+    api.avaCellClick({ getAttribute: (k) => ({ 'data-locked': '1', 'data-unlock': '转户到滑泰证券后解锁' }[k]) });
+    assert(fetchCalls.length === 0, '点锁卡不发请求（省一次 403）');
+
+    // ---- ④ 可换卡：只打一次 /api/avatar，body 只有 {key} ----
+    scriptFetch({ ok: true, avatar: { key: 'bear', name: '大空头', chosen: true, unlocked: ['bull', 'bear'] } });
+    api.avaCellClick({ getAttribute: (k) => ({ 'data-locked': '0', 'data-key': 'bear' }[k]) });
+    await flush();
+    await flush();
+    const posts = fetchCalls.filter((c) => c.url === '/api/avatar');
+    assert(posts.length === 1, `只打一次 /api/avatar（实际 ${posts.length} 次）`);
+    assert(posts[0] && JSON.stringify(posts[0].body) === JSON.stringify({ key: 'bear' }),
+      `body 只有 {key}（${posts[0] && JSON.stringify(posts[0].body)}）`);
+    assert(api.avaImg().src === '/img/avatar-bear-96.png', '换脸成功后顶栏原地刷新成新脸');
+    assert(fetchCalls.filter((c) => c.url === '/api/state').length === 0, '换脸不重拉 /api/state（下一帧自然就变）');
+    resetFetch();
+
+    // ---- ⑤ 裂图降级：图隐藏、首字兜位（宽高已固定，行高不跳）----
+    const fakeImg = { hidden: false, nextElementSibling: { hidden: true } };
+    api.onAvaImgError(fakeImg);
+    assert(fakeImg.hidden === true && fakeImg.nextElementSibling.hidden === false, 'onerror → 图隐藏、首字可见');
+
+    // ---- ⑥ 老服务端（没有 rules.avatar）：不渲染、不报错 ----
+    let threw = false;
+    try {
+      api.setState(mkAvatarState({ key: 'bull', name: '死多头', chosen: true, unlocked: [] }, null));
+      api.setAvaTopSig('');
+      api.renderTopAvatar();
+    } catch (e) {
+      threw = true;
+    }
+    assert(!threw, '服务端没下发 rules.avatar 时不抛错');
+    assert(api.avaBtn().hidden === true, '没有头像目录时顶栏不渲染头像（老服务端照常能用）');
+
+    // ---- ⑦ 首次引导：没主动选过 → 金点 + 一次 toast；选过就不再提示 ----
+    delete store.gushen_ava_seen; // 清掉「已看过引导」水位（桩 localStorage 就是这个对象）
+    api.setAvaIntroShown(false);
+    api.setState(mkAvatarState({ key: 'bull', name: '韭菜本菜', chosen: false, unlocked: ['bull'] }));
+    api.setAvaTopSig('');
+    api.renderTopAvatar();
+    assert(api.avaNewHidden() === false, '没选过脸 → 顶栏头像挂金点');
+    api.setState(mkAvatarState({ key: 'bull', name: '死多头', chosen: true, unlocked: ['bull'] }));
+    api.renderTopAvatar();
+    assert(api.avaNewHidden() === true, '主动选过 → 金点消失');
+    api.markAvaSeen();
+    assert(api.avaSeenStored() === '1', '点开弹层即记下"已看过引导"（只提示一次）');
+
+    // ---- ⑧ 弹层卡片：三态（已选 / 可换 / 锁定）+ 条件文案来自服务端 ----
+    api.setState(mkAvatarState({ key: 'bull', name: '死多头', chosen: true, unlocked: ['bull', 'bear'] }));
+    const cells = api.avaCellsHtml();
+    assert(/ava-cell cur/.test(cells), '当前那张标 cur（金环 + 勾）');
+    assert(/data-locked="1"/.test(cells) && /转户到滑泰证券后解锁/.test(cells), '未解锁的卡带 data-locked 与服务端文案');
+    assert(/ava-lock/.test(cells), '锁卡有锁图标');
+    assert((cells.match(/avatar-[a-z-]+-192\.png/g) || []).length === 3, '弹层 64px 卡取 -192 档');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

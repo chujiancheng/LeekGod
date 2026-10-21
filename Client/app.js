@@ -1438,6 +1438,8 @@
     });
     // 改昵称：昵称只是展示名，随时可改、不要求唯一，所以这里只校验格式
     bindNickDialog();
+    // 头像：顶栏 26px 是唯一入口（Doc/头像方案.md §7.4）
+    bindAvaDialog();
     // 主题：顶栏常驻入口 + 选择弹窗
     $('themeBtn').addEventListener('click', openThemePicker);
     $('themeConfirmBtn').addEventListener('click', () => {
@@ -1509,6 +1511,248 @@
     el.textContent = myNick || me || '--';
     el.title = me ? `账号：${me}（登录凭据，不可改）` : '';
     renderRealmChip();
+    renderTopAvatar();
+  }
+
+  // ---------- 头像（Doc/头像方案.md） ----------
+  // 与「外观 / 吉祥物」的语义分工（§2.1）：吉祥物是**只有自己看得见**的桌面摆件（localStorage），
+  // 头像是**别人在榜单/股东榜里看到的脸**（落库、服务端权威）。两者入口、文案、存储全分家。
+  // 目录整表只在首屏下发（lite 帧只有 enabled），拿到一次就缓存——同 realmLadder 的取舍
+  let avatarCatalog = null;
+  let avaCatalogPending = false;
+  const AVA_SEEN_KEY = 'gushen_ava_seen'; // 首次引导只提示一次（§8.1）
+  let avaIntroShown = false;
+  // 'off' 是"当前没有头像"的哨兵值：用它而不是空串，才能区分
+  // 「服务端撤回/关掉了头像」（要隐藏）与「还没渲染过」（什么都不用做）
+  let avaTopSig = 'off';
+
+  /** 两档图：≤40 CSS px 用 -96，>40 用 -192（§4.2）。**不引用 512 母版** */
+  function avatarSrc(key, size) {
+    return '/img/avatar-' + encodeURIComponent(key) + '-' + (size > 40 ? 192 : 96) + '.png';
+  }
+
+  /** 当前账户的大境界（环色用它）。没有 realm（彩蛋/境界关掉）→ 中性灰 */
+  function myRealmGroup() {
+    return (state && state.account && state.account.realm && state.account.realm.group) || 'mortal';
+  }
+
+  /**
+   * 头像 HTML。两个坑写在代码里：
+   * ① **环色不许写内联 style**：CSP 是 `style-src 'self'`，内联样式被拦后节点还在、
+   *    样式静默作废（本项目真踩过）——所以走 `g-<realm.group>` class 映射 `--rtone`；
+   * ② **不许写内联 onerror**：`script-src 'self'` 同样会拦，裂图兜底由 bindAvaFallback
+   *    用 addEventListener 挂（见 §4.6）。
+   */
+  function avaHtml(key, size, group, name) {
+    if (!key) return '';
+    const ch = String(name || '?').slice(0, 1);
+    return (
+      '<span class="ava s' + size + ' g-' + esc(group || 'mortal') + '">' +
+        '<img class="ava-img" src="' + esc(avatarSrc(key, size)) + '" alt="" width="' + size +
+        '" height="' + size + '" decoding="async">' +
+        '<span class="ava-ch" hidden>' + esc(ch) + '</span>' +
+      '</span>'
+    );
+  }
+
+  /** 裂图降级（§4.6）：图隐藏、首字兜位。`<img>` 宽高已固定，行高列宽不会因此错位 */
+  function onAvaImgError(img) {
+    if (!img) return;
+    img.hidden = true;
+    const ch = img.nextElementSibling;
+    if (ch) ch.hidden = false;
+  }
+
+  function bindAvaFallback(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    root.querySelectorAll('img.ava-img').forEach((img) => {
+      if (img.getAttribute('data-ava-bound')) return;
+      img.setAttribute('data-ava-bound', '1');
+      img.addEventListener('error', () => onAvaImgError(img));
+    });
+  }
+
+  /**
+   * 顶栏头像（26px，唯一入口）。只在"外观"真的变了才动 DOM：
+   * 它挂在顶栏、每帧都会被调到，每帧重写 src 会让浏览器反复查缓存（同 renderRealmChip 的取舍）。
+   */
+  function renderTopAvatar() {
+    const btn = $('avaBtn');
+    if (!btn) return;
+    const av = state && state.account && state.account.avatar;
+    const on = !!(state && state.rules && state.rules.avatar && state.rules.avatar.enabled);
+    if (!on || !av || !av.key) {
+      if (avaTopSig !== 'off') {
+        avaTopSig = 'off';
+        btn.hidden = true;
+      }
+      return;
+    }
+    const group = myRealmGroup();
+    const sig = av.key + '|' + group;
+    if (sig !== avaTopSig) {
+      avaTopSig = sig;
+      btn.hidden = false;
+      // 三个类缺一不可：`ava` 给 box-shadow 环与 --rtone 的消费点，`s26` 给环宽档，
+      // `g-<group>` 给环色。只写 `ava-top g-…` 时 <button> 一条 `.ava` 规则都吃不到，
+      // 环就静默不存在——真机上只表现为"少了圈细边"，headless 里查 box-shadow 才看得见
+      btn.className = 'ava ava-top s26 g-' + group;
+      const img = $('avaImg');
+      if (img) {
+        img.hidden = false;
+        img.src = avatarSrc(av.key, 26);
+      }
+      const ch = $('avaCh');
+      if (ch) {
+        ch.hidden = true;
+        ch.textContent = String(av.name || '?').slice(0, 1);
+      }
+      btn.title = '换一张脸（当前：' + (av.name || av.key) + '）';
+    }
+    maybeAvaIntro(av);
+  }
+
+  /** 首次引导（§8.1）：从没主动选过的人给一个金点 + 一条 toast，**只提示一次** */
+  function maybeAvaIntro(av) {
+    let seen = false;
+    try { seen = localStorage.getItem(AVA_SEEN_KEY) === '1'; } catch (e) { /* 隐私模式忽略 */ }
+    const dot = $('avaNew');
+    if (dot) dot.hidden = seen || !!av.chosen;
+    if (seen || av.chosen || avaIntroShown) return;
+    avaIntroShown = true;
+    toast('给你配了张脸：' + (av.name || '已就绪') + '。不合眼缘？点顶栏头像换。');
+  }
+
+  function markAvaSeen() {
+    try { localStorage.setItem(AVA_SEEN_KEY, '1'); } catch (e) { /* 忽略 */ }
+    const dot = $('avaNew');
+    if (dot) dot.hidden = true;
+  }
+
+  /** 换脸弹层的卡片（四组：已解锁=可点，未解锁=灰 + 锁 + 条件文案） */
+  function avaCellsHtml() {
+    const cat = avatarCatalog;
+    const cur = state && state.account && state.account.avatar ? state.account.avatar : null;
+    const unlocked = new Set((cur && cur.unlocked) || []);
+    if (!cat || !Array.isArray(cat.groups) || !cat.groups.length) {
+      return '<div class="panel-sub">头像目录还没到手，稍等一下或刷新页面。</div>';
+    }
+    const group = myRealmGroup();
+    return cat.groups.map((g) => {
+      const cells = g.rows.map((r) => {
+        const isCur = !!(cur && cur.key === r.key);
+        const ok = unlocked.has(r.key);
+        const cls = 'ava-cell' + (isCur ? ' cur' : '') + (ok ? '' : ' locked');
+        return (
+          '<button class="' + cls + '" type="button" data-key="' + esc(r.key) + '"' +
+            ' data-locked="' + (ok ? '0' : '1') + '"' +
+            ' data-unlock="' + esc((r.unlock && r.unlock.text) || '') + '"' +
+            ' title="' + esc(r.name) + '">' +
+            avaHtml(r.key, 64, group, r.name) +
+            '<span class="ava-name">' + esc(r.name) + '</span>' +
+            (isCur ? '<span class="ava-tick" aria-hidden="true">✓</span>' : '') +
+            (ok ? '' : '<span class="ava-lock" aria-hidden="true">🔒</span>') +
+          '</button>'
+        );
+      }).join('');
+      return (
+        '<div class="ava-group">' +
+          '<div class="ava-group-head"><b>' + esc(g.label) + '</b><span>' + esc(g.hint) + '</span></div>' +
+          '<div class="ava-grid">' + cells + '</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function renderAvaCells() {
+    const box = $('avaGroups');
+    if (!box) return;
+    box.innerHTML = avaCellsHtml();
+    bindAvaFallback(box);
+  }
+
+  /** 目录没拿到（切号 / 刷新竞态）时补拉一次：整表只在首屏 /api/state 里 */
+  function ensureAvatarCatalog() {
+    if (avatarCatalog || avaCatalogPending) return;
+    avaCatalogPending = true;
+    apiGet('/api/state')
+      .then((r) => r.json())
+      .then((s) => {
+        const av = s && s.rules && s.rules.avatar;
+        if (av && Array.isArray(av.groups) && av.groups.length) {
+          avatarCatalog = av;
+          renderAvaCells();
+        }
+      })
+      .catch(() => { /* 下一帧再说 */ })
+      .then(() => { avaCatalogPending = false; });
+  }
+
+  function openAvaOverlay() {
+    ensureAvatarCatalog();
+    renderAvaCells();
+    $('avaOverlay').classList.remove('hidden');
+    markAvaSeen();
+  }
+
+  /** 换脸动效（§8.2）：原地翻牌 300ms。reduced-motion 在 CSS 里直接关掉 */
+  function flipTopAvatar() {
+    const btn = $('avaBtn');
+    if (!btn || !btn.classList) return;
+    btn.classList.remove('flip');
+    btn.classList.add('flip');
+    setTimeout(() => btn.classList.remove('flip'), 340);
+  }
+
+  /** 换脸：只打一次 `/api/avatar`，body 只有 `{key}` */
+  function pickAvatar(key) {
+    const cur = state && state.account && state.account.avatar;
+    if (cur && cur.key === key) return; // 点自己那张脸不发请求
+    apiPost('/api/avatar', { key })
+      .then((r) => r.json())
+      .then((res) => {
+        if (!res.ok) {
+          toast(res.error || '换脸失败', 'err');
+          return;
+        }
+        if (state && state.account) state.account.avatar = res.avatar;
+        avaTopSig = ''; // 保险：key 变了本来就该变，清掉签名强制重刷
+        renderTopAvatar();
+        renderAvaCells();
+        flipTopAvatar();
+        toast('换脸成功。名字没变，人设变了。');
+      })
+      .catch(() => toast('网络抖动，这次没换成', 'err'));
+  }
+
+  /**
+   * 点一张卡。锁卡只出服务端给的文案、**不发请求**（省一次 403）；
+   * 服务端仍会校验——前端拦截只是体验，不是安全边界。
+   * 抽成独立函数是为了让离线自检能直接调它（桩 DOM 没有 closest / 事件冒泡）
+   */
+  function avaCellClick(cell) {
+    if (!cell) return;
+    if (cell.getAttribute('data-locked') === '1') {
+      toast(cell.getAttribute('data-unlock') || '这张脸还没解锁');
+      return;
+    }
+    pickAvatar(cell.getAttribute('data-key'));
+  }
+
+  function bindAvaDialog() {
+    const btn = $('avaBtn');
+    if (btn) btn.addEventListener('click', openAvaOverlay);
+    const close = $('avaCloseBtn');
+    if (close) close.addEventListener('click', () => $('avaOverlay').classList.add('hidden'));
+    const img = $('avaImg');
+    if (img) img.addEventListener('error', () => onAvaImgError(img));
+    const box = $('avaGroups');
+    if (box) {
+      box.addEventListener('click', (e) => {
+        const t = e && e.target;
+        avaCellClick(t && typeof t.closest === 'function' ? t.closest('.ava-cell') : null);
+      });
+    }
   }
 
   /**
@@ -1868,7 +2112,12 @@
     if (s.rules && s.rules.realm && Array.isArray(s.rules.realm.ladder) && s.rules.realm.ladder.length) {
       realmLadder = s.rules.realm;
     }
+    // 头像目录同款：整表只在首屏下发，缓存一份给换脸弹层用（增量帧只有 enabled）
+    if (s.rules && s.rules.avatar && Array.isArray(s.rules.avatar.groups) && s.rules.avatar.groups.length) {
+      avatarCatalog = s.rules.avatar;
+    }
     renderRealmChip();
+    renderTopAvatar();
     // 服务端是昵称的权威（别的标签页改过名 / 改名请求刚回来）：跟着它同步顶栏
     if (s.account && s.account.nick && s.account.nick !== myNick) {
       myNick = s.account.nick;
@@ -3149,7 +3398,7 @@
           const openCell = `<span class="${cls(h.change)}">${h.change > 0 ? '+' : ''}${fmtQty(h.change)} 股</span><span class="delta-sub ${cls(h.changePct)}">${h.changePct > 0 ? '+' : ''}${h.changePct.toFixed(2)}pp</span>`;
           return `<tr${mine ? ' class="row-mine"' : ''} data-holder="${esc(h.account)}" data-nick="${esc(h.name)}">
             <td>${i + 1}</td>
-            <td>${esc(h.name)}${mine ? '（我）' : ''}${
+            <td>${avaHtml(h.ava, 18, h.realm && h.realm.group, h.name)}${esc(h.name)}${mine ? '（我）' : ''}${
               h.realm && h.realm.idx > 0
                 ? `<span class="realm-chip sm g-${esc(h.realm.group)}" title="${esc(h.realm.honor || '')}">${esc(h.realm.short || h.realm.name)}</span>`
                 : ''
@@ -3162,7 +3411,8 @@
           </tr>`;
         })
         .join('') || emptyHtml;
-
+    // 18px 小头像的裂图兜底同样要挂在这次 innerHTML 之后
+    bindAvaFallback($('holdersBody'));
     // 弹窗开着时，服务端又快照了一次（我刚操作过）就顺手刷新，免得看的是旧曲线
     if (holderHistName && !holderFetching) {
       const mine = holderHist && holderHist.snapshots;
@@ -3612,7 +3862,7 @@
             : '';
         return `<tr${mine ? ' class="row-mine"' : ''}>
           <td>${i + 1}</td>
-          <td>${esc(p.name)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
+          <td>${avaHtml(p.ava, 22, p.realm && p.realm.group, p.name)}${esc(p.name)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
         </tr>`;
@@ -3622,6 +3872,8 @@
 
   function renderRank() {
     $('rankBody').innerHTML = rankRowsHtml() || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
+    // 榜单每 700ms 整块重写：裂图兜底得在写完之后重新挂一次（新节点没有监听器）
+    bindAvaFallback($('rankBody'));
     renderBrokerBoard();
   }
 

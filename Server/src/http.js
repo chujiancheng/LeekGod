@@ -62,6 +62,8 @@ const DOC_FILES = {
  * ③ 主题吉祥物立绘 `/img/mascot-<key>.png`（1024 原图，留给以后的大图位）、
  *    `-256`（主页 hero 高 120px，2 倍屏 240px 够用）与 `-96`（选择卡 + 彩蛋横幅头像）。
  * ④ 开户四宫格漫画 `/img/comic-<set><n>.png`（4 套 × 4 格，512px；开户弹层逐格展示）。
+ * ⑤ 玩家头像 `/img/avatar-<key>-96.png` 与 `-192.png`（循环 `config.avatar.catalog` 注册，
+ *    见 Doc/头像方案.md §4.2：≤40 CSS px 用 96，>40 用 192）。
  *
  * **按 key 白名单生成，不做目录直出**：静态服务一律白名单，路径既不能拼用户输入、
  * 也不能走出指定目录（避免 `../` 穿越）。图标文件缺失时不注册，请求落到 404，
@@ -99,6 +101,13 @@ for (const s of config.stocks) registerImg(`company-${s.id}.png`, 'lg');
 registerImg('waifu-group-poster.png', 'lg');
 // 公司徽记 logo：手绘 SVG（矢量、单文件 <2KB），档案卡 40px / 顶栏 24px / 切换栏 14px 三档复用
 for (const s of config.stocks) registerImg(`company-logo-${s.id}.svg`, 'md', 'image/svg+xml');
+// 玩家头像（Doc/头像方案.md §4.5）：**循环 config.avatar.catalog 注册两档**，
+// 漏一个 key = 线上 404 裂图（老坑）。≤40px 用 -96，>40px 用 -192；
+// 两档都以 512 母版派生，**不要**在这里引用母版（33 张 × 512 ≈ 6~10MB）
+for (const row of (config.avatar && config.avatar.catalog) || []) {
+  registerImg(`avatar-${row.key}-96.png`, 'sm');
+  registerImg(`avatar-${row.key}-192.png`, 'md');
+}
 
 // 安全响应头。CSP 不放开 unsafe-inline：前端不使用内联 style 属性与内联脚本。
 const SECURITY_HEADERS = {
@@ -408,6 +417,19 @@ function createServer(game, options) {
         const body = await readBody(req);
         const r = game.setNickFor(bearerToken(req), body.nick);
         return json(res, r.ok ? 200 : 400, r);
+      }
+
+      // ---- 换脸：只认会话令牌，走已有的 write 限流档（换脸是低频操作，不新开一档）----
+      // 响应码与方案 §6.1 的表对齐：400 参数/没有这张脸、403 未解锁（带 unlock 文案）、200 正常。
+      // 判定全在 avatar.js，这里不写任何 if-else 规则
+      if (p === '/api/avatar' && req.method === 'POST') {
+        if (!guardWrite(req, res, ip, limiters.write)) return;
+        const body = await readBody(req);
+        const r = game.setAvatarFor(bearerToken(req), body.key);
+        // 未登录统一 401（与其它账户接口同口径），别让 403 去承担"没令牌"的语义
+        const code = r.ok ? 200 : r.status || 400;
+        const out = r.ok ? r : { ok: false, error: r.error, unlock: r.unlock };
+        return json(res, code, out);
       }
 
       // ---- 开放接口自助管理：网页上签发 / 查看 / 撤销自己的 API Key ----

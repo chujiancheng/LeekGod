@@ -18,6 +18,7 @@ const flow = require('./flow');
 const broker = require('./broker');
 const milestones = require('./milestones');
 const realm = require('./realm');
+const avatar = require('./avatar');
 const { WhaleManager } = require('./llm/whales');
 const { DanmakuSystem } = require('./danmaku');
 
@@ -260,6 +261,9 @@ class Game {
       acc.freeInterestDay = row.free_interest_day == null ? null : row.free_interest_day;
       // 彩蛋里程碑：NPC 恒为 null（不判不落盘），只有玩家有状态
       acc.milestones = acc.isNPC ? null : milestones.parse(safeParseJson(row.milestones, null));
+      // 头像：NULL = 从没主动选过（按账号哈希派生）；broker_seen 是逗号串（NULL = 老档，见 avatar.brokerSeenOf）
+      acc.avatar = acc.isNPC ? null : row.avatar || null;
+      acc.brokerSeen = acc.isNPC || !row.broker_seen ? [] : String(row.broker_seen).split(',').filter(Boolean);
       this.store.put(acc);
       byName.set(acc.name, acc);
     }
@@ -1127,6 +1131,9 @@ class Game {
     acc.broker = key;
     acc.brokerChangedAt = opts.now == null ? Date.now() : opts.now;
     acc.brokerSinceDay = day;
+    // 头像的「待过的券商」：开户与转户两条路都从这里过，所以只记这一处。
+    // 只增不减 = 转户不收回旧门派的脸（Doc/头像方案.md §3.3）。NPC 不记（不落盘）
+    if (!acc.isNPC) avatar.markBrokerSeen(acc, key);
     const rec = broker.statsOf(acc, key);
     rec.profitBase = acc.realizedPnL || 0;
     // 开户礼（体验金）：**同时加进现金与已实现盈亏**，保住「权益 = 初始资金 + 已实现盈亏
@@ -1356,6 +1363,27 @@ class Game {
     return r;
   }
 
+  /**
+   * 换脸（带令牌的入口）。判定内核在 `avatar.js`，这里只负责"落盘 + 广播"。
+   *
+   * 为什么不发新的 SSE 事件：换脸只改 `account.avatar` 与榜单的 `ava`，
+   * **下一帧自然就变了**（与改昵称同一条口径，方案 §6.1）。广播一帧只为让
+   * 其他在线玩家的榜单立刻刷新，不然要等下一个 tick。
+   */
+  setAvatarFor(token, key) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, status: 401, error: '请先登录' };
+    const before = acc.avatar;
+    const r = avatar.set(acc, key);
+    if (!r.ok) return r;
+    if (!r.unchanged) {
+      this.persist?.touch(acc);
+      // 日志只记 key，不记路径、不记图（方案 §6.1）
+      logger.info(`[我是股神] 头像 ${acc.name}: ${before || '（派生）'} → ${acc.avatar}`);
+      this.broadcast();
+    }
+    return r;
+  }
 
   /** 同一账户只保留最近的若干令牌，避免 sessions 无限增长 */
   trimSessions(name) {
@@ -1839,6 +1867,9 @@ class Game {
         realm: opts.lite
           ? { enabled: !!config.realm.enabled }
           : Object.assign({ enabled: !!config.realm.enabled }, realm.ladderForClient()),
+        // 头像目录（33 行 ≈ 2.6KB）同样只在首屏下发；lite 帧只留 `enabled`。
+        // 客户端**必须缓存首帧那份**（同 realmLadder 的处理）——弹层靠它渲染整表
+        avatar: opts.lite ? { enabled: !!(config.avatar && config.avatar.enabled) } : avatar.catalogForClient(),
     };
   }
 
@@ -2034,6 +2065,10 @@ class Game {
       // 修仙境界（Doc/头衔方案.md）：徽标显示**已确认境界**（收盘判定），
       // 盘中越过下一档只用 `pending` 提示——跟着 tick 跳会闪成刷屏
       realm: acc.milestones ? realm.view(acc.milestones, { equity }) : null,
+      // 头像（Doc/头像方案.md）：**永远有值**（没选过就是派生脸），所以榜单上不会出现空头像位。
+      // 只给 key + 名字 + 已解锁列表，不给路径——拼图是客户端的事（§6.3）。
+      // `unlocked` 跟着账户段走（每连接一份 ≈200B），换脸弹层靠它标锁卡，**不用**再拉一次接口
+      avatar: avatar.stateOf(acc),
       // 追保预警（§7 彩蛋）：跌破维持线但还没到强平线时给一条通知，
       // 文案随券商风格变（钟信=正式公函体、天疯=没有这一档，破线即全平）
       marginCall: this.marginCallFor(acc, now),
@@ -2179,6 +2214,8 @@ class Game {
         return {
           account: a.name,
           name: Game.displayName(a),
+          // 头像：20 行 × 一个 key ≈ 280 B/帧，用来解决"榜上两个老王"的识别问题（方案 §6.4）
+          ava: avatar.brief(a),
           equity,
           broker: a.broker || null,
           star: a.broker ? broker.starOf(a, a.broker) : 1,
@@ -2251,6 +2288,8 @@ class Game {
       t: now,
       account: acc.name,
       name: Game.displayName(acc),
+      // 持仓弹窗头 44px 的第一眼：看别人仓位时先认脸（方案 §7.1）
+      avatar: avatar.of(acc),
       broker: acc.broker || null,
       star: acc.broker ? broker.starOf(acc, acc.broker) : 1,
       equity: r2(acc.equity(priceOf)),
@@ -2424,6 +2463,9 @@ class Game {
       rows.push({
         account: acc.name, // 快照与"我"的判定都按账号走，昵称改名不影响
         name: Game.displayName(acc),
+        // 头像 key：股东榜 30 行看起来像"一群股东"而不是 30 个字符串（方案 §7.1）。
+        // NPC 是现算的派生脸，不落盘、不标脏
+        ava: avatar.brief(acc),
         role, // inst / hot / big / mid / small / whale / player
         ai: !!acc.ai,
         aiLabel: acc.aiLabel || null,
@@ -2527,6 +2569,7 @@ class Game {
         return {
           account: h.account,
           name: h.name,
+          ava: h.ava || null, // 由 computeTopHolders 一并算好，这里只做强透传
           role: h.role,
           ai: !!h.ai,
           aiLabel: h.aiLabel || null,

@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "set NPC_LLM=0&& node test/market.test.js && node test/game.test.js && node test/persist.test.js && node test/multi.test.js && node test/flow.test.js && node test/broker.test.js && node test/milestones.test.js && node test/realm.test.js && node test/danmaku.test.js && node test/llm.test.js && node test/openapi.test.js && node test/portal.test.js && node test/day.test.js"
+    "test": "set NPC_LLM=0&& node test/market.test.js && node test/game.test.js && node test/persist.test.js && node test/multi.test.js && node test/flow.test.js && node test/broker.test.js && node test/milestones.test.js && node test/realm.test.js && node test/danmaku.test.js && node test/llm.test.js && node test/openapi.test.js && node test/portal.test.js && node test/day.test.js && node test/avatar.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
