@@ -372,6 +372,10 @@ function openDatabase(file) {
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
+  // WAL checkpoint 阈值 4MB→64MB：存档已挪到机械盘（D:/GushenData），默认 4MB 一轮的
+  // 被动 checkpoint 几乎每 tick 触发一次（写速率 ~3MB/s），HDD 随机回写慢会拖长 tick；
+  // 调大后 checkpoint 低频且更顺序。代价仅是崩溃恢复时要多重放一段 WAL，可接受。
+  db.pragma('wal_autocheckpoint = 16000');
   db.exec(DDL);
 
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();

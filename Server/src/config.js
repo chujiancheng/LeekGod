@@ -42,8 +42,10 @@ const config = {
   // 持久化（账号 / 持仓 / 活动委托 / 成交流水 / 令牌 / 行情断点）
   persistence: {
     enabled: process.env.PERSIST !== '0',
-    // 相对 Server 目录；想开新一局直接删掉这个文件
-    file: process.env.PERSIST_FILE || 'data/game.db',
+    // 正式存档在 D 盘机械硬盘（2026-10-20 起，原 data/game.db）：实测 SSD 上常年 ~6MB/s
+    // 小页随机写（~530GB/天），挪去机械盘省 SSD 磨损。目录不存在会自动创建（db.js）。
+    // 验收/调试仍必须用 PERSIST_FILE 显式指临时库，别碰正式档；想开新一局直接删掉这个文件。
+    file: process.env.PERSIST_FILE || 'D:/GushenData/game.db',
     // 兜底全量扫描：每 tick 轮转写入 1/sweepTicks 的账户。
     // 正常路径靠脏标记精确落盘，这里是防御"某条改钱路径漏标脏"的保险，设为 0 关闭
     sweepTicks: 300,

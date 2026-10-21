@@ -60,8 +60,10 @@ Server 需要 npm 依赖（log4js 日志 + better-sqlite3 存档）。新环境�
 否则 node index.js 会直接报模块找不到、服务起不来。
 
 # 数据存档
-账号/持仓/挂单/成交流水/令牌/行情断点存在 Server/data/game.db（SQLite），重启会接着上一局继续。
-想开新一局：停服后删掉 Server/data/game.db（连同 -wal / -shm）再启动。
+账号/持仓/挂单/成交流水/令牌/行情断点存在 **D:/GushenData/game.db**（SQLite+WAL，2026-10-20 从
+Server/data/ 迁到 D 盘机械硬盘，为省 SSD 磨损；路径在 Server/src/config.js `persistence.file`）。
+重启会接着上一局继续。想开新一局：停服后删掉 D:/GushenData/game.db（连同 -wal / -shm）再启动。
+WAL checkpoint 阈值已调大到 64MB（db.js `wal_autocheckpoint`，机械盘配套）。
 
 # 验收 / 调试不要污染正式存档
 正式存档只放真实对局数据。跑验收、调试、截图这类验证时，用 PERSIST_FILE 指向一个临时库，
