@@ -140,6 +140,21 @@
     });
   }
 
+  /**
+   * 自动缩号：从 basePx 起把 text 量宽，放不进 maxWidth 就降 2px 重试，
+   * 到 minPx 为止（保证可读）。结束时 g.font 已设好，返回最终字号。
+   * 战绩卡是固定 750 宽画布，昵称/资产数字/链接都可能很长，全靠它兜底不叠字。
+   */
+  function fitFont(g, text, weight, basePx, maxWidth, minPx) {
+    let px = basePx;
+    g.font = weight + ' ' + px + 'px sans-serif';
+    while (px > minPx && g.measureText(text).width > maxWidth) {
+      px -= 2;
+      g.font = weight + ' ' + px + 'px sans-serif';
+    }
+    return px;
+  }
+
   /** 我的排名（players 已按总资产降序，与排行页口径一致）；不在榜返回 0 */
   function myRank() {
     const st = GS.core.S.state;
@@ -239,13 +254,15 @@
       g.stroke();
       g.restore();
 
-      // 昵称 + 境界/券商/交易日
+      // 昵称 + 境界/券商/交易日（都可能很长，居中缩号防出卡）
+      g.textAlign = 'center';
+      const nick = String(a.nick || a.account || '');
       g.fillStyle = C.ink;
-      g.font = '700 42px sans-serif';
-      g.fillText(String(a.nick || a.account || ''), cx, 505);
+      fitFont(g, nick, '700', 42, W - 120, 28);
+      g.fillText(nick, cx, 505);
       g.fillStyle = C.sub;
-      g.font = '400 28px sans-serif';
       const meta = [realm, broker, day ? '第 ' + day + ' 交易日' : ''].filter(Boolean).join(' · ');
+      fitFont(g, meta, '400', 28, W - 120, 20);
       g.fillText(meta, cx, 556);
 
       // 资产面板
@@ -256,34 +273,43 @@
       g.lineWidth = 2;
       g.stroke();
 
+      // 右侧名次区先量宽，给左边的大数字留出预算
+      g.textAlign = 'right';
+      const rankTxt = rank ? '第 ' + rank + ' 名' : '未进前 50';
+      const playersTxt = '全服 ' + players + ' 位玩家';
+      g.fillStyle = C.ink;
+      fitFont(g, rankTxt, '700', 40, 220, 30);
+      g.fillText(rankTxt, W - 110, 730);
+      const rankW = g.measureText(rankTxt).width; // 用名次自己的字号量
+      g.fillStyle = C.sub;
+      g.font = '400 26px sans-serif';
+      g.fillText(playersTxt, W - 110, 775);
+      const rightW = Math.max(rankW, g.measureText(playersTxt).width);
+      // 左列可用地宽：面板左缘 110 到右列文字起点再留 24 间隙
+      const leftMax = (W - 110) - 110 - rightW - 24;
+
       g.textAlign = 'left';
       g.fillStyle = C.sub;
       g.font = '400 26px sans-serif';
       g.fillText('总资产', 110, 665);
+      const eqTxt = '¥' + fmtMoney(equity);
       g.fillStyle = eqCls === 'down' ? C.green : eqCls === 'up' ? C.red : C.ink;
-      g.font = '700 76px sans-serif';
-      g.fillText('¥' + fmtMoney(equity), 110, 750);
+      fitFont(g, eqTxt, '700', 76, leftMax, 38);
+      g.fillText(eqTxt, 110, 750);
       const fTxt = '浮动盈亏 ' + (float >= 0 ? '+' : '') + fmtAmt(float);
       g.fillStyle = float > 0 ? C.red : float < 0 ? C.green : C.sub;
-      g.font = '600 32px sans-serif';
+      fitFont(g, fTxt, '600', 32, leftMax, 24);
       g.fillText(fTxt, 110, 810);
 
-      g.textAlign = 'right';
-      g.fillStyle = C.ink;
-      g.font = '700 40px sans-serif';
-      g.fillText(rank ? '第 ' + rank + ' 名' : '未进前 50', W - 110, 730);
-      g.fillStyle = C.sub;
-      g.font = '400 26px sans-serif';
-      g.fillText('全服 ' + players + ' 位玩家', W - 110, 775);
-
-      // 底部：slogan + 链接
+      // 底部：slogan + 链接（链接长短随服务器地址变，同样缩号）
       g.textAlign = 'center';
       g.fillStyle = C.sub;
       g.font = '400 24px sans-serif';
       g.fillText('模拟盘游戏 · 行情与资金均为虚构 · 不构成投资建议', cx, 930);
+      const urlTxt = '来和我同台竞技：' + siteUrl();
       g.fillStyle = C.brand;
-      g.font = '600 30px sans-serif';
-      g.fillText('来和我同台竞技：' + siteUrl(), cx, 972);
+      fitFont(g, urlTxt, '600', 30, W - 120, 20);
+      g.fillText(urlTxt, cx, 972);
 
       return cv;
     }).catch(() => null);
