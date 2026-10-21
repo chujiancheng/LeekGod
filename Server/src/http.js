@@ -14,6 +14,19 @@ const milestones = require('./milestones');
 const { logger } = require('./logger');
 
 const CLIENT_DIR = path.join(__dirname, '..', '..', 'Client');
+// App 客户端（移动端原生风格，挂在 /m 前缀）：独立目录、独立 MIME 白名单
+const APP_DIR = path.join(__dirname, '..', '..', 'App');
+const APP_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.webmanifest': 'application/manifest+json',
+  '.woff2': 'font/woff2',
+};
 const STATIC_FILES = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
@@ -888,6 +901,42 @@ function createServer(game, options) {
           res.writeHead(200, withSecurity(headers));
           res.end(buf);
         });
+      }
+
+      // ---- App 客户端（App/ 目录，挂在 /m 前缀下）----
+      //
+      // 与 STATIC_FILES / IMG_ASSETS 同一套白名单思路：只放 App/ 目录、只放白名单扩展名、
+      // 路径里出现 `..` 段或解析后逃出 APP_DIR 一律 404。调 App 下新增文件不用改这里，
+      // 但要新增**扩展名**（比如 .woff2）必须往 APP_MIME 补一条，否则会静默 404。
+      if (req.method === 'GET' && (p === '/m' || p === '/m/' || p.startsWith('/m/'))) {
+        let rel = p === '/m' || p === '/m/' ? 'index.html' : p.slice('/m/'.length);
+        try {
+          rel = decodeURIComponent(rel);
+        } catch (e) {
+          return json(res, 404, { ok: false, error: 'not found' });
+        }
+        const segs = rel.split('/');
+        if (!rel || segs.some((s) => !s || s === '..' || s === '.')) {
+          return json(res, 404, { ok: false, error: 'not found' });
+        }
+        const file = path.normalize(path.join(APP_DIR, rel));
+        const mime = APP_MIME[path.extname(file).toLowerCase()];
+        if (!mime || !file.startsWith(APP_DIR + path.sep)) {
+          return json(res, 404, { ok: false, error: 'not found' });
+        }
+        fs.readFile(file, (err, buf) => {
+          if (err) {
+            res.writeHead(404, withSecurity({ 'Content-Type': 'text/plain; charset=utf-8' }));
+            res.end('Not Found');
+            return;
+          }
+          res.writeHead(200, withSecurity({
+            'Content-Type': mime,
+            'Cache-Control': 'no-cache',
+          }));
+          res.end(buf);
+        });
+        return;
       }
 
       // ---- 静态资源 ----
