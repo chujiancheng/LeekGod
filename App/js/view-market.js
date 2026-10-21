@@ -1,6 +1,6 @@
 /* ==========================================================================
-   view-market.js — 首页「行情」
-   结构：公告横幅 → 指数 Hero（含迷你走势）→ 10 只标的列表
+   view-market.js — 首页
+   结构：公告横幅 → 修为卡（境界进度 + 总资产）→ 指数 Hero（含迷你走势）→ 10 只标的列表
    性能口径：DOM 只建一次，之后按帧 patch 文本，不整段重绘
    ========================================================================== */
 (function (GS) {
@@ -18,6 +18,28 @@
   function build(root) {
     root.innerHTML =
       '<div id="noticeBox"></div>' +
+      // 修为卡：一打开 App 就能看到自己的境界进度与资产，点整卡进「我的」
+      '<div class="mine-card" id="mineCard">' +
+        '<div class="me-row">' +
+          '<img class="ava-md" id="mineAva" alt="">' +
+          '<div class="grow mine-main">' +
+            '<div class="mine-name-row">' +
+              '<span class="mine-name" id="mineName">—</span>' +
+              '<span class="tag tag-gold" id="mineRealmTag" hidden></span>' +
+            '</div>' +
+            '<div class="mine-sub" id="mineSub">—</div>' +
+          '</div>' +
+          '<div class="mine-asset">' +
+            '<div class="mine-asset-label">总资产</div>' +
+            '<div class="mine-asset-value num" id="mineEquity">—</div>' +
+            '<div class="mine-asset-pnl num" id="minePnl">—</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="realm-bar" id="mineRealmWrap">' +
+          '<div class="realm-bar-top"><span id="mineRealmNow">—</span><span id="mineRealmNext">—</span></div>' +
+          '<div class="bar"><i id="mineRealmBar"></i></div>' +
+        '</div>' +
+      '</div>' +
       '<div class="hero" id="idxHero">' +
         '<div class="hero-name"><span id="idxName">全村希望</span>' +
           '<span class="tag" id="idxCode">999999</span></div>' +
@@ -38,6 +60,9 @@
 
     GS.core.on(root, '.stock-row', 'click', (e, t) => {
       GS.viewStock.open(t.dataset.stock);
+    });
+    GS.core.on(root, '#mineCard', 'click', () => {
+      GS.app.switchTo('me');
     });
 
     built = true;
@@ -126,6 +151,56 @@
       nb.innerHTML = n && n.text ? '<div class="notice"><span>📢</span><div>' + esc(n.text) + '</div></div>' : '';
     }
 
+    // 修为卡（账号帧没到就保持占位）
+    const acc = st.account;
+    if (acc) {
+      const setM = (id, v) => {
+        const el = GS.core.$(id);
+        if (el) el.textContent = v;
+      };
+      const ava = (acc.avatar && acc.avatar.key) || 'auntie';
+      const mava = GS.core.$('mineAva');
+      if (mava && mava.dataset.k !== ava) {
+        mava.dataset.k = ava;
+        mava.src = '/img/avatar-' + ava + '-192.png';
+      }
+      setM('mineName', acc.nick || acc.name || '—');
+      const r = acc.realm || null;
+      const tag = GS.core.$('mineRealmTag');
+      if (tag) {
+        if (r && r.name) {
+          tag.textContent = r.name;
+          tag.hidden = false;
+        } else {
+          tag.hidden = true;
+        }
+      }
+      setM('mineSub',
+        [r && r.honor, acc.broker && acc.broker.name].filter(Boolean).join(' · ') || '—');
+      const eq = GS.core.$('mineEquity');
+      if (eq) {
+        eq.textContent = '¥' + num(acc.equity).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+      }
+      const float = num(acc.longPnl) + num(acc.shortPnl);
+      const pnl = GS.core.$('minePnl');
+      if (pnl) {
+        pnl.textContent = '浮动盈亏 ' + (float >= 0 ? '+' : '') + fmtAmt(float);
+        pnl.className = 'mine-asset-pnl num ' + cls(float);
+      }
+      const wrap = GS.core.$('mineRealmWrap');
+      if (wrap) wrap.hidden = !r;
+      if (r) {
+        setM('mineRealmNow', r.name + (r.short ? ' · ' + r.short : ''));
+        setM('mineRealmNext',
+          r.next ? '距 ' + r.next.name + ' 还差 ' + fmtAmt(Math.max(0, num(r.next.need))) : '已到顶');
+        const bar = GS.core.$('mineRealmBar');
+        if (bar) {
+          const pct = r.next ? Math.max(0, Math.min(100, num(r.next.pct) * 100)) : 100;
+          bar.style.width = pct + '%';
+        }
+      }
+    }
+
     // 指数
     const idx = st.index;
     if (idx && hero !== false) {
@@ -169,7 +244,7 @@
 
   GS.viewMarket = {
     id: 'market',
-    title: '行情',
+    title: '首页',
     update,
     /** 首次进入时清掉缓存，避免切回来不刷新 */
     reset() {

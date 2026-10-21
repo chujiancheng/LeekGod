@@ -7,7 +7,7 @@
   const { $, esc, icon, num, fmtLeft, cls } = GS.core;
 
   const VIEWS = [
-    { id: 'market', title: '行情', icon: 'market', view: () => GS.viewMarket },
+    { id: 'market', title: '首页', icon: 'market', view: () => GS.viewMarket },
     { id: 'trade', title: '交易', icon: 'trade', view: () => GS.viewTrade },
     { id: 'rank', title: '排行', icon: 'rank', view: () => GS.viewRank },
     { id: 'me', title: '我的', icon: 'me', view: () => GS.viewMe },

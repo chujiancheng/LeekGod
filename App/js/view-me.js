@@ -76,11 +76,12 @@
     if (next) {
       next.textContent = r.next
         ? '距 ' + r.next.name + ' 还差 ' + fmtAmt(Math.max(0, num(r.next.need))) + '（' +
-          num(r.next.pct) + '%）'
+          (num(r.next.pct) * 100).toFixed(1) + '%）'
         : '已到顶';
     }
     if (bar) {
-      const pct = r.next ? Math.max(0, Math.min(100, num(r.next.pct))) : 100;
+      // 服务端 pct 是 0~1 小数（realm.view 口径），进度条按百分数落 CSSOM
+      const pct = r.next ? Math.max(0, Math.min(100, num(r.next.pct) * 100)) : 100;
       bar.style.width = pct + '%';
     }
 

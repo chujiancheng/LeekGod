@@ -669,6 +669,94 @@ input::placeholder {
   box-shadow: 0 1px 3px rgba(24, 36, 56, 0.1);
 }
 
+/* ---------------------------------------------------------------- 首页修为卡 */
+
+/* 金色微光底：与「我的」页 me-hero 同族，但更紧凑（首页一屏要塞下行情） */
+.mine-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 15px;
+  margin-bottom: 12px;
+  background:
+    radial-gradient(110% 130% at 92% 0%, rgba(240, 178, 60, 0.13), transparent 60%),
+    linear-gradient(160deg, #ffffff, #faf6ec 78%);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  transition: transform 0.14s var(--ease);
+}
+
+.mine-card:active {
+  transform: scale(0.985);
+}
+
+.ava-md {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  object-fit: cover;
+  border: 1px solid var(--line-2);
+  background: var(--bg-3);
+  flex-shrink: 0;
+}
+
+.mine-main {
+  min-width: 0;
+}
+
+.mine-name-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mine-name {
+  font-size: 16px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 7em;
+}
+
+.mine-name-row .tag {
+  flex-shrink: 0;
+}
+
+.mine-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mine-asset {
+  text-align: right;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.mine-asset-label {
+  font-size: 11px;
+  color: var(--txt-3);
+}
+
+.mine-asset-value {
+  margin-top: 2px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+
+.mine-asset-pnl {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* ---------------------------------------------------------------- 大盘 / 行情 */
 
 .hero {
