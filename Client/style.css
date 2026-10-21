@@ -1667,25 +1667,33 @@ input { font: inherit; color: inherit; }
 .ava-group-head b { font-weight: 600; }
 .ava-group-head span { color: var(--muted); font-size: 11px; }
 .ava-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
-.ava-cell {
+/* 选择器必须带 .ava-card：弹窗容器同时是 .login-card，`.login-card button`（0,1,1）会盖掉
+   单类 .ava-cell（0,1,0）——卡片被套上登录按钮的蓝色渐变、height:42px 钉死（64px 圆溢出格子）、
+   letter-spacing:2px，名字被 flex 压成 0 高。与 .theme-card 是同一个坑（见本文件上方同款注释），
+   同款修法：提权到 (0,2,0) 并显式复位 height / letter-spacing / font-weight / hover filter。 */
+.ava-card .ava-cell {
   position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 7px 4px 6px; border: 1px solid var(--line); border-radius: 10px;
+  height: auto; padding: 7px 4px 6px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--panel-2); cursor: pointer;
+  font-size: 13px; font-weight: 400; letter-spacing: normal;
   transition: transform .12s, border-color .12s, background .12s;
 }
-.ava-cell:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
-.ava-cell .ava-name {
+.ava-card .ava-cell:hover {
+  transform: translateY(-1px); border-color: color-mix(in srgb, var(--blue) 45%, var(--line));
+  filter: none; /* 抵消 .login-card button:hover 的 brightness，别把脸一起提亮 */
+}
+.ava-card .ava-cell .ava-name {
   font-size: 10.5px; color: var(--ink); max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* 三态：已选（金环 + 勾）/ 可换（hover 抬 1px）/ 锁定（灰度 + 锁 + 条件文案走 title+toast） */
-.ava-cell.cur {
+.ava-card .ava-cell.cur {
   border-color: color-mix(in srgb, var(--gold, #e0a52b) 70%, var(--line));
   background: color-mix(in srgb, var(--gold, #e0a52b) 9%, var(--panel-2));
 }
-.ava-cell.cur .ava-name { color: var(--gold, #e0a52b); }
-.ava-cell.locked { opacity: .55; }
-.ava-cell.locked .ava, .ava-cell.locked .ava-img { filter: grayscale(1); }
+.ava-card .ava-cell.cur .ava-name { color: var(--gold, #e0a52b); }
+.ava-card .ava-cell.locked { opacity: .55; }
+.ava-card .ava-cell.locked .ava, .ava-card .ava-cell.locked .ava-img { filter: grayscale(1); }
 .ava-tick {
   position: absolute; top: 4px; right: 5px; font-size: 10px; line-height: 1;
   color: var(--gold, #e0a52b);
@@ -1695,7 +1703,7 @@ input { font: inherit; color: inherit; }
 @media (max-width: 860px) {
   /* 移动端：弹层 4 列、卡 56px（图仍取 -192）；排行榜头像降到 20px 给昵称腾 2px */
   .ava-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .ava-cell { padding: 8px 4px 6px; }
+  .ava-card .ava-cell { padding: 8px 4px 6px; }
   .ava.s22 { width: 20px; height: 20px; }
   .ava-card { width: min(420px, 94vw); }
 }
