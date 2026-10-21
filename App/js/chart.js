@@ -84,22 +84,143 @@
     ctx.stroke();
   }
 
+  /* ---------------------------------------------------------- MACD 计算 */
+
+  // 预热门槛（网页版同口径）：DIF=EMA12−EMA26、DEA 再套 EMA9，不足 35 根时数值
+  // 只是「从第一根开始推」的初始化残差，图上要标「未预热」而不是让它冒充指标
+  const MACD_MIN_BARS = 35;
+
+  /**
+   * MACD(12,26,9)：DIF=EMA12−EMA26，DEA=DIF 的 EMA9，柱=2×(DIF−DEA)。
+   * pts 每项带 price；返回 {dif, dea, hist} 三条与 pts 等长的数组。
+   */
+  function computeMacd(pts, fast, slow, sig) {
+    fast = fast || 12;
+    slow = slow || 26;
+    sig = sig || 9;
+    const n = pts.length;
+    const dif = new Array(n);
+    const dea = new Array(n);
+    const hist = new Array(n);
+    if (!n) return { dif, dea, hist };
+    const kf = 2 / (fast + 1);
+    const ks = 2 / (slow + 1);
+    const kd = 2 / (sig + 1);
+    let ef = +pts[0].price;
+    let es = ef;
+    for (let i = 0; i < n; i += 1) {
+      const p = +pts[i].price;
+      if (i > 0) {
+        ef = kf * p + (1 - kf) * ef;
+        es = ks * p + (1 - ks) * es;
+      }
+      dif[i] = ef - es;
+      dea[i] = i === 0 ? dif[0] : kd * dif[i] + (1 - kd) * dea[i - 1];
+      hist[i] = 2 * (dif[i] - dea[i]);
+    }
+    return { dif, dea, hist };
+  }
+
+  // 分时重绘时刷新缓存：光标一动就全量重算 EMA 太浪费（一条序列可到 10300 点）。
+  // 缓存键带上调用方给的标识（stockId+视图模式）与序列长度/末点时间，任一变了就重算
+  const macdCache = { key: '', n: -1, lastT: 0, arr: null };
+  function macdOf(key, pts) {
+    const lastT = pts.length ? +pts[pts.length - 1].t : 0;
+    if (macdCache.key !== key || macdCache.n !== pts.length || macdCache.lastT !== lastT) {
+      macdCache.key = key;
+      macdCache.n = pts.length;
+      macdCache.lastT = lastT;
+      macdCache.arr = computeMacd(pts);
+    }
+    return macdCache.arr;
+  }
+
+  /**
+   * 在 MACD 带里画柱 + DIF/DEA 双线。scale 只取窗口内极值（否则会被窗口外
+   * 历史峰值压成平线），from/to 是 [start, end) 下标。
+   */
+  function drawMacdBand(ctx, macd, from, to, macdTop, macdH, bw, xAt, warn) {
+    let mAbs = 1e-9;
+    for (let i = from; i < to; i += 1) {
+      mAbs = Math.max(mAbs, Math.abs(macd.dif[i]), Math.abs(macd.dea[i]), Math.abs(macd.hist[i]));
+    }
+    const mMid = macdTop + macdH / 2;
+    const mY = (v) => mMid - (v / mAbs) * (macdH / 2 - 6);
+
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, mMid);
+    ctx.lineTo(ctx.canvas.clientWidth, mMid);
+    ctx.stroke();
+
+    for (let i = from; i < to; i += 1) {
+      const bh = (Math.abs(macd.hist[i]) / mAbs) * (macdH / 2 - 6);
+      if (bh < 0.4) continue;
+      ctx.fillStyle = macd.hist[i] > 0 ? 'rgba(232,65,60,0.85)' : 'rgba(10,160,110,0.85)';
+      ctx.fillRect(xAt(i) - bw / 2, macd.hist[i] > 0 ? mMid - bh : mMid, bw, bh);
+    }
+
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    for (let i = from; i < to; i += 1) {
+      const px = xAt(i);
+      const py = mY(macd.dif[i]);
+      if (i === from) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = C.gold;
+    ctx.stroke();
+    ctx.beginPath();
+    for (let i = from; i < to; i += 1) {
+      const px = xAt(i);
+      const py = mY(macd.dea[i]);
+      if (i === from) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = C.line;
+    ctx.stroke();
+
+    // 图例（标在带左上角）：根数不足预热门槛时报「未预热」不报数值
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = C.txt;
+    ctx.fillText('MACD(12,26,9)', 3, macdTop + 8);
+    if (warn) {
+      ctx.fillText('未预热', 3 + ctx.measureText('MACD(12,26,9)').width + 8, macdTop + 8);
+    } else {
+      const last = to - 1;
+      let lx = 3 + ctx.measureText('MACD(12,26,9)').width + 8;
+      const dTxt = 'DIF ' + (macd.dif[last] || 0).toFixed(3);
+      const eTxt = 'DEA ' + (macd.dea[last] || 0).toFixed(3);
+      ctx.fillStyle = C.gold;
+      ctx.fillText(dTxt, lx, macdTop + 8);
+      lx += ctx.measureText(dTxt).width + 8;
+      ctx.fillStyle = C.line;
+      ctx.fillText(eTxt, lx, macdTop + 8);
+    }
+  }
+
   /* ---------------------------------------------------------------- 分时 */
 
   /**
-   * 分时图（上 72% 价格 + 下 24% 成交量）。
+   * 分时图（价格带 + 成交量带 + MACD 带）。
    * @param {HTMLCanvasElement} canvas
-   * @param {{pts:Array, prevClose:number, cursor:number, from:number, to:number, ticks?:Array}} o
+   * @param {{pts:Array, prevClose:number, cursor:number, from:number, to:number, ticks?:Array, macdKey?:string}} o
    *   pts 的每一项可带 `a`（压缩横轴坐标，网页版同口径：休市/开盘竞价压 0 宽）；
-   *   from/to 是横轴域（轴坐标）；ticks 是 [{a, label}] 底部时间刻度（可选）。
+   *   from/to 是横轴域（轴坐标）；ticks 是 [{a, label}] 底部时间刻度（可选）；
+   *   macdKey 是 MACD 缓存键（stockId+视图模式）。
    * @returns {{points:Array<{x:number,y:number}>, hit:Function}}
    */
   function minute(canvas, o) {
     const { ctx, w, h } = prep(canvas);
     const pts = o.pts || [];
-    const priceH = h * 0.68;
-    const volTop = h * 0.76;
-    const volH = h * 0.16;
+    const tickH = 13;
+    const volH = Math.max(22, h * 0.12);
+    const macdH = Math.max(30, h * 0.18);
+    const priceH = Math.max(60, h - 6 - tickH - volH - macdH - 10);
+    const volTop = 6 + priceH + 5;
+    const macdTop = volTop + volH + 5;
     const padL = 0;
     const padR = 0;
 
@@ -114,13 +235,10 @@
     const base = +o.prevClose || +pts[0].price;
     let lo = Infinity;
     let hi = -Infinity;
-    let vmax = 1;
     pts.forEach((p) => {
       const v = +p.price;
       if (v < lo) lo = v;
       if (v > hi) hi = v;
-      const vol = +p.vol || 0;
-      if (vol > vmax) vmax = vol;
     });
     // 上下留 8% 余量，并把基准价包进来（否则横盘时基准线会飘到框外）
     const span = Math.max(hi - lo, base * 0.004, 0.02);
@@ -189,7 +307,7 @@
     // 均价线（橙）
     ctx.beginPath();
     avgY.forEach((py, i) => {
-      const px = X(pts[i].t);
+      const px = X(pts[i]);
       if (i) ctx.lineTo(px, py);
       else ctx.moveTo(px, py);
     });
@@ -211,16 +329,47 @@
     ctx.lineCap = 'round';
     ctx.stroke();
 
-    // 成交量柱
-    const bw = Math.max(1, w / Math.max(pts.length, 30) - 0.6);
-    pts.forEach((p, i) => {
-      const vol = +p.vol || 0;
-      if (!vol) return;
-      const bh = Math.max(1, (vol / vmax) * volH);
-      const prev = i ? +pts[i - 1].price : +p.price;
-      ctx.fillStyle = +p.price >= prev ? 'rgba(232,65,60,0.5)' : 'rgba(10,160,110,0.5)';
-      ctx.fillRect(X(p) - bw / 2, volTop + volH - bh, bw, bh);
-    });
+    // 成交量柱：vol 是**累计成交量**，画柱取相邻点差值（网页版同口径）。
+    // 日切检测：收盘结算会把当日量归零，直接相减出负差——量回落视为新的一天，
+    // 用当日累计量本身作为这一根的增量
+    const deltas = [];
+    let vmax = 1;
+    for (let i = 0; i < pts.length; i += 1) {
+      const v = +pts[i].vol || 0;
+      const pv = i ? +pts[i - 1].vol || 0 : 0;
+      const d = i === 0 ? 0 : v < pv ? v : Math.max(0, v - pv);
+      deltas.push(d);
+      if (d > vmax) vmax = d;
+    }
+    // 量柱宽度按轴上实际间距算（压缩轴下开盘时点挤在最左，按「画布宽/点数」会糊成一整块）
+    let gapSum = 0;
+    let gapN = 0;
+    for (let i = 1; i < pts.length; i += 1) {
+      const g = X(pts[i]) - X(pts[i - 1]);
+      if (g > 0.01) {
+        gapSum += g;
+        gapN += 1;
+      }
+    }
+    const bw = Math.max(1, Math.min(6, (gapN ? gapSum / gapN : 1) * 0.72));
+    for (let i = 1; i < pts.length; i += 1) {
+      const bh = (deltas[i] / vmax) * volH;
+      if (bh < 0.5) continue;
+      const dp = +pts[i].price - +pts[i - 1].price;
+      ctx.fillStyle =
+        dp > 0 ? 'rgba(232,65,60,0.5)' : dp < 0 ? 'rgba(10,160,110,0.5)' : 'rgba(60,124,255,0.45)';
+      ctx.fillRect(X(pts[i]) - bw / 2, volTop + volH - bh, bw, bh);
+    }
+    // 量带标注：右侧满仓刻度，让柱子有可读的量纲
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = C.txt;
+    ctx.fillText(GS.core.fmtQty(vmax), w - 2, volTop + 8);
+
+    // MACD(12,26,9) 带
+    const macd = macdOf(o.macdKey || '', pts);
+    drawMacdBand(ctx, macd, 0, pts.length, macdTop, macdH, bw,
+      (i) => X(pts[i]), pts.length < MACD_MIN_BARS);
 
     // 底部时间刻度（游戏内时刻，由调用方按压缩轴算好传进来）
     if (Array.isArray(o.ticks) && o.ticks.length) {
@@ -235,7 +384,7 @@
         ctx.strokeStyle = C.grid;
         ctx.beginPath();
         ctx.moveTo(xx, 0);
-        ctx.lineTo(xx, volTop + volH);
+        ctx.lineTo(xx, macdTop + macdH);
         ctx.stroke();
       });
     }
@@ -293,7 +442,7 @@
       return best;
     }
 
-    return { points, hit, priceH, volTop };
+    return { points, hit, priceH, volTop, deltas, macd, macdTop };
   }
 
   /* -------------------------------------------------------------- 日 K */
@@ -319,7 +468,7 @@
   }
 
   /**
-   * K 线蜡烛图（上 74% 蜡烛 + 下 16% 成交量）。
+   * K 线蜡烛图（价格带 + 成交量带 + MACD 带）。
    * bars 支持两种来源：服务端已收盘日线，以及前端用实时行情现拼的当日 bar
    * （b.live = true，与网页版 daySeriesOf 同口径）；周/月线的聚合 bar 带 label。
    * @param {{bars:Array, cursor:number}} o
@@ -339,9 +488,12 @@
     const start = Math.max(0, bars.length - maxBars);
     const view = bars.slice(start);
 
-    const priceH = h * 0.72;
-    const volTop = h * 0.8;
-    const volH = h * 0.14;
+    const tickH = 13;
+    const volH = Math.max(20, h * 0.11);
+    const macdH = Math.max(28, h * 0.17);
+    const priceH = Math.max(60, h - 6 - tickH - volH - macdH - 10);
+    const volTop = 6 + priceH + 5;
+    const macdTop = volTop + volH + 5;
 
     // 均线按全量算（要看更早的收盘价才对），画的时候再按窗口取
     const mas = MA_DEFS.map((d) => ({ n: d.n, c: d.c, arr: maOf(bars, d.n) }));
@@ -431,6 +583,11 @@
       ctx.stroke();
     });
 
+    // MACD(12,26,9)：按全量收盘价现算（EMA 要看历史才对，根数少不值得缓存），
+    // 刻度取窗口内极值——否则会被窗口外的历史峰值压成一条平线
+    const macd = computeMacd(bars.map((b) => ({ price: +b.close || 0 })));
+    drawMacdBand(ctx, macd, start, bars.length, macdTop, macdH, bw, xc, bars.length < MACD_MIN_BARS);
+
     // 均线图例（左上角一行小字）
     ctx.font = '9px -apple-system, sans-serif';
     ctx.textAlign = 'left';
@@ -486,8 +643,8 @@
       return Math.max(0, Math.min(view.length - 1, idx));
     }
 
-    return { points, hit, view };
+    return { points, hit, view, macd, total: bars.length, start };
   }
 
-  GS.chart = { spark, minute, daily, prep };
+  GS.chart = { spark, minute, daily, prep, computeMacd, MACD_MIN_BARS };
 })(window.GS);

@@ -259,21 +259,43 @@
     if (state.mode !== 'min' && state.mode !== '5d') {
       const b = pt.bar || {};
       const label = b.label || (b.day != null ? '第' + b.day + '天' : '');
+      const md = geo.macd;
+      // MACD 数组按全量 bars 下标，points 是窗口内偏移，要加回窗口起点
+      const gi = geo.start + (state.cursor >= 0 ? state.cursor : geo.points.length - 1);
+      const dif = md ? md.dif[gi] || 0 : 0;
+      const dea = md ? md.dea[gi] || 0 : 0;
+      const warn = geo.total && geo.total < GS.chart.MACD_MIN_BARS
+        ? '<span class="dim">（样本 ' + geo.total + ' 根，未预热）</span>' : '';
       tip.innerHTML =
         '<span>' + esc(label) + (b.live ? ' · 实时' : '') + '</span>' +
         '<span>开 ' + fmtP(b.open) + '</span>' +
         '<span>高 ' + fmtP(b.high) + '</span>' +
         '<span>低 ' + fmtP(b.low) + '</span>' +
-        '<span>收 ' + fmtP(b.close) + '</span>';
+        '<span>收 ' + fmtP(b.close) + '</span>' +
+        (b.volume ? '<span>量 ' + fmtQty(b.volume) + '</span>' : '') +
+        '<span class="' + cls(dif - dea) + '">DIF ' + dif.toFixed(3) + '</span>' +
+        '<span class="' + cls(dea - dif) + '">DEA ' + dea.toFixed(3) + '</span>' +
+        warn;
     } else {
       const m = GS.core.market(state.stockId);
       const base = m ? num(m.prevClose) : 0;
       const pct = base ? ((pt.price - base) / base) * 100 : 0;
+      // 成交量与柱子同口径：这一刻的增量（日切回落时取当日累计），括号里补总量
+      const dv = geo.deltas ? geo.deltas[idx] || 0 : 0;
+      const tv = pt.vol || 0;
+      const md = geo.macd;
+      const dif = md ? md.dif[idx] || 0 : 0;
+      const dea = md ? md.dea[idx] || 0 : 0;
+      const warn = md && md.dif.length < GS.chart.MACD_MIN_BARS
+        ? '<span class="dim">（未预热）</span>' : '';
       tip.innerHTML =
         '<span>' + esc(minuteTimeLabel(pt.t, true)) + '</span>' +
         '<span class="' + cls(pt.price - base) + '">' + fmtP(pt.price) + '</span>' +
         '<span class="' + cls(pct) + '">' + fmtPct(pct) + '</span>' +
-        (pt.vol ? '<span>量 ' + fmtQty(pt.vol) + '</span>' : '');
+        (tv ? '<span>量 ' + fmtQty(dv) + ' <span class="dim">(累计 ' + fmtQty(tv) + ')</span></span>' : '') +
+        '<span class="' + cls(dif - dea) + '">DIF ' + dif.toFixed(3) + '</span>' +
+        '<span class="' + cls(dea - dif) + '">DEA ' + dea.toFixed(3) + '</span>' +
+        warn;
     }
     tip.hidden = false;
   }
@@ -556,6 +578,7 @@
           from: a0,
           to: endA,
           ticks,
+          macdKey: state.stockId + '|' + state.mode,
         });
         return;
       }
@@ -568,6 +591,7 @@
       cursor: state.cursor,
       from: pts[0].t,
       to: pts[pts.length - 1].t,
+      macdKey: state.stockId + '|' + state.mode,
     });
   }
 
