@@ -948,7 +948,7 @@ input::placeholder {
 /* 图表 + 右侧五档 双栏（东方财富式） */
 .stock-columns {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: stretch;
   margin-bottom: 10px;
 }
@@ -960,7 +960,7 @@ input::placeholder {
 }
 
 .book-panel {
-  width: 138px;
+  width: 118px;
   flex-shrink: 0;
   background: var(--bg-1);
   border: 1px solid var(--line);
@@ -973,14 +973,14 @@ input::placeholder {
 }
 
 .book-panel-title {
-  padding: 0 10px 6px;
+  padding: 0 8px 6px;
   font-size: 11px;
   color: var(--txt-3);
   letter-spacing: 1px;
 }
 
 .book-sub {
-  margin: 5px 10px 2px;
+  margin: 5px 8px 2px;
   padding-top: 5px;
   border-top: 1px solid var(--line);
   font-size: 11px;
@@ -1057,12 +1057,12 @@ input::placeholder {
   display: flex;
   align-items: center;
   height: 21px;
-  padding: 0 8px;
+  padding: 0 7px;
   font-size: 11px;
 }
 
 .book-row .lab {
-  width: 24px;
+  width: 22px;
   color: var(--txt-3);
   font-size: 10px;
   flex-shrink: 0;
@@ -1101,12 +1101,14 @@ input::placeholder {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 3px 8px;
-  padding: 4px 7px;
+  gap: 4px;
+  margin: 3px 6px;
+  padding: 4px 4px;
   border-radius: 8px;
   background: var(--bg-2);
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--txt-3);
+  white-space: nowrap;
 }
 
 /* 逐笔（个股页右侧面板内的紧凑版） */
@@ -1145,12 +1147,12 @@ input::placeholder {
 
 /* 右侧面板紧凑逐笔行 */
 .book-panel .tick-row {
-  padding: 2.5px 8px;
+  padding: 2.5px 6px;
   font-size: 10.5px;
 }
 
 .book-panel .tick-time {
-  width: 40px;
+  width: 32px;
   font-size: 10px;
 }
 
@@ -2092,7 +2094,7 @@ input::placeholder {
 
 /* 窄屏：个股双栏挤不下时收窄盘口面板 */
 @media (max-width: 359px) {
-  .book-panel { width: 116px; }
+  .book-panel { width: 106px; }
   .book-row .qt { display: none; }
 }
 
