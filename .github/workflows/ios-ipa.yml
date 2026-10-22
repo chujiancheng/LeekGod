@@ -1,0 +1,112 @@
+name: iOS IPA
+
+# 没有 Mac 的构建路径：GitHub Actions 的 macOS runner 现生成工程 → xcodebuild →
+# 打包成**未签名** ipa（Payload/ 结构），发到 Release 供下载，再在 Windows 上用
+# Sideloadly / AltStore 用免费 Apple ID 重签装进 iPhone。
+#
+# 想在 App 里预置服务器地址：仓库 Settings → Secrets and variables → Actions →
+# Variables 新建 GUSHEN_SERVER_URL（例如 http://1.2.3.4:8888）。
+# 不设也能装：第一次打开 App 会弹框让你填。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "iOS/**"
+      - ".github/workflows/ios-ipa.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Inject server url (optional)
+        working-directory: iOS
+        env:
+          GUSHEN_SERVER_URL: ${{ vars.GUSHEN_SERVER_URL }}
+        run: |
+          if [ -n "$GUSHEN_SERVER_URL" ]; then
+            /usr/libexec/PlistBuddy -c "Set :GushenServerUrl $GUSHEN_SERVER_URL" LeekGod/Info.plist
+            echo "server url = $(/usr/libexec/PlistBuddy -c 'Print :GushenServerUrl' LeekGod/Info.plist)"
+          else
+            echo "GUSHEN_SERVER_URL 未设置：App 首启会弹框让玩家填地址"
+          fi
+
+      - name: Generate project
+        working-directory: iOS
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: iOS
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LeekGod.xcodeproj \
+            -target LeekGod \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            SYMROOT="$PWD/build" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build.log | tail -n 60
+
+      - name: Package unsigned ipa
+        working-directory: iOS
+        run: |
+          APP="build/Release-iphoneos/LeekGod.app"
+          test -d "$APP" || (echo "::error::没有产出 .app，构建失败"; exit 1)
+          rm -rf Payload LeekGod-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry LeekGod-unsigned.ipa Payload
+          ls -lh LeekGod-unsigned.ipa
+          unzip -l LeekGod-unsigned.ipa | head -n 12
+          # 未签名包必须没有 _CodeSignature（有的话是误签了，侧载会失败）
+          if [ -d "Payload/LeekGod.app/_CodeSignature" ]; then
+            echo "::warning::包里出现了 _CodeSignature，说明被签名了，侧载前需要先剥离"
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: iOS/build.log
+          if-no-files-found: ignore
+
+      - name: Upload ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeekGod-unsigned-ipa
+          path: iOS/LeekGod-unsigned.ipa
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build-${{ github.run_number }}
+          name: iOS 未签名包 #${{ github.run_number }}
+          body: |
+            未签名 ipa，供个人/devices 侧载使用（不适合上架）。
+
+            安装方式（Windows）：
+            1. 下载 `LeekGod-unsigned.ipa`
+            2. 装 Sideloadly 或 AltStore，用你自己的 Apple ID 签名
+            3. 免费账号签名有效 7 天，到期重新签一次
+
+            首次打开若提示填服务器地址，填你的游戏服务器（例如 `http://1.2.3.4:8888`）；
+            之后想换：长按屏幕左上角 1.2 秒，或在「我的」页点「切换服务器」。
+          files: iOS/LeekGod-unsigned.ipa

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>连不上服务器</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{background:#f4f5f7;color:#1a2029;display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-align:center;
+       padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  .box{padding:32px 24px}
+  .logo{font-size:34px;font-weight:800;letter-spacing:2px}
+  .logo b{color:#dd9520}
+  .sub{font-size:12px;letter-spacing:6px;color:#99a2ad;margin:8px 0 26px}
+  .tip{font-size:14px;color:#5a6472;line-height:1.8;margin-bottom:6px}
+  .addr{font-size:13px;color:#2f8fe0;margin-bottom:30px;word-break:break-all;min-height:18px}
+  button{display:block;width:210px;margin:12px auto;padding:13px 0;border:0;border-radius:12px;
+         font-size:15px;font-weight:600;background:#e4e7ec;color:#5a6472;
+         -webkit-tap-highlight-color:transparent}
+  button.primary{background:linear-gradient(135deg,#f5455c,#ff7a45);color:#fff}
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">股神<b>请就位</b></div>
+    <div class="sub">韭 菜 进 化 论</div>
+    <div class="tip" id="tip">连不上交易所服务器<br>确认服务器开着、手机能访问到它</div>
+    <div class="addr" id="addr"></div>
+    <button class="primary" id="retry">重试</button>
+    <button id="change">换服务器地址</button>
+  </div>
+  <script>
+    (function () {
+      var addr = '';
+      try { addr = String(AndroidHost.server() || ''); } catch (e) { addr = ''; }
+      document.getElementById('addr').textContent = addr;
+      if (!addr) {
+        document.getElementById('tip').innerHTML = '还没有设置服务器地址<br>点下面按钮填一个';
+        document.getElementById('retry').textContent = '设置服务器地址';
+      }
+      function call(fn) {
+        try { AndroidHost[fn](); } catch (e) {
+          // 极端情况：桥没注入（不该发生）——退回提示
+          document.getElementById('tip').textContent = 'App 桥不可用，请重装 App';
+        }
+      }
+      document.getElementById('retry').addEventListener('click', function () {
+        if (!addr) { call('changeServer'); } else { call('retry'); }
+      });
+      document.getElementById('change').addEventListener('click', function () { call('changeServer'); });
+    })();
+  </script>
+</body>
+</html>

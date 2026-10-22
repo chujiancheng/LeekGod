@@ -1,0 +1,35 @@
+# xcodegen 配置：本机没有 Mac 也能维护工程（CI 上 `xcodegen generate` 现生成 .xcodeproj）
+#
+# 改完记得提交；CI 会在 GitHub Actions 的 macos runner 上重新生成工程并 xcodebuild。
+name: LeekGod
+options:
+  minimumXcodeGenVersion: "2.30.0"
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "14.0"
+
+targets:
+  LeekGod:
+    type: application
+    platform: iOS
+    sources:
+      - path: LeekGod
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_NAME: LeekGod
+        PRODUCT_BUNDLE_IDENTIFIER: cn.gushen.leekgod
+        INFOPLIST_FILE: LeekGod/Info.plist
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: "NO"
+        ONLY_ACTIVE_ARCH: "NO"
+        # 自签名侧载：构建阶段一律不签名，交给 Windows 上的 Sideloadly / AltStore 重签
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"

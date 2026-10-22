@@ -33,3 +33,11 @@ art/**/*.png
 # 智能体工作目录（记忆 + 临时产物，不入库）
 .workbuddy/
 generated-images/
+
+# iOS：.xcodeproj 由 xcodegen 从 project.yml 现生成，构建产物不入库
+iOS/LeekGod.xcodeproj/
+iOS/build/
+iOS/Payload/
+iOS/*.ipa
+iOS/build.log
+iOS/DerivedData/
