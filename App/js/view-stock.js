@@ -127,6 +127,12 @@
             '<span id="flowInnerTxt">内盘 —</span></div>' +
         '</div>' +
 
+        '<div class="card card-flat">' +
+          '<div class="news-list" id="stockNewsHints"></div>' +
+          '<div class="news-list" id="stockNews"></div>' +
+          '<button class="news-more" id="stockNewsMore">更多消息 ›</button>' +
+        '</div>' +
+
         '<div id="haltBox"></div>' +
       '</div>' +
       '<div class="act-bar" id="actBar">' +
@@ -160,10 +166,15 @@
         };
         GS.core.on(el.el, '#stockArchive', 'click', openArchive);
         GS.core.on(el.el, '#coEntry', 'click', openArchive);
+        // 消息卡：点个股行不跳（就在本股），点「更多」进消息 tab 的本股过滤
+        GS.core.on(el.el, '#stockNewsMore', 'click', () => {
+          GS.viewNews.open({ stockId: state.stockId });
+        });
         bindTabs(el.el);
         bindChartTouch(el.el);
         bindAct(el.el);
         bindDanmakuSend(el.el);
+        renderNews();
         draw();
       },
     });
@@ -429,16 +440,26 @@
     );
   }
 
+  /**
+   * 游戏内时刻（自 00:00 起的毫秒）→ 'HH:MM'。
+   * **不能**用 core.fmtHM：那个是「时间戳按本地时区取时分」，喂 11:30 的毫秒数（41400000）
+   * 会被当成 1970-01-01T00:00Z 再按 +08:00 显示成 19:30——分时图刻度整体偏 8 小时。
+   */
+  function gameHM(ms) {
+    const v = ((Number(ms) % 86400000) + 86400000) % 86400000;
+    const p = (n) => String(n).padStart(2, '0');
+    return p(Math.floor(v / 3600000)) + ':' + p(Math.floor((v % 3600000) / 60000));
+  }
+
   /** 分时点的时间文案：游戏内时刻（跨天补「N日」前缀），没有交易日时钟时退回墙钟 */
   function minuteTimeLabel(t, withSec) {
     const g = clockAtAxis(axisCoord(t));
     if (!g) return withSec ? fmtTime(t) : fmtHM(t);
-    const hm = GS.core.fmtHM(g.ms);
-    const hms = withSec
-      ? hm + ':' + String(Math.floor((g.ms % 60000) / 1000)).padStart(2, '0')
-      : hm;
+    const hm = withSec
+      ? gameHM(g.ms) + ':' + String(Math.floor((g.ms % 60000) / 1000)).padStart(2, '0')
+      : gameHM(g.ms);
     const d = dayInfo();
-    return d && g.day !== d.day ? g.day + '日 ' + hms : hms;
+    return d && g.day !== d.day ? g.day + '日 ' + hm : hm;
   }
 
   function showTip(tip, idx) {
@@ -583,6 +604,14 @@
     return a == null ? t : a;
   }
 
+  /** 分时窗口实际覆盖的天数：「5 日」是上限，本局还没跑满 5 天时按已开天数收窄 */
+  function minuteDays() {
+    if (state.mode !== '5d') return 1;
+    const d = dayInfo();
+    const todayNo = Number(d && d.day) || 1;
+    return Math.max(1, Math.min(5, todayNo));
+  }
+
   /** 压缩轴坐标 → 游戏内时刻 { day, ms, seam }（seam = 午休压 0 宽后的接缝） */
   function clockAtAxis(a, atDayEnd) {
     const d = dayInfo();
@@ -623,10 +652,14 @@
   /** 刻度文案：游戏内时刻，接缝写「11:30/13:00」，跨天补「N日」前缀 */
   function axisTimeLabel(a, atDayEnd) {
     const c = clockAtAxis(a, atDayEnd);
-    if (!c) return GS.core.fmtHM(a); // 没有阶段表：a 就是墙钟
+    if (!c) return GS.core.fmtHM(a); // 没有阶段表：a 就是墙钟（时间戳）
+    // 本局开服之前的天（天号 < 1）没有行情：5 日视图开局不足 5 天时，
+    // 左侧几格会算成「0日 / -1日 09:30」这种不存在的日期，直接不画
+    if (c.day < 1) return null;
+    // 游戏内毫秒走 gameHM（自 00:00 起），不能用按本地时区格式化的 fmtHM
     const hm = c.seam != null
-      ? GS.core.fmtHM(c.seam) + '/' + GS.core.fmtHM(c.ms)
-      : GS.core.fmtHM(c.ms);
+      ? gameHM(c.seam) + '/' + gameHM(c.ms)
+      : gameHM(c.ms);
     const d = dayInfo();
     return d && c.day !== d.day ? c.day + '日 ' + hm : hm;
   }
@@ -740,7 +773,7 @@
     const d = GS.core.S.state.day;
     if (d && d.dayStartAt) {
       const dayMs = Math.max(1, num(d.dayEndsAt) - num(d.dayStartAt));
-      const from = state.mode === '5d' ? num(d.dayStartAt) - dayMs * 4 : num(d.dayStartAt);
+      const from = state.mode === '5d' ? num(d.dayStartAt) - dayMs * (minuteDays() - 1) : num(d.dayStartAt);
       pts = pts.filter((p) => p.t >= from);
     }
     if (pts.length < 2) {
@@ -756,7 +789,7 @@
       const dayW = axisDayWidth(ax.phases);
       const endA = axisCoord(Number(d.dayEndsAt)); // 今天收盘 = 今天轴末端
       if (dayW > 0 && Number.isFinite(endA)) {
-        const days = state.mode === '5d' ? 5 : 1;
+        const days = minuteDays();
         const a0 = endA - days * dayW;
         pts = pts.map((p) => ({ t: p.t, price: p.price, vol: p.vol, a: axisCoord(p.t) }));
         // 底部时间刻度：游戏内时刻（09:30 / 11:30·13:00 / 15:00），跨天补「N日」
@@ -823,11 +856,21 @@
     renderFlow(m);
     renderTicker(m);
     renderHalt(st, m);
+    renderNews();
     pumpDanmaku(st);
     drawActState(m);
 
     // 画布不必每帧重绘（700ms 一帧，重绘一次就够）
     if (Date.now() - state.lastDraw > 500) draw();
+  }
+
+  /** 本股消息卡：大盘 + 本股，最近 4 条（网页端「当前股票」过滤同口径）。
+   *  行不带跳转（noNav）——就在本股页里，点行再叠开一层个股页只会把 pageStack 搞乱 */
+  function renderNews() {
+    if (!GS.viewNews) return;
+    const opt = { filter: 'active', stockId: state.stockId, limit: 4, noNav: true };
+    GS.viewNews.renderHints($('stockNewsHints'), opt);
+    GS.viewNews.renderRows($('stockNews'), opt);
   }
 
   function renderBook(m) {

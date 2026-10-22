@@ -5,12 +5,14 @@
  * 请求体里的 name 不再作为身份依据。
  */
 const http = require('http');
+const v8 = require('v8');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const admin = require('./admin');
 const openapi = require('./openapi');
 const milestones = require('./milestones');
+const { SseBackpressure } = require('./sseback');
 const { logger } = require('./logger');
 
 const CLIENT_DIR = path.join(__dirname, '..', '..', 'Client');
@@ -321,9 +323,13 @@ class SseHub {
     this.conns = new Set();
     this.byIp = new Map();
     this.cfg = config.http.sse;
+    // 慢消费者闸门：见 src/sseback.js。没有它，一条不读的连接就能把堆拖到 OOM
+    this.back = new SseBackpressure(this.cfg, (conn, why, buffered) => this.dropSlow(conn, why, buffered));
     this.unsubscribe = game.onTick(() => this.broadcastAll());
     this.heartbeat = setInterval(() => {
-      for (const c of this.conns) {
+      const now = Date.now();
+      for (const c of [...this.conns]) {
+        if (!this.back.check(c, now)) continue;
         try {
           c.res.write(': ping\n\n');
         } catch (e) {
@@ -343,6 +349,11 @@ class SseHub {
   add(conn) {
     this.conns.add(conn);
     this.byIp.set(conn.ip, (this.byIp.get(conn.ip) || 0) + 1);
+    conn.onRecover = (frames, ms) => {
+      logger.info(
+        `[我是股神] 推送连接追上了（积压 ${(ms / 1000).toFixed(0)}s，跳过 ${frames} 帧）：ip=${conn.ip}`
+      );
+    };
   }
 
   remove(conn) {
@@ -350,6 +361,26 @@ class SseHub {
     const n = (this.byIp.get(conn.ip) || 0) - 1;
     if (n > 0) this.byIp.set(conn.ip, n);
     else this.byIp.delete(conn.ip);
+  }
+
+  /** 背压闸门判死：摘出池子 + 拆 socket（不拆的话客户端迟迟收不到 close，不会重连） */
+  dropSlow(conn, why, buffered) {
+    this.remove(conn);
+    try {
+      if (conn.res.socket) conn.res.socket.destroy();
+      else conn.res.destroy();
+    } catch (e) {
+      /* 已经断了 */
+    }
+    logger.warn(
+      `[我是股神] 断开积压的推送连接（${why}，队列 ${(buffered / 1048576).toFixed(1)}MB）：ip=${conn.ip}` +
+        `，当前在线 ${this.conns.size} 条`
+    );
+  }
+
+  /** 诊断快照：连接数 / 单条最大积压 / 合计积压 / 慢连接数 */
+  stats() {
+    return SseBackpressure.stats(this.conns);
   }
 
   send(conn, event, data) {
@@ -380,7 +411,11 @@ class SseHub {
     const common = this.game.stateCommon({ markets, index, lite: true, now });
     const commonBody = JSON.stringify(common).slice(0, -1); // 去掉收尾的 '}'，后面拼账户段
     const selfCache = new Map(); // token -> 账户段字符串（同账户多标签页共享）
-    for (const conn of this.conns) {
+    // 先给死连接做减法：闸门判死的连接会从 this.conns 里摘掉，后面的循环就不用管它们了。
+    // 慢连接（队列 ≥ slowSkipBytes）留着，只是这一帧不写——每帧都是全量快照，
+    // 它追上以后下一帧就能自己恢复，不需要重连。
+    for (const conn of [...this.conns]) {
+      if (!this.back.check(conn, now)) continue;
       try {
         let selfChunk = selfCache.get(conn.token);
         if (selfChunk === undefined) {
@@ -861,6 +896,48 @@ function createServer(game, options) {
         return json(res, 200, { ok: true, ...game.opsClock() });
       }
 
+      // ---- 运维：内存体检（只读）----
+      //
+      // 2026-10-22 两次 heap OOM 排查时，缺的正是这一个视角：堆涨到 2.5GB 时，
+      // 到底是引擎容器涨了，还是 SSE 写队列把帧钉住了？只看 `used/limit` 分不出来。
+      // 这里一次给出「堆/常驻/堆外」三项 + 每条推送连接的积压字节数 + 账户数。
+      // **sse.buffered 是关键指标**：它持续上涨就说明有客户端读不动，不用等 OOM。
+      if (p === '/api/admin/memory' && req.method === 'GET') {
+        if (!admin.authorized(req.headers['x-admin-token'])) {
+          logger.warn(`[我是股神] 运维内存接口口令校验失败: ${ip}`);
+          return json(res, 403, { ok: false, error: '运维口令无效' });
+        }
+        const mu = process.memoryUsage();
+        const sse = hub.stats();
+        const mb = (n) => Math.round((n / 1048576) * 10) / 10;
+        return json(res, 200, {
+          ok: true,
+          at: Date.now(),
+          tick: game.tickCount,
+          accounts: game.store.all().length,
+          memory: {
+            heapUsedMb: mb(mu.heapUsed),
+            heapTotalMb: mb(mu.heapTotal),
+            rssMb: mb(mu.rss),
+            externalMb: mb(mu.external),
+            arrayBuffersMb: mb(mu.arrayBuffers),
+            heapLimitMb: mb(v8.getHeapStatistics().heap_size_limit),
+          },
+          sse: {
+            connections: sse.count,
+            bufferedMb: mb(sse.sum),
+            maxBufferedMb: mb(sse.max),
+            slowConnections: sse.slow,
+            // 每条连接的明细只给积压超过 64KB 的，避免五百条刷屏
+            detail: [...hub.conns]
+              .map((c) => ({ ip: c.ip, bufferedKb: Math.round((c.res.writableLength || 0) / 1024) }))
+              .filter((c) => c.bufferedKb > 64)
+              .sort((a, b) => b.bufferedKb - a.bufferedKb)
+              .slice(0, 20),
+          },
+        });
+      }
+
       // ---- 运维：优雅下线（server.py stop / restart 的唯一停服通道）----
       //
       // 为什么不让脚本直接 taskkill：Windows 上强杀 = TerminateProcess，走不到
@@ -1066,6 +1143,8 @@ function createServer(game, options) {
   server.requestTimeout = 30000;
   // 暴露给测试（签发 Key / 断言限流用）。运行期没有别的地方读它。
   server.openApi = open;
+  // 同上，暴露 SSE 连接池：探针要读每条连接的 res.writableLength（慢消费者背压诊断）。
+  server.sseHub = hub;
 
   return server;
 }

@@ -181,11 +181,15 @@ def start():
             | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         )
     # 显式抬高 V8 老生代上限：SSE 每帧全量 JSON 的垃圾曾把堆线性堆到上限（heap OOM）。
-    # 2026-10-21 起 SSE 公共段每 tick 只序列化一次（垃圾 ~降 3 倍），实测活跃堆仅几十 MB，
-    # 2560MB 足够并让 V8 更早回收、RSS 不再无限爬。可用 NODE_OPTIONS 覆盖
+    # 2026-10-21 起 SSE 公共段每 tick 只序列化一次（垃圾 ~降 3 倍），实测夜间活跃堆仅几十 MB，
+    # 当时据此把 6144 降到 2560。但 2026-10-22 白天又连崩两次（PID 81424 / 61932），
+    # 真因不是垃圾而是「SSE 慢消费者的写队列」：客户端读不动时每帧都堆在 res 里不释放，
+    # 属于活对象，Mark-Compact 回收不到（详见 src/sseback.js 与 Doc 变更记录）。
+    # 修法已在代码里（写背压闸门），这里抬到 8192 只是保险：本机 32GB，8192 仍是安全区间。
+    # 可用 NODE_OPTIONS 覆盖。
     node_cmd = ["node", SERVER_ENTRY]
     if "NODE_OPTIONS" not in os.environ:
-        node_cmd = ["node", "--max-old-space-size=2560", SERVER_ENTRY]
+        node_cmd = ["node", "--max-old-space-size=8192", SERVER_ENTRY]
     process = subprocess.Popen(
         node_cmd,
         cwd=SERVER_DIR,

@@ -63,17 +63,19 @@
         .map((p, i) => {
           const mine = p.account === GS.core.S.account;
           const clickable = !!p.account;
+          // 对外只露昵称：account 只作取数键（data-account），不上屏
+          const nick = p.name || '匿名玩家';
           return (
             '<div class="rank-row' + (i < 3 ? ' rtop-' + (i + 1) : '') + '"' +
               (mine ? ' data-mine="1"' : '') +
               (clickable
-                ? ' data-account="' + esc(p.account) + '" data-nick="' + esc(p.name || p.account) + '" role="button"'
+                ? ' data-account="' + esc(p.account) + '" data-nick="' + esc(nick) + '" role="button"'
                 : '') +
               '>' +
               '<div class="rank-no ' + (i < 3 ? 'md' + (i + 1) : '') + '">' + (i + 1) + '</div>' +
               '<img class="ava" src="/img/avatar-' + esc(p.ava || 'auntie') + '-96.png" alt="">' +
               '<div class="list-main">' +
-                '<div class="list-t1">' + esc(p.name || p.account) +
+                '<div class="list-t1">' + esc(nick) +
                   (mine ? ' <span class="tag tag-gold">我</span>' : '') + '</div>' +
                 '<div class="list-t2">' +
                   (p.realm ? esc(p.realm.name) + ' · ' + esc(p.realm.short || p.realm.honor || '') : '') +
@@ -125,7 +127,7 @@
     if (!account) return;
     const seq = ++posSeq;
     const ctl = GS.core.sheet({
-      title: (nick || account) + ' · 持仓',
+      title: (nick || '玩家') + ' · 持仓',
       html: '<div class="pos-loading">正在读取…</div>',
     });
     GS.api
@@ -173,10 +175,9 @@
       '<div class="pos-head">' +
         '<img class="ava" src="/img/avatar-' + esc((d.avatar && d.avatar.key) || 'auntie') + '-96.png" alt="">' +
         '<div class="pos-head-main">' +
-          '<div class="pos-head-name">' + esc(d.name || d.account) + '</div>' +
+          '<div class="pos-head-name">' + esc(d.name || '匿名玩家') + '</div>' +
           '<div class="pos-head-sub">' +
             (d.broker ? esc(brokerAbbr(d.broker)) + stars : '未开户') +
-            ' · 账号 ' + esc(d.account) +
           '</div>' +
         '</div>' +
         '<div class="pos-head-right">' +

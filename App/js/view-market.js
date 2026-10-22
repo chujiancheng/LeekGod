@@ -59,7 +59,13 @@
       '</div>' +
       '<div class="sec-title">全部标的</div>' +
       '<div class="card card-flat"><div class="stock-list" id="stockList"></div></div>' +
-      '<div class="hint">点任意标的进入详情。左侧迷你走势来自全市场降采样，约 30 秒更新一次。</div>';
+      '<div class="hint">点任意标的进入详情。左侧迷你走势来自全市场降采样，约 30 秒更新一次。</div>' +
+      '<div class="sec-title">最新消息</div>' +
+      '<div class="card card-flat">' +
+        '<div class="news-list" id="homeNewsHints"></div>' +
+        '<div class="news-list" id="homeNews"></div>' +
+        '<button class="news-more" id="homeNewsMore">查看全部消息 ›</button>' +
+      '</div>';
 
     GS.core.on(root, '.stock-row', 'click', (e, t) => {
       GS.viewStock.open(t.dataset.stock);
@@ -67,6 +73,11 @@
     GS.core.on(root, '#mineCard', 'click', () => {
       GS.app.switchTo('me');
     });
+    // 首页消息：点个股行/异动提示进详情，点「查看全部」开消息 tab
+    GS.core.on(root, '#homeNews [data-stock], #homeNewsHints [data-stock]', 'click', (e, t) => {
+      if (t.dataset.stock) GS.viewStock.open(t.dataset.stock);
+    });
+    GS.core.on(root, '#homeNewsMore', 'click', () => GS.viewNews.open());
     // 指数 hero 名：打开大盘档案（股娘天团，立绘是全员合照）
     GS.core.on(root, '#idxArchive', 'click', () => {
       const idx = GS.core.S.state && GS.core.S.state.index;
@@ -251,6 +262,12 @@
         r.pill.className = 'pill num ' + cls(m.change);
       }
     });
+
+    // 最新消息卡（首页只放最近 3 条，全部进消息 tab 看）
+    if (GS.viewNews) {
+      GS.viewNews.renderHints(GS.core.$('homeNewsHints'), {});
+      GS.viewNews.renderRows(GS.core.$('homeNews'), { limit: 3 });
+    }
 
     drawAllSparks();
   }

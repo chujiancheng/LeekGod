@@ -1938,6 +1938,26 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
       return `${p(d.getHours())}:${p(d.getMinutes())}`;
     };
     assert(api.minuteTimeLabel(T0 + 30000) === wall(T0 + 30000), `无时钟时退回墙钟（${api.minuteTimeLabel(T0 + 30000)}）`);
+
+    // ---- 本局还没开到的天：5 日视图不许铺出「0日 / -3日」这种不存在的交易日 ----
+    // 天号从 1 起，往前推就是 0、-1、-2…… 硬铺 5 天会在轴左侧标出假日期（线上实测）。
+    api.setState(mkState(DAY, null));
+    const dayW = api.axisDayWidth(PHASES);
+    assert(api.axisTimeLabel(-dayW, false) === '5日 09:30', `前一天刻度带天号（${api.axisTimeLabel(-dayW, false)}）`);
+    assert(api.axisTimeLabel(-2 * dayW, false) === '4日 09:30', `前两天刻度带天号（${api.axisTimeLabel(-2 * dayW, false)}）`);
+
+    api.setState(mkState({ ...DAY, day: 2 }, null));
+    assert(api.axisTimeLabel(-dayW, false) === '1日 09:30', `天 2 时前一天 = 1日（${api.axisTimeLabel(-dayW, false)}）`);
+    assert(api.axisTimeLabel(-2 * dayW, false) === null, '天 2 时再往前（天 0）不画刻度');
+
+    // ---- 5 日是上限：本局不足 5 天时窗口按已开天数收窄，副标题跟着改口 ----
+    api.setMinuteRange('5d');
+    const dom2 = api.minuteDomain([{ t: T0 + 30000, price: 20, vol: 1 }]);
+    assert(Math.abs(dom2.a1 - dom2.a0 - 2 * dayW) < 1, `天 2 的 5 日视图只铺 2 天（${(dom2.a1 - dom2.a0) / dayW}）`);
+    api.setState(mkState({ ...DAY, day: 1 }, null));
+    const dom1 = api.minuteDomain([{ t: T0 + 30000, price: 20, vol: 1 }]);
+    assert(Math.abs(dom1.a1 - dom1.a0 - dayW) < 1, `天 1 的 5 日视图就是当日（${(dom1.a1 - dom1.a0) / dayW}）`);
+    api.setMinuteRange('day');
   }
 
   // ==================================================================

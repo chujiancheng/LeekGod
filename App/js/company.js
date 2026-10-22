@@ -68,18 +68,25 @@
       : '';
     const html =
       '<div class="co-ribbon"></div>' +
-      '<div class="co-portrait"><img src="' + esc(lore.img) + '" alt="' +
-        esc(lore.waifu + '（' + m.name + '拟人）') + '"></div>' +
-      '<div class="co-head">' +
-        logoHtml +
-        '<div class="grow">' +
-          '<div class="co-name">' + esc(m.name) + '</div>' +
-          '<div class="co-code">' + esc(m.stockId) + '</div>' +
+      '<div class="co-hero">' +
+        '<button class="co-portrait" id="coPortrait" aria-label="查看完整立绘">' +
+          '<img src="' + esc(lore.img) + '" alt="' +
+            esc(lore.waifu + '（' + m.name + '拟人）') + '">' +
+          '<span class="co-portrait-tip">点开看大图</span>' +
+        '</button>' +
+        '<div class="co-hero-info">' +
+          '<div class="co-head">' +
+            logoHtml +
+            '<div class="grow">' +
+              '<div class="co-name">' + esc(m.name) + '</div>' +
+              '<div class="co-code">' + esc(m.stockId) + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="co-waifu-row">' +
+            '<span class="co-waifu" id="coWaifu">拟人 · ' + esc(lore.waifu) + '</span>' +
+            '<span class="co-title">' + esc(lore.title) + '</span>' +
+          '</div>' +
         '</div>' +
-      '</div>' +
-      '<div class="co-waifu-row">' +
-        '<span class="co-waifu" id="coWaifu">拟人 · ' + esc(lore.waifu) + '</span>' +
-        '<span class="co-title">' + esc(lore.title) + '</span>' +
       '</div>' +
       '<p class="co-intro">' + esc(lore.intro) + '</p>' +
       '<div class="co-stats">' + statsHtml(m, isIndex) + '</div>' +
@@ -100,11 +107,25 @@
           wf.style.background = lore.color + '2e';
           wf.style.borderColor = lore.color;
         }
+        const art = ctl.body.querySelector('#coPortrait');
+        if (art) {
+          art.onclick = () => openArtwork(m, lore);
+        }
         const btn = ctl.body.querySelector('#coPosterBtn');
         if (btn) {
           btn.onclick = () => openPoster(m.stockId);
         }
       },
+    });
+  }
+
+  /** 立绘大图：小图看不清细节时点开（与合照同款 contain 全图展示，弹层内滚动） */
+  function openArtwork(m, lore) {
+    GS.core.sheet({
+      title: lore.waifu + ' · ' + m.name,
+      html:
+        '<img class="poster-img" src="' + esc(lore.img) + '" alt="' +
+          esc(lore.waifu + '（' + m.name + '拟人）') + '">',
     });
   }
 

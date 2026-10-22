@@ -546,11 +546,15 @@ input { font: inherit; color: inherit; }
 .trade-view {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
-  grid-template-rows: minmax(0, 1fr) 250px;
+  /* 上排最小 300px（标题 + 分时图 150 + 资金指标），矮屏装不下就整块滚动 */
+  grid-template-rows: minmax(300px, 1fr) 250px;
   grid-template-areas:
     "main order"
     "bottom order";
   gap: 8px;
+  /* 矮屏（1366×768 这类）放不下 250px 的持仓区 + 分时图最小高度时，
+     允许整块滚动而不是把分时图压成一条 20px 的横线 */
+  overflow: auto;
 }
 .main {
   grid-area: main;
@@ -593,10 +597,13 @@ input { font: inherit; color: inherit; }
 /* ---------- 顶栏 ---------- */
 .topbar {
   display: flex; align-items: center; gap: 22px;
+  /* 放不下时换行，而不是把某一组挤成竖排：顶栏一旦按字符折行会长到 390px 高，
+     整个交易终端跟着塌（分时图实测只剩 13px），比换行难看得多 */
+  flex-wrap: wrap; row-gap: 6px; align-content: center;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 0 16px;
+  padding: 6px 16px;
   flex: none;
 }
 .view-nav {
@@ -668,10 +675,10 @@ input { font: inherit; color: inherit; }
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.price-block { display: flex; align-items: baseline; gap: 10px; min-width: 180px; }
+.price-block { display: flex; align-items: baseline; gap: 10px; min-width: 180px; flex: none; white-space: nowrap; }
 .big-price { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .price-change { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.stat-group { display: flex; gap: 18px; flex: 1; flex-wrap: wrap; }
+.stat-group { display: flex; gap: 18px; flex: 1 1 260px; min-width: 0; flex-wrap: wrap; }
 .stat { display: flex; flex-direction: column; font-size: 12px; flex: none; }
 .stat label { color: var(--muted); font-size: 11px; }
 .stat span { font-variant-numeric: tabular-nums; }
@@ -682,7 +689,13 @@ input { font: inherit; color: inherit; }
 #stOpen, #stHigh, #stLow, #stPrev { min-width: 40px; }
 #stVol { min-width: 84px; }
 #stAmount { min-width: 68px; }
-.top-right { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+/* 右半区（在线 / 交易日 / 时钟 / 身份 / 三个按钮）：**任何情况下都不许按字符折行**。
+   这里每一项都是短文本，被 flex 压缩后中文会一个字一行，高度直接顶到 390px。 */
+.top-right {
+  display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px;
+  flex: none; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px;
+}
+.top-right > * { flex: none; white-space: nowrap; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
 .conn-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .clock { font-variant-numeric: tabular-nums; color: var(--ink); }
@@ -774,7 +787,7 @@ input { font: inherit; color: inherit; }
 
 /* ---------- 分时图 ---------- */
 .chart-panel { min-height: 0; }
-.chart-wrap { position: relative; flex: 1; min-height: 0; padding: 4px; }
+.chart-wrap { position: relative; flex: 1; min-height: 150px; padding: 4px; }
 #chart { width: 100%; height: 100%; display: block; cursor: crosshair; }
 /* 拖动平移时换成抓取光标：光标本来就是十字准星，不换的话玩家不知道「按住能拖」 */
 #chart.panning { cursor: grabbing; }
@@ -817,7 +830,7 @@ input { font: inherit; color: inherit; }
 
 /* 分时 / 日线切换：放在图表标题左侧，取代原来的「分时走势」标题 */
 .chart-modes {
-  display: inline-flex; gap: 2px; padding: 2px;
+  display: inline-flex; gap: 2px; padding: 2px; flex: none;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
 }
 /* 「当日 / 5 日」只在分时模式出现（日线本来就是一天一根）。
@@ -828,6 +841,8 @@ input { font: inherit; color: inherit; }
 .chart-mode {
   border: 0; background: transparent; color: var(--muted);
   padding: 3px 12px; border-radius: 5px; font-size: 12px; letter-spacing: 0;
+  /* 标题栏被挤时按钮不许按字符折行（「分时」会变成上下两个字的方块） */
+  flex: none; white-space: nowrap;
 }
 .chart-mode:hover { color: var(--ink); }
 .chart-mode.on { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
@@ -2037,15 +2052,18 @@ input { font: inherit; color: inherit; }
 .company-card { width: min(680px, 94vw); padding: 0; overflow: hidden; }
 /* 顶部色带：颜色由 JS 按各公司主题色注入（--c），呼应立绘底色 */
 .company-ribbon { height: 6px; flex: none; }
-.company-body { display: flex; gap: 18px; padding: 20px 22px 8px; align-items: stretch; }
+.company-body { display: flex; gap: 18px; padding: 20px 22px 8px; align-items: flex-start; }
+/* 立绘：按图片自身比例完整展示（不再 object-fit: cover + 固定 300px 高度）。
+   立绘是 640×765 的竖图，装进「210 宽 × 拉伸到信息列高度」的框里，cover 会按高度
+   放大再左右各裁掉约 30px——脸和道具就进了裁剪区，玩家会以为图片没显示全。 */
 .company-portrait {
-  flex: none; width: 210px; min-height: 300px;
+  flex: none; width: 210px; min-height: 0;
   border-radius: 12px; overflow: hidden;
   border: 1px solid var(--line);
   background: var(--panel-2);
 }
 .company-portrait img {
-  width: 100%; height: 100%; object-fit: cover; object-position: top; display: block;
+  width: 100%; height: auto; object-fit: contain; display: block;
 }
 .company-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .company-name-row { display: flex; align-items: baseline; gap: 10px; }
@@ -2104,9 +2122,17 @@ input { font: inherit; color: inherit; }
 
 @media (max-width: 640px) {
   .company-body { flex-direction: column; padding: 16px 16px 6px; }
-  .company-portrait { width: 100%; min-height: 0; height: 300px; }
+  /* 窄屏立绘占满宽度：按 4:5 比例封顶，contain 保证竖图完整（留白比裁脸好） */
+  .company-portrait { width: 100%; height: auto; aspect-ratio: 4 / 5; max-height: 34vh; }
+  .company-portrait img { height: 100%; }
   .company-stats { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* 档案卡在窄屏/矮屏会比视口高（完整立绘 + 8 格资料 + 两个按钮），
+   弹层允许纵向滚动，否则底部的「看全员合照 / 关闭」永远点不到。
+   align-items: safe center 是必须的：普通 center 在内容超高时会把顶部溢出到
+   滚动区之外，滚不回去。 */
+#companyOverlay { overflow-y: auto; align-items: safe center; padding: 10px 0; }
 
 /* ================= 游戏规则（主页入口 + 分类弹窗） ================= */
 /* 入口：没点开过时右上角一个小"新"点，点过即消失（syncRulesEntry 只切 class） */
@@ -2281,7 +2307,7 @@ input { font: inherit; color: inherit; }
    分时图弹幕（Doc/弹幕方案.md L1 飘屏）
    两层结构：.dm-bar 在标题栏（开关 + 输入），.danmaku-layer 在画布上（纯展示）。
    ================================================================== */
-.dm-bar { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.dm-bar { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
 /* display:inline-flex 会盖掉 [hidden] 的默认 display:none，必须显式写一条 */
 .dm-bar[hidden] { display: none; }
 .dm-eye {

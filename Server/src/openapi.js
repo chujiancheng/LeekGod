@@ -29,6 +29,7 @@
 const crypto = require('crypto');
 const config = require('./config');
 const broker = require('./broker');
+const { SseBackpressure } = require('./sseback');
 const { logger } = require('./logger');
 
 const PREFIX = '/open/v1';
@@ -450,13 +451,28 @@ function createOpenApi(game) {
   // 让 100 条连接各自拼一份 JSON（H5 那么做是因为要实时刷新界面）。
   const streams = new Set();
   const streamByKey = new Map();
+  // 写背压闸门与 H5 的 SseHub 共用一套门槛（见 src/sseback.js）：
+  // 策略脚本挂死/断网时连接不会 close，每 tick 的行情帧会无限堆在写队列里。
+  const streamBack = new SseBackpressure(config.http.sse, (c, why, buffered) => {
+    dropStream(c);
+    try {
+      if (c.res.socket) c.res.socket.destroy();
+      else c.res.destroy();
+    } catch (e) {
+      /* 已断 */
+    }
+    logger.warn(
+      `[我是股神] 断开积压的开放接口行情流（${why}，队列 ${(buffered / 1048576).toFixed(1)}MB）：key=${c.keyId}`
+    );
+  });
   game.onTick(() => {
     if (!streams.size) return;
     // 行情快照每 tick 只算一次，各连接按自己的 depth/trades 裁剪
     const snaps = game.marketSnapshots();
     const day = game.day.snapshot();
     const index = indexView(game);
-    for (const c of streams) {
+    for (const c of [...streams]) {
+      if (!streamBack.check(c, nowMs())) continue;
       const frame = {
         seq: game.tickCount,
         t: nowMs(),
@@ -472,7 +488,8 @@ function createOpenApi(game) {
     }
   });
   const heartbeat = setInterval(() => {
-    for (const c of streams) {
+    for (const c of [...streams]) {
+      if (!streamBack.check(c, nowMs())) continue;
       try {
         c.res.write(': ping\n\n');
       } catch (e) {

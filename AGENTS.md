@@ -36,6 +36,14 @@ stop / restart 是**安全关服**，不是立刻杀进程：
 注意：Agent 在会话内**不要**跑 start/stop/restart（PID 文件全局一份，会打掉用户正在跑的正式服务）；
 临时验证用 GU_PID_FILE + PORT + PERSIST_FILE 各指一份临时路径，跑完清临时文件。
 
+# 内存体检（堆一直涨时先看这个）
+curl -H "x-admin-token: <Server/data/admin.token>" http://127.0.0.1:3000/api/admin/memory
+- 先看 sse.bufferedMb / maxBufferedMb / slowConnections：**持续上涨就是有客户端读不动**
+  （App 熄屏、笔记本休眠、弱网），帧被堆在写队列里——2026-10-22 两次 OOM 都是它，
+  闸门见 src/sseback.js；其次才怀疑引擎容器（memory.heapUsedMb）与堆外（rss − heapTotal）。
+- 堆日志跨进程连着读会骗人：used 从 GB 级掉到百 MB 级多半是进程重启，不是「日切释放」，
+  对照 `服务已启动` 与 server-console.log 里的 PID 再下结论。
+
 # 开放平台 API Key（玩家量化策略）
 玩家自助路径（常规，不需要你操作）：登录游戏 → 主页「开放接口」→ /portal.html 生成 / 查看 / 撤销。
 页面走 /api/open/keys（会话令牌鉴权，只能操作自己的 Key），明文只在浏览器弹层出现一次。

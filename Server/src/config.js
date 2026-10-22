@@ -164,10 +164,20 @@ const config = {
       daily: { limit: 60, windowMs: 60000 }, // 日线（切到日线模式 / 换股票时按需拉取）
       admin: { limit: 10, windowMs: 60000 },
     },
-    // SSE 长连接上限
+    // SSE 长连接上限 + 写背压门槛（见 src/sseback.js 顶部的实测数据与判定策略）
+    //
+    // 2026-10-22 事故：一条「连上了但读不动」的连接（App 熄屏 / 笔记本休眠 / 弱网）
+    // 会把每个 tick 的整帧堆进 res 写队列且永不释放，实测单条 1.6GB/小时，
+    // 正式服两次 OOM（4GB 与 2.5GB 两档都撞过）都是它。这里给每条连接加闸门：
+    //   写队列 ≥ slowSkipBytes → 跳过本 tick 的帧（每帧都是全量快照，丢中间帧无损）
+    //   写队列 ≥ slowDropBytes → 拆连接（客户端 retry: 2000 重连，重连即拿全量首帧）
+    //   连续被跳过 slowKickMs → 同样拆掉，别白占 maxConnections 配额
     sse: {
       maxConnections: 500,
       maxPerIp: 20,
+      slowSkipBytes: 512 * 1024, // 约 5~6 帧；正常玩家偶发抖动不该被误杀
+      slowDropBytes: 8 * 1024 * 1024, // 单连接 8MB 封顶，500 连接最坏 4GB → 实际远低于此
+      slowKickMs: 60000, // 连续 1 分钟一帧都塞不进去，基本可以确定是僵尸连接
     },
   },
 

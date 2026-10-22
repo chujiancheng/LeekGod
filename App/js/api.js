@@ -312,7 +312,13 @@
   /* -------------------------------------------------------------- 重登 */
 
   let relogging = false;
-  const onRelogin = new Set();
+  const onReloginCbs = new Set();
+
+  /** 订阅「静默重登」结果（服务端重启导致令牌失效时触发），返回取消函数 */
+  function onRelogin(fn) {
+    onReloginCbs.add(fn);
+    return () => onReloginCbs.delete(fn);
+  }
 
   function relogin() {
     if (relogging || !S.account) return;
@@ -323,15 +329,15 @@
         relogging = false;
         if (r && r.ok) {
           setIdentity(r.account, r.nick, r.token);
-          onRelogin.forEach((fn) => fn(true, r));
+          onReloginCbs.forEach((fn) => fn(true, r));
           connect();
           return;
         }
-        onRelogin.forEach((fn) => fn(false, r));
+        onReloginCbs.forEach((fn) => fn(false, r));
       })
       .catch(() => {
         relogging = false;
-        onRelogin.forEach((fn) => fn(false, null));
+        onReloginCbs.forEach((fn) => fn(false, null));
       });
   }
 

@@ -519,6 +519,7 @@ input::placeholder {
 }
 
 .tab {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -558,6 +559,19 @@ input::placeholder {
   font-size: 10px;
   line-height: 16px;
   text-align: center;
+}
+
+/* tabbar 上的未读角标（消息）：钉在图标右上角，复用 .tab-badge 的胶囊样式 */
+.tab .tab-badge {
+  top: 7px;
+  left: 50%;
+  margin-left: 4px;
+  margin-top: 0;
+  min-width: 15px;
+  height: 15px;
+  line-height: 15px;
+  border: 1.5px solid var(--bg-1);
+  z-index: 1;
 }
 
 /* ---------------------------------------------------------------- 通用卡片 */
@@ -957,6 +971,10 @@ input::placeholder {
   flex: 1;
   min-width: 0;
   margin-bottom: 0;
+  /* 纵向 flex：图表区吃掉卡片里除 tabs / 弹幕输入条外的全部高度，
+     不再让右列（五档+分时成交）把卡片撑高后留一大段空白 */
+  display: flex;
+  flex-direction: column;
 }
 
 .book-panel {
@@ -1014,7 +1032,9 @@ input::placeholder {
 .chart-wrap {
   position: relative;
   width: 100%;
-  height: 296px;
+  /* 高度随图表卡片弹性伸缩（至少 296px），消除右列撑高后的空白 */
+  flex: 1;
+  min-height: 296px;
 }
 
 .chart-wrap canvas {
@@ -1989,6 +2009,173 @@ input::placeholder {
   border: 1px dashed var(--line-2);
 }
 
+/* ---------------------------------------------------------------- 消息列表 */
+
+.news-list {
+  padding: 2px 0;
+}
+
+.news-list:empty {
+  display: none;
+}
+
+/* 一行一条：上排（类型/标的/标签/时间）+ 正文 */
+.n-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.n-row:last-child {
+  border-bottom: 0;
+}
+
+.n-row[data-stock] {
+  cursor: pointer;
+}
+
+.n-row[data-stock]:active {
+  background: var(--bg-2);
+}
+
+.n-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.n-type {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--txt-3);
+}
+
+.n-row.npos .n-type {
+  color: var(--up);
+}
+
+.n-row.nneg .n-type {
+  color: var(--down);
+}
+
+.n-stock {
+  flex: none;
+  font-size: 11px;
+  color: var(--txt-2);
+  background: var(--bg-2);
+  border-radius: 5px;
+  padding: 1px 6px;
+  max-width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.n-stock.idx {
+  color: var(--gold);
+  background: var(--gold-soft);
+}
+
+/* 时段标签（盘前/午间/盘后）与提前量标签（提前/未公开） */
+.n-sess,
+.n-early {
+  flex: none;
+  font-size: 10px;
+  color: var(--txt-3);
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  padding: 0 5px;
+  line-height: 16px;
+}
+
+.n-early {
+  color: var(--gold);
+  border-color: rgba(221, 149, 32, 0.55);
+  background: var(--gold-soft);
+}
+
+.n-time {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--txt-3);
+}
+
+.n-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--txt);
+  word-break: break-word;
+}
+
+/* 提前拿到的消息：左侧金条，正文压暗（方向可能仍被遮蔽） */
+.n-row.nearly {
+  border-left: 2px solid var(--gold);
+  padding-left: 10px;
+}
+
+.n-row.nearly .n-text {
+  color: var(--txt-2);
+}
+
+/* 泄露期异动提示（§7.2 公平窗口）：金色底、不点方向/原因/是谁 */
+.n-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--gold-soft);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.n-hint:active {
+  background: rgba(240, 178, 60, 0.22);
+}
+
+.n-hint-icon {
+  flex: none;
+  font-size: 13px;
+  color: var(--gold);
+}
+
+.n-hint-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--txt-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.n-hint-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--gold);
+}
+
+/* 列表底部的「查看全部」出口 */
+.news-more {
+  width: 100%;
+  padding: 11px 0;
+  font-size: 12px;
+  color: var(--txt-3);
+  border-top: 1px solid var(--line);
+}
+
+.news-more:active {
+  background: var(--bg-2);
+}
+
+.news-list .empty {
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--txt-3);
+  font-size: 12.5px;
+}
+
 /* ---------------------------------------------------------------- 工具类 */
 
 /* 撑满剩余宽度（替代内联 flex:1，CSP 不许内联 style 属性） */
@@ -2240,34 +2427,70 @@ input::placeholder {
   flex-shrink: 0;
 }
 
-/* 档案弹层：色带 + 立绘 + 信息 + 8 格资料 + 全员合照入口 */
+/* 档案弹层：色带 + 紧凑头部（小立绘在左、资料在右）+ 简介 + 8 格资料 + 全员合照入口 */
 .co-ribbon {
   height: 6px;
   border-radius: 4px;
   margin-bottom: 12px;
 }
 
+/* 紧凑头部：小立绘 + 信息列并排，弹层不再被整行大图顶成两屏 */
+.co-hero {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+/* 立绘：小图入口（点开看大图）。仍是 4:5 + contain 完整展示，不许 cover 裁切；
+   只是把「全宽 44vh 大图」缩成 112px 宽的左栏，弹层一屏装得下 */
 .co-portrait {
+  display: flex;
+  flex-direction: column;
+  width: 112px;
+  flex-shrink: 0;
+  padding: 0;
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid var(--line);
   background: var(--bg-2);
-  height: 240px;
+  aspect-ratio: 4 / 5;
 }
 
 .co-portrait img {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: top;
+  object-fit: contain;
+  object-position: center;
   display: block;
+}
+
+.co-portrait-tip {
+  flex-shrink: 0;
+  padding: 3px 0 4px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--txt-3);
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+}
+
+.co-portrait:active .co-portrait-tip {
+  color: var(--gold);
+}
+
+.co-hero-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
 }
 
 .co-head {
   display: flex;
   align-items: center;
   gap: 11px;
-  margin-top: 12px;
 }
 
 .co-logo {
@@ -2295,7 +2518,6 @@ input::placeholder {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 10px;
 }
 
 /* 拟人胶囊：底色/描边由 JS 按公司主题色走 CSSOM 注入 */

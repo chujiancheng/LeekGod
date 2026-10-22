@@ -456,7 +456,19 @@
   }
 
   /**
-   * 分时窗口的起始时刻：当日 = 今天开盘竞价开始；5 日 = 再往前 4 个交易日。
+   * 分时窗口实际覆盖的天数。
+   * 「5 日」是个**上限**：本局才跑到第 2 天时，往前 5 天有 3 天根本不存在，
+   * 硬按 5 天铺轴会在左边画出「-3日 / 0日 09:30」这种不存在的日期（天号从 1 起）。
+   * 所以按已开的天数收窄——开局时 5 日视图就等于当日视图，跑到第 5 天才真是 5 天。
+   */
+  function minuteDays() {
+    if (minuteRange !== '5d') return 1;
+    const todayNo = Number((dayInfo() || {}).day) || 1;
+    return Math.max(1, Math.min(MINUTE_DAYS, todayNo));
+  }
+
+  /**
+   * 分时窗口的起始时刻：当日 = 今天开盘竞价开始；5 日 = 再往前 N 个交易日。
    * 锚点 `dayStartAt` 由服务端下发（客户端没有阶段偏移表，自己算不出来）。
    * 没有交易日时钟时返回 0 = 不过滤，行为与引入窗口之前逐位一致。
    */
@@ -464,7 +476,7 @@
     const d = dayInfo();
     if (!d || !d.dayStartAt) return 0;
     const dayMs = Math.max(1, Number(d.dayEndsAt || 0) - Number(d.dayStartAt));
-    return minuteRange === '5d' ? d.dayStartAt - (MINUTE_DAYS - 1) * dayMs : d.dayStartAt;
+    return minuteRange === '5d' ? d.dayStartAt - (minuteDays() - 1) * dayMs : d.dayStartAt;
   }
 
   /** 分时图真正要画的点：按窗口裁掉更早的交易日（序列按时间升序，二分找起点） */
@@ -2459,7 +2471,9 @@
       sub.textContent = `${m.isIndex ? m.name : ''}${label}${unit} · 蜡烛 + 成交量 + MA5/10/20/30/60/120/250 + MACD(12,26,9)`;
       return;
     }
-    const scope = minuteRange === '5d' ? `连续 ${MINUTE_DAYS} 日` : '当日';
+    const dn = minuteDays();
+    // 本局还没跑满 5 天时如实说「连续 N 日」，别写 5 日让玩家找不存在的前几天
+    const scope = dn > 1 ? `连续 ${dn} 日` : '当日';
     // 定格期在副标题里说明白，否则玩家会以为分时卡住了（数据是对的：竞价/休市价不动）
     const d = dayInfo();
     const frozen = d && frozenPhaseStart() != null ? ` · ${d.label || '休市'}，分时定格` : '';
@@ -3850,10 +3864,12 @@
           ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
              <span class="panel-sub">组内 #${p.brokerRank || 1}</span>${p.star > 1 ? `<span class="mb-star flat">${'★'.repeat(Math.min(p.star, 5))}</span>` : ''}`
           : '<span class="panel-sub">未开户</span>';
-        // 「按账号取数」：按钮带上账号而不是昵称——昵称可重名、可随时改
+        // 「按账号取数」：按钮带上账号而不是昵称——昵称可重名、可随时改。
+        // 但 data-account 只做取数键，**不上屏**：榜上对外只露昵称。
+        const nick = p.name || '匿名玩家';
         const act = p.account
           ? `<td class="rank-act-cell"><button class="mini-btn rank-pos-btn" type="button"
-               data-account="${esc(p.account)}" data-nick="${esc(p.name || p.account)}">持仓</button></td>`
+               data-account="${esc(p.account)}" data-nick="${esc(nick)}">持仓</button></td>`
           : '<td class="rank-act-cell"></td>';
         // 境界只作**附加展示**：不参与排序（排序键永远是权益），也不改行的宽度口径
         const realmTag =
@@ -3868,7 +3884,7 @@
             : String(i + 1);
         return `<tr class="${topCls.trim()}${mine ? ' row-mine' : ''}">
           <td>${noCell}</td>
-          <td>${avaHtml(p.ava, 22, p.realm && p.realm.group, p.name)}${esc(p.name)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
+          <td>${avaHtml(p.ava, 22, p.realm && p.realm.group, nick)}${esc(nick)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
         </tr>`;
@@ -3939,7 +3955,8 @@
     if (!account) return;
     rankPosAccount = account;
     rankPosData = null;
-    $('rankPosTitle').textContent = (nick || account) + ' · 持仓';
+    // 标题只用昵称：账号是取数键，不上屏
+    $('rankPosTitle').textContent = (nick || '玩家') + ' · 持仓';
     $('rankPosSub').textContent = '正在读取…';
     $('rankPosMeta').innerHTML = '';
     $('rankPosBody').innerHTML = '<tr><td colspan="7" class="empty">正在读取…</td></tr>';
@@ -3963,7 +3980,8 @@
     const sub = b
       ? `${b.name}${d.star > 1 ? ' · ' + '★'.repeat(Math.min(d.star, 5)) : ''}`
       : '未开户';
-    $('rankPosSub').innerHTML = `${esc(sub)} · 账号 <b>${esc(d.account)}</b> · 总权益
+    // 弹窗只露昵称与券商：账号属于登录凭据，不进任何对外画面
+    $('rankPosSub').innerHTML = `${esc(sub)} · 总权益
       <span class="${cls(d.equity - d.initialCash)}">¥${fmtMoney(d.equity)}</span>`;
     $('rankPosMeta').innerHTML = `
       <div class="item"><label>可用资金</label><span>¥${fmtMoney(d.cash)}</span></div>
@@ -6099,7 +6117,7 @@
       const dayW = axisDayWidth(phases);
       const endA = axisCoord(Number(d.dayEndsAt)); // 今天收盘（15:00）＝ 今天轴末端
       if (dayW > 0 && Number.isFinite(endA)) {
-        const days = minuteRange === '5d' ? MINUTE_DAYS : 1;
+        const days = minuteDays();
         return { a0: endA - days * dayW, a1: endA, full: true };
       }
     }
@@ -6116,6 +6134,10 @@
     const c = clockAtAxis(a, atDayEnd);
     // 没有阶段表：a 就是墙钟（axisCoord 的退化口径），刻度照旧读墙钟
     if (!c) return fmtHM(a);
+    // 本局开服之前的天（天号 < 1）根本没有行情：5 日视图在开局不足 5 天时，
+    // 左侧那几格会被换算成「0日 / -1日 09:30」这种不存在的日期（天号从 1 开始），
+    // 玩家只会以为时间显示错了。这类刻度直接不画（调用方把 null 当"跳过"）。
+    if (c.day < 1) return null;
     const d = dayInfo();
     const hm = c.seam != null ? `${fmtHM(c.seam)}/${fmtHM(c.ms)}` : fmtHM(c.ms);
     return d && c.day !== d.day ? `${c.day}日 ${hm}` : hm;
@@ -6164,12 +6186,16 @@
     const dayW = axisDayWidth(phases);
     if (!(dayW > 0)) return [];
     const ca = axisCloseAuctionSpan();
+    const todayNo = Number((dayInfo() || {}).day) || 1;
     const out = [];
     // 只取与 [lo, hi] 真的相交的那些天。lo 可以是**负数**（5 日视图的轴起点在今天之前
     // 第 4 天），所以这里不能夹到 0，否则前四天的分界标记全丢
     const k0 = Math.floor(lo / dayW);
     const k1 = Math.floor((hi - 1) / dayW);
     for (let k = k0; k <= k1; k++) {
+      // 本局开服之前的天（天号 < 1）没有行情，分界标记也不该出现——
+      // 否则 5 日视图开局就画出「-3日 / -2日」几条空天的金线，看着像时间轴串位
+      if (todayNo + k < 1) continue;
       const base = k * dayW;
       // 只留下真的落在 [lo, hi) 里的标记：右端那根（正好压在 hi 上）留给下一次滚动，
       // 否则数据没走到的地方也会冒出一根线

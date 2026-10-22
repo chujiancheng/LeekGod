@@ -734,9 +734,17 @@ class Game {
 
     if (this.tickCount % HEAP_LOG_EVERY_TICKS === 0) {
       const hs = v8.getHeapStatistics();
+      const mu = process.memoryUsage();
+      const mb = (n) => Math.round(n / 1048576);
       const usedMb = (hs.used_heap_size / 1048576).toFixed(0);
       const limitMb = (hs.heap_size_limit / 1048576).toFixed(0);
-      logger.info(`[我是股神] 堆内存 used=${usedMb}MB / limit=${limitMb}MB（accounts=${allAccounts.length}）`);
+      // rss/external 一起打：只看 used/limit 分不清「引擎容器涨了」和「堆外/Buffer 涨了」，
+      // 2026-10-22 的 SSE 写积压就是靠这三项对不上才锁定（详见 src/sseback.js）
+      logger.info(
+        `[我是股神] 堆内存 used=${usedMb}MB / limit=${limitMb}MB · rss=${mb(mu.rss)}MB` +
+          ` · external=${mb(mu.external)}MB · arrayBuffers=${mb(mu.arrayBuffers)}MB` +
+          `（accounts=${allAccounts.length}）`
+      );
     }
   }
 

@@ -9,6 +9,7 @@
   const VIEWS = [
     { id: 'market', title: '首页', icon: 'market', view: () => GS.viewMarket },
     { id: 'trade', title: '交易', icon: 'trade', view: () => GS.viewTrade },
+    { id: 'news', title: '消息', icon: 'bell', view: () => GS.viewNews },
     { id: 'rank', title: '排行', icon: 'rank', view: () => GS.viewRank },
     { id: 'me', title: '我的', icon: 'me', view: () => GS.viewMe },
   ];
@@ -76,11 +77,16 @@
         '<button class="tab' + (v.id === active ? ' on' : '') + '" data-view="' + v.id + '">' +
           icon(v.icon) +
           '<span>' + v.title + '</span>' +
+          (v.id === 'news' ? '<span class="tab-badge" id="newsBadge" hidden>0</span>' : '') +
         '</button>'
     ).join('');
     GS.core.on(bar, '[data-view]', 'click', (e, t) => {
+      // 直接点 tab 进消息页 = 无个股上下文（个股页「更多」走 GS.viewNews.open 带上下文）
+      if (t.dataset.view === 'news' && GS.viewNews) GS.viewNews.resetContext();
       switchTo(t.dataset.view);
     });
+    // tabbar 重建后角标元素是新的，按未读数补画一次
+    if (GS.viewNews) GS.viewNews.paintBadge();
   }
 
   function switchTo(id) {
@@ -158,6 +164,7 @@
     if (!GS.core.S.state) refreshAll();
 
     GS.core.subscribe(() => {
+      GS.viewNews.onFrame(GS.core.S.state);
       renderAll();
       tickHeader();
     });
