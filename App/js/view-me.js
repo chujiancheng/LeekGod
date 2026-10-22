@@ -38,6 +38,7 @@
       else if (k === 'invite') GS.share.inviteText();
       else if (k === 'portal') location.href = '/portal.html';
       else if (k === 'rules') openRules();
+      else if (k === 'pwa') openPwaTip();
       else if (k === 'server') {
         try { window.AndroidHost.changeServer(); } catch (e) { /* 无桥忽略 */ }
       }
@@ -129,13 +130,18 @@
       { k: 'rules', icon: '📖', label: '交易规则', val: '' },
       { k: 'logout', icon: '🚪', label: '退出登录', val: '' },
     ];
+    // iPhone/iPad 浏览器里还没装到主屏幕：给一条引导（装了就像原生 App 全屏跑）
+    const env = GS.appEnv || {};
+    if (env.isIOS && !env.standalone) {
+      items.unshift({ k: 'pwa', icon: '📲', label: '装到主屏幕', val: '全屏体验' });
+    }
     // 壳 App 里才有 AndroidHost 桥：加「切换服务器」入口，展示当前地址
     let host = null;
     try { host = window.AndroidHost || null; } catch (e) { /* 浏览器无桥 */ }
     if (host && typeof host.changeServer === 'function') {
       let cur = '';
       try { cur = String(host.server() || ''); } catch (e) { cur = ''; }
-      items.splice(4, 0, {
+      items.splice(5, 0, {
         k: 'server', icon: '🛰', label: '切换服务器',
         val: cur.replace(/^https?:\/\//, ''),
       });
@@ -151,6 +157,22 @@
           '</div>'
       )
       .join('');
+  }
+
+  /* ------------------------------------------------------ 添加到主屏幕引导 */
+
+  function openPwaTip() {
+    GS.core.sheet({
+      title: '装到主屏幕',
+      html:
+        '<div class="hint">把游戏装成 iPhone 上的「App」，全屏运行、桌面图标直达：</div>' +
+        '<div class="card pwa-steps">' +
+          '<div class="pwa-step"><b>1.</b> 点 Safari 底部中间的「分享」按钮 <span class="pwa-glyph">⬆︎</span></div>' +
+          '<div class="pwa-step"><b>2.</b> 往下滑，找到「添加到主屏幕」</div>' +
+          '<div class="pwa-step"><b>3.</b> 点「添加」，回桌面就能看到韭菜图标</div>' +
+        '</div>' +
+        '<div class="hint">下次开盘直接从桌面进，不再占浏览器标签页。</div>',
+    });
   }
 
   /* ---------------------------------------------------------------- 加钱 */

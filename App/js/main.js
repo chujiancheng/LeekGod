@@ -4,6 +4,21 @@
 (function (GS) {
   'use strict';
 
+  /* iOS Safari 忽略 user-scalable=no：捏合整页缩放的手势直接拦掉 */
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+
+  /* PWA 环境探测：iOS 主屏幕安装走 navigator.standalone，安卓走 display-mode */
+  function isIOSDevice() {
+    const ua = navigator.userAgent || '';
+    return /iPhone|iPad|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+  function isStandalone() {
+    return (navigator.standalone === true) ||
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  }
+  GS.appEnv = { isIOS: isIOSDevice(), standalone: isStandalone() };
+
   const { $, esc, icon, num, fmtLeft, cls } = GS.core;
 
   const VIEWS = [

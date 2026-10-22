@@ -56,6 +56,8 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* 渐进增强：支持 dvh 的浏览器（新 iOS / Android）用动态视口，地址栏收放不跳 */
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -69,6 +71,9 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
   user-select: none;
+  /* iOS：禁长按弹出系统菜单（拷贝/分享…）；touch-action 禁双击缩放（保留滚动与捏合） */
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
 }
 
 button {
@@ -2583,4 +2588,34 @@ input::placeholder {
 
 .co-poster-hint {
   margin-top: 10px;
+}
+
+/* 「装到主屏幕」引导（iOS 弹层） */
+.pwa-steps {
+  padding: 14px 16px;
+}
+
+.pwa-step {
+  padding: 7px 0;
+  font-size: 15px;
+  color: var(--txt);
+  line-height: 1.5;
+}
+
+.pwa-step b {
+  color: var(--txt-2);
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.pwa-glyph {
+  display: inline-block;
+  min-width: 22px;
+  text-align: center;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 20px;
+  vertical-align: -3px;
 }
