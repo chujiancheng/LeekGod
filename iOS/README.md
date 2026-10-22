@@ -32,9 +32,25 @@ iOS App 必须有 macOS + Xcode 才能编译，本机是 Windows。所以：
 
 不设也能用：App 第一次打开会弹框让填地址。
 
-## 二、装到 iPhone（Windows，免费 Apple ID）
+## 二、装到 iPhone（免费 Apple ID）
 
-### 方案 A：Sideloadly（推荐，最省事）
+### 先看版本：决定走哪条路
+
+「设置 → 通用 → 关于本机」看版本号。**未签名的 ipa 点网页链接是装不上的**（Safari 只会把它存进「文件」App），
+iOS 的安装通道都要验签，所以免费路线只有下面两种：
+
+| 你的 iOS 版本 | 推荐方式 | 效果 |
+|---|---|---|
+| **14.0 beta2 – 16.6.1、16.7 RC（20H18）、17.0** | **TrollStore**（见方案 C） | **一次装好、永久有效**，之后点 ipa 就装，不用续签 |
+| 17.0.1 及以上 / iOS 18 / 26 | Sideloadly（方案 A）或 AltStore（方案 B） | 7 天有效期，重签一次即可 |
+
+TrollStore 官方口径：17.0.1 以上与 iOS 18/26 **不支持、也不会支持**（CoreTrust 漏洞已被修），
+网上"iOS 18 巨魔""26 巨魔"都是别的工具，别为它买激活码。
+
+要「点链接就能装」且不需要 7 天续签的，只有付费开发者账号（约 688 元/年）：
+TestFlight 或 Ad-Hoc OTA（`itms-services://` 落地页 + 设备 UDID 登记）。需要时再改 CI 出签名包。
+
+### 方案 A：Sideloadly（17.0.1+ 最省事）
 
 1. 电脑装 [iTunes](https://www.apple.com/itunes/download/win64)（只为装苹果驱动；Win11 也可装「Apple Devices」应用）。
 2. 装 [Sideloadly](https://sideloadly.io/)，打开。
@@ -45,12 +61,22 @@ iOS App 必须有 macOS + Xcode 才能编译，本机是 Windows。所以：
 
 ### 方案 B：AltStore（能自动续签，但要在电脑上常驻 AltServer）
 
+适合「几个人长期玩」：插线只需要第 1 次，之后同 WiFi 自动续签，不用每 7 天手动重签。
+
 1. 电脑装 [AltStore](https://altstore.io/)（Windows 版要 iTunes + iCloud）。
 2. AltServer 跑在电脑上，iPhone 和电脑同一个 WiFi，AltStore 里登录 Apple ID。
 3. **My Apps → 左上角 + → 选 ipa 文件** → 安装。
 4. 保持 AltServer 常驻，手机连同一 WiFi 时会自动续签。
 
-### 免费账号的三条硬限制（认证账号无此问题）
+### 方案 C：TrollStore（免费 + 永久，仅限上面那些版本）
+
+1. 先装 TrollStore 本体 —— 它不能像普通 App 那样侧载，要按版本走对应安装器，
+   照 [ios.cfw.guide 的 TrollStore 章节](https://ios.cfw.guide/installing-trollstore/) 操作（装完桌面有个 TrollStore 图标）。
+2. 把 `LeekGod-unsigned.ipa` 存到手机「文件」App（Safari 点下载链接会存到「下载」里）。
+3. 打开 TrollStore → 右下角 **+** → 选那个 ipa → **Install**。
+4. 装完永久可用，重启不失效，也不用续签；以后有新版直接重复第 2~3 步覆盖安装（数据保留）。
+
+### 免费账号的三条硬限制（Sideloadly / AltStore 才有，TrollStore 不受限）
 
 | 限制 | 说明 |
 |---|---|
@@ -58,7 +84,8 @@ iOS App 必须有 macOS + Xcode 才能编译，本机是 Windows。所以：
 | **最多 3 个自签 App** | 同一设备上 |
 | **每人签自己的** | 签名绑 Apple ID + 设备，不能把签好的包发给朋友 |
 
-朋友要装：让他自己下载 ipa，用**他自己的** Apple ID 走一遍上面的流程。
+朋友要装：让他自己下载 ipa，按他自己的版本走上面某一条路线。
+
 
 ## 三、App 里怎么用
 
