@@ -81,6 +81,10 @@
     nick: (nick) => postJSON('/api/nick', { nick }),
     /** 换头像 */
     avatar: (key) => postJSON('/api/avatar', { key }),
+    /** 转户到目标券商：服务端校验冷却/费用/免费重选，返回 {ok, free, fee, reason} */
+    transfer: (broker) => postJSON('/api/broker/transfer', { broker }),
+    /** 用今天的免息券（融资/融券利息全免） */
+    coupon: () => postJSON('/api/broker/coupon', {}),
   };
 
   /* ------------------------------------------------------------ 分时缓存 */

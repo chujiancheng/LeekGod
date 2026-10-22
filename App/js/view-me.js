@@ -4,7 +4,7 @@
 (function (GS) {
   'use strict';
 
-  const { $, esc, fmtAmt, fmtPct, num } = GS.core;
+  const { $, esc, fmtAmt, fmtMoney, fmtPct, num } = GS.core;
 
   let built = false;
 
@@ -29,6 +29,13 @@
       '<div class="hint">模拟盘游戏 · 所有行情与资金均为虚构<br>不构成任何投资建议</div>';
 
     GS.core.on(root, '#meAvaBtn', 'click', openAvatar);
+    // 券商卡里的按钮（转户 / 免息券）：挂在**稳定的 #meBroker 容器**上做委托，
+    // 卡片 innerHTML 每帧可能重建，逐个 addEventListener 会跟着一起丢
+    GS.core.on(root, '#meBroker [data-act]', 'click', (e, t) => {
+      const k = t.dataset.act;
+      if (k === 'transfer') openTransfer();
+      else if (k === 'coupon') useCoupon(t);
+    });
     GS.core.on(root, '#meMenu .menu-item', 'click', (e, t) => {
       const k = t.dataset.act;
       if (k === 'deposit') openDeposit();
@@ -91,30 +98,333 @@
     renderMenu(st, a);
   }
 
+  /* ------------------------------------------------------------ 券商 */
+
+  /**
+   * 券商展示元数据：`state.rules.brokers` 是 describeAll() 的**数组**（与登录页
+   * /api/brokers 同一份），字段含 name/abbr/persona/strengths/costs/crowdPct/preview。
+   * rules.brokers 每帧都带（lite 帧只裁 realm/avatar），所以这里不额外发请求。
+   */
+  function brokerMetas() {
+    const list = GS.core.S.state && GS.core.S.state.rules && GS.core.S.state.rules.brokers;
+    return Array.isArray(list) ? list : [];
+  }
+
+  function metaOf(key, list) {
+    const arr = list || brokerMetas();
+    for (const m of arr) if (m.key === key) return m;
+    return {};
+  }
+
+  /** 佣金显示成「万N」，比 0.0002 直观（与网页版 fmtFeeRate 同口径） */
+  function fmtFee(rate) {
+    if (!Number.isFinite(+rate)) return '--';
+    return '万' + Math.round(+rate * 1000000) / 100;
+  }
+
+  /** 特权进度条宽度必须走 CSSOM：CSP 的 style-src 没放开 unsafe-inline */
+  function paintBars(root) {
+    if (!root) return;
+    root.querySelectorAll('.bk-bar b[data-w]').forEach((el) => {
+      const w = num(el.dataset.w);
+      el.style.width = Math.max(2, Math.min(100, w)) + '%';
+      el.classList.toggle('full', w >= 100);
+    });
+  }
+
+  function starText(star, max) {
+    const m = Math.max(1, num(max) || 5);
+    const s = Math.max(0, Math.min(m, num(star)));
+    return '★'.repeat(s) + '☆'.repeat(m - s);
+  }
+
   function renderBroker(a) {
     const box = $('meBroker');
     if (!box || !a.broker) return;
     const b = a.broker;
+
+    // 特权清单：当前值 / 满额值 + 强度条（服务端算好的 pct，前端不算第二遍）
+    const priv = (b.privileges || [])
+      .map((r) =>
+        '<div class="bk-priv-row">' +
+          '<span class="bk-priv-k">' + esc(r.label) + '</span>' +
+          '<span class="bk-priv-v">' + esc(r.now) + '<i>/' + esc(r.full) + '</i></span>' +
+          '<span class="bk-bar"><b data-w="' + num(r.pct) + '"></b></span>' +
+          (r.extra ? '<span class="tag tag-gold">' + esc(r.extra) + '</span>' : '') +
+        '</div>'
+      )
+      .join('');
+
+    // 下一星门槛：progress 里给了现状值/门槛值，前端只负责拼文案
+    const pr = b.progress;
+    const nextStar = pr
+      ? '<div class="bk-note">距 ' + esc(pr.next) + '★：成交额 ' + fmtAmt(pr.volume) + ' / ' + fmtAmt(pr.volumeNeed) +
+          (num(pr.profitNeed) > 0 ? '，累计盈利 ' + fmtAmt(pr.profit) + ' / ' + fmtAmt(pr.profitNeed) : '') +
+          (pr.noLiquidation ? '（且不能爆仓，当前 ' + num(pr.liquidations) + ' 次）' : '') +
+        '</div>'
+      : '<div class="bk-note">星级已满</div>';
+
+    const wk = b.weekly || {};
+    const weekly = wk.key
+      ? '<div class="bk-note">本周之星：<b>' + esc(metaOf(wk.key).name || wk.key) + '</b>' +
+          (wk.isStar
+            ? '（就是本家：佣金减半 · 融资额度 +0.5×）'
+            : '（下周 ' + esc(metaOf(wk.nextKey).name || wk.nextKey) + '）') +
+        '</div>'
+      : '';
+
+    // 免息券按天发：perDay=0 的券商压根没有这张券，不画按钮
+    const cp = b.coupon || {};
+    const couponBtn = cp.perDay
+      ? '<button class="mini-btn" data-act="coupon">' +
+          (cp.active ? '今日利息已全免' : cp.available ? '用免息券' : '今日券已用') +
+        '</button>'
+      : '';
+
     const html =
-      '<div class="card">' +
+      '<div class="card bk-card">' +
         '<div class="me-row">' +
           '<img class="broker-logo" src="/img/broker-' + esc(b.key) + '-96.png" alt="">' +
           '<div class="list-main">' +
             '<div class="list-t1">' + esc(b.name) +
-              ' <span class="tag tag-gold">' + '★'.repeat(Math.min(5, num(b.star))) + '</span></div>' +
-            '<div class="list-t2">佣金 ' + (num(b.feeRate) * 10000).toFixed(1) + '‱ · 冷却 ' +
-              (num(b.cooldownMs) / 1000).toFixed(1) + 's · 杠杆 ' + num(b.leverage).toFixed(2) + '×</div>' +
+              ' <span class="bk-star">' + starText(b.star, b.starMax) + '</span></div>' +
+            '<div class="list-t2">' + esc(b.abbr || '') +
+              ' · 拥挤度 ' + num(b.crowdPct) + '%（' + esc(b.crowdLabel || '') + '）' +
+              ' · 特权强度 ' + num(b.intensity) + '%</div>' +
           '</div>' +
         '</div>' +
         '<div class="broker-tags">' +
           (b.strengths || []).map((s) => '<span class="tag tag-good">' + esc(s) + '</span>').join('') +
           (b.costs || []).map((s) => '<span class="tag tag-bad">' + esc(s) + '</span>').join('') +
         '</div>' +
+        '<div class="bk-note">佣金 ' + fmtFee(b.feeRate) +
+          (b.weekly && b.weekly.isStar ? '（本周半价）' : '') +
+          ' · 下单冷却 ' + (num(b.cooldownMs) / 1000).toFixed(1) + 's' +
+          ' · 融资 ' + num(b.leverage).toFixed(2) + '×' +
+          ' · 保证金 ' + Math.round(num(b.marginRatio) * 100) + '%' +
+        '</div>' +
+        (priv ? '<div class="bk-priv">' + priv + '</div>' : '') +
+        nextStar +
+        weekly +
+        '<div class="bk-acts">' +
+          '<button class="mini-btn" data-act="transfer">转户</button>' +
+          couponBtn +
+        '</div>' +
       '</div>';
     if (box.dataset.h !== html) {
       box.dataset.h = html;
       box.innerHTML = html;
+      paintBars(box);
     }
+  }
+
+  /**
+   * 转户规则原文（rules.brokerMeta.transfer）。
+   * 账户切片里的 account.broker.transfer 只给「这次能不能转」，不含配置项
+   * （cooldownDays / freeReselectDays），文案里的天数得从规则表取。
+   */
+  function transferConf() {
+    const st = GS.core.S.state;
+    const gm = st && st.rules && st.rules.brokerMeta && st.rules.brokerMeta.transfer;
+    return gm || {};
+  }
+
+  /** 转户细节一段话：费用口径与冷却天数都取服务端下发的，别在前端写死 */
+  function transferNote(bk) {
+    const tf = bk.transfer || {};
+    const conf = transferConf();
+    const days = num(tf.cooldownDays != null ? tf.cooldownDays : conf.cooldownDays) || 1;
+    const freeDays = num(conf.freeReselectDays) || 1;
+    const rate = (num(tf.feeRate != null ? tf.feeRate : conf.feeRate) * 100).toFixed(2) + '%';
+    const cap = fmtMoney(tf.feeCap != null ? tf.feeCap : conf.feeCap == null ? 50000 : conf.feeCap);
+    return (
+      '<div class="bk-tf-note">转户费 = 总资产 × ' + rate + '（上限 ¥' + cap + '）' +
+        ' · 冷却 ' + days + ' 个交易日 · 开户后 ' + freeDays + ' 个交易日内可免费重选 1 次' +
+        (tf.freeReselectUsed ? '（本次免费重选机会已用掉）' : '') +
+        '<br>转户会<b>清空离开那家与目标那家</b>的声誉星级与特权进度——回到老东家也要重新攒。</div>'
+    );
+  }
+
+  /**
+   * 转户弹层：六家券商逐张列出，服务端 transfer.options 已经算好每家
+   * 「能不能转 / 免不免费 / 多少钱 / 为什么不能」，前端只做标注与两次点击确认
+   * （移动端不用原生 confirm：样式丑、且 iOS PWA 里会被拦）。
+   */
+  function openTransfer() {
+    const st = GS.core.S.state;
+    const a = st && st.account;
+    const bk = a && a.broker;
+    if (!bk) return;
+    const metas = brokerMetas();
+    if (!metas.length) {
+      GS.core.toast('券商目录还没拉到，稍后再试', 'err');
+      return;
+    }
+    const opts = {};
+    for (const o of (bk.transfer && bk.transfer.options) || []) opts[o.key] = o;
+
+    const cards = metas
+      .map((m) => {
+        const o = opts[m.key] || {};
+        const cur = m.key === bk.key;
+        const p = m.preview || {};
+        let cls = 'bk-tf-card';
+        let tag = '';
+        let tagCls = 'tag';
+        if (cur) {
+          cls += ' cur';
+          tag = '当前券商';
+          tagCls = 'tag tag-gold';
+        } else if (o.free) {
+          tag = '免费重选';
+          tagCls = 'tag tag-good';
+        } else if (o.ok) {
+          tag = '转户费 ¥' + fmtMoney(o.fee);
+        } else {
+          cls += ' off';
+          tag = o.reason || '暂不可转';
+          tagCls = 'tag tag-bad';
+        }
+        const lock = cur || !o.ok;
+        return (
+          '<div class="' + cls + '" data-tf="' + esc(m.key) + '"' +
+            (lock ? ' data-lock="1"' : '') + '>' +
+            '<div class="me-row">' +
+              '<img class="broker-logo" src="/img/broker-' + esc(m.key) + '-96.png" alt="">' +
+              '<div class="list-main">' +
+                '<div class="list-t1">' + esc(m.name) +
+                  '<span class="bk-abbr">' + esc(m.abbr || '') + '</span>' +
+                  (bk.weekly && bk.weekly.key === m.key ? '<span class="tag tag-gold">本周之星</span>' : '') +
+                '</div>' +
+                '<div class="list-t2">佣金 ' + fmtFee(p.feeRate) +
+                  ' · 冷却 ' + (num(p.cooldownMs) / 1000).toFixed(1) + 's' +
+                  ' · 融资 ' + num(p.leverage).toFixed(2) + '×' +
+                  ' · 拥挤度 ' + num(m.crowdPct) + '%（' + esc(m.crowdLabel || '') + '）</div>' +
+              '</div>' +
+              '<span class="' + tagCls + '">' + esc(tag) + '</span>' +
+            '</div>' +
+            '<div class="broker-tags">' +
+              (m.strengths || []).slice(0, 2).map((s) => '<span class="tag tag-good">' + esc(s) + '</span>').join('') +
+              (m.costs || []).slice(0, 1).map((s) => '<span class="tag tag-bad">' + esc(s) + '</span>').join('') +
+            '</div>' +
+            (lock
+              ? ''
+              : '<div class="bk-tf-armed" hidden>' +
+                  '<span class="bk-tf-ask">' +
+                    (o.free ? '确认免费转入？' : '确认支付 ¥' + fmtMoney(o.fee) + ' 转户？') +
+                    '两边星级与进度会清空' +
+                  '</span>' +
+                  '<button class="mini-btn primary" data-go="' + esc(m.key) + '">确认转户</button>' +
+                  '<button class="mini-btn" data-cancel="1">取消</button>' +
+                '</div>') +
+          '</div>'
+        );
+      })
+      .join('');
+
+    GS.core.sheet({
+      title: '转户',
+      html:
+        '<div class="bk-tf-head">' + esc(bk.name) + ' · ' + starText(bk.star, bk.starMax) +
+          ' · 总资产 ¥' + fmtMoney(a.equity) + '</div>' +
+        '<div class="bk-tf-list">' + cards + '</div>' +
+        transferNote(bk),
+      onMount(ctl) {
+        const body = ctl.body;
+        const disarm = () =>
+          body.querySelectorAll('.bk-tf-armed').forEach((n) => {
+            n.hidden = true;
+          });
+        GS.core.on(body, '[data-tf]', 'click', (e, t) => {
+          // 卡片内部的确认/取消按钮自己处理，别被卡片点击冒泡抢走
+          if (e.target.closest('[data-go]') || e.target.closest('[data-cancel]')) return;
+          if (t.dataset.lock === '1') {
+            const o = opts[t.dataset.tf] || {};
+            if (t.dataset.tf !== bk.key) GS.core.toast(o.reason || '暂不可转', 'err');
+            return;
+          }
+          const wasOpen = t.querySelector('.bk-tf-armed:not([hidden])');
+          disarm();
+          const armed = t.querySelector('.bk-tf-armed');
+          if (armed && !wasOpen) armed.hidden = false;
+        });
+        GS.core.on(body, '[data-cancel]', 'click', (e, t) => {
+          const armed = t.closest('.bk-tf-armed');
+          if (armed) armed.hidden = true;
+        });
+        GS.core.on(body, '[data-go]', 'click', (e, t) => {
+          submitTransfer(t, t.dataset.go, opts[t.dataset.go] || {});
+        });
+      },
+    });
+  }
+
+  function submitTransfer(btn, key, o) {
+    const name = metaOf(key).name || key;
+    btn.disabled = true;
+    btn.textContent = '处理中…';
+    GS.api.api
+      .transfer(key)
+      .then((r) => {
+        if (r && r.ok) {
+          GS.core.toast(
+            r.free ? '已免费转到 ' + name : '已转户到 ' + name + '，费用 ¥' + fmtMoney(r.fee),
+            'ok'
+          );
+          GS.core.closeSheet();
+          refreshState();
+          return;
+        }
+        btn.disabled = false;
+        btn.textContent = '确认转户';
+        GS.core.toast((r && (r.error || r.reason)) || '转户失败', 'err');
+      })
+      .catch(() => {
+        btn.disabled = false;
+        btn.textContent = '确认转户';
+        GS.core.toast('网络异常', 'err');
+      });
+  }
+
+  function useCoupon(btn) {
+    const a = GS.core.S.state && GS.core.S.state.account;
+    const cp = (a && a.broker && a.broker.coupon) || {};
+    if (cp.active) return GS.core.toast('今天的利息已经全免了', 'ok');
+    if (!cp.available) return GS.core.toast('今天的免息券已经用过了', 'err');
+    if (btn) btn.disabled = true;
+    GS.api.api
+      .coupon()
+      .then((r) => {
+        if (r && r.ok) {
+          GS.core.toast('今日融资 / 融券利息全免已生效', 'ok');
+          refreshState();
+          return;
+        }
+        if (btn) btn.disabled = false;
+        GS.core.toast((r && r.error) || '免息券不可用', 'err');
+      })
+      .catch(() => {
+        if (btn) btn.disabled = false;
+        GS.core.toast('网络异常', 'err');
+      });
+  }
+
+  /**
+   * 转户/用券之后拉一次全量 state 立即刷新界面。
+   * 不等下一帧 SSE：星级、特权、免息券这些字段都在账户切片里，自己改完马上看到
+   * 结果比等 700ms 舒服，也避免「点了没反应」的错觉。
+   */
+  function refreshState() {
+    return GS.api.api
+      .state()
+      .then((s) => {
+        if (s && s.ok !== false && s.markets) {
+          GS.core.S.state = s;
+          GS.core.S.stateAt = Date.now();
+          GS.core.emit();
+        }
+      })
+      .catch(() => {});
   }
 
   function renderMenu(st, a) {

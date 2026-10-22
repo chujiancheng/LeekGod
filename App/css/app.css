@@ -392,6 +392,214 @@ input::placeholder {
 .tag-bad { color: var(--up); background: var(--up-soft); }
 .tag-gold { color: var(--gold); background: var(--gold-soft); }
 
+/* ---------- 我的券商卡：星级 / 拥挤度 / 特权清单 / 转户 / 免息券 ---------- */
+
+.bk-star {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--gold);
+}
+
+.bk-priv {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.bk-priv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--txt-3);
+}
+
+.bk-priv-k {
+  flex-shrink: 0;
+  width: 66px;
+}
+
+.bk-priv-v {
+  flex-shrink: 0;
+  color: var(--txt);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.bk-priv-v i {
+  color: var(--txt-3);
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* 进度条宽度由 JS 走 CSSOM 落（CSP 禁内联 style 属性） */
+.bk-bar {
+  flex: 1;
+  min-width: 38px;
+  height: 5px;
+  border-radius: 4px;
+  background: #e9ecf1;
+  overflow: hidden;
+}
+
+.bk-bar b {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--gold), #f08a1c);
+  transition: width 0.45s var(--ease);
+}
+
+.bk-bar b.full {
+  background: linear-gradient(90deg, #f08a1c, var(--up));
+}
+
+.bk-note {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--txt-3);
+}
+
+.bk-note b {
+  color: var(--txt-2);
+}
+
+.bk-acts {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.bk-acts .mini-btn {
+  flex: 1;
+  height: 34px;
+}
+
+.bk-acts .mini-btn:first-child {
+  font-weight: 600;
+  color: var(--gold);
+  border-color: rgba(221, 149, 32, 0.5);
+  background: #fffaf0;
+}
+
+.bk-acts .mini-btn[disabled] {
+  opacity: 0.5;
+}
+
+/* ---------- 转户弹层 ---------- */
+
+.bk-tf-head {
+  padding: 2px 2px 10px;
+  font-size: 12px;
+  color: var(--txt-2);
+}
+
+.bk-tf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 2px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bk-tf-card {
+  padding: 11px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease);
+}
+
+.bk-tf-card:active {
+  background: var(--bg-2);
+}
+
+.bk-tf-card.cur {
+  border-color: rgba(221, 149, 32, 0.55);
+  background: #fffaf0;
+}
+
+/* 当前券商与暂不可转的卡压暗，同时拒绝 :active 反馈，避免误以为能点 */
+.bk-tf-card.off {
+  opacity: 0.62;
+}
+
+.bk-tf-card.off:active,
+.bk-tf-card.cur:active {
+  background: var(--bg-1);
+}
+
+.bk-tf-card.cur:active {
+  background: #fffaf0;
+}
+
+.bk-abbr {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--txt-3);
+}
+
+.bk-tf-card .broker-tags {
+  margin-top: 7px;
+}
+
+/* 只有卡片首行的状态 tag 靠右；chips 行里的 tag 不许被推开 */
+.bk-tf-card > .me-row > .tag {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.bk-tf-armed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line-2);
+}
+
+.bk-tf-ask {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--txt-2);
+}
+
+.bk-tf-armed .mini-btn {
+  flex-shrink: 0;
+}
+
+.mini-btn.primary {
+  font-weight: 600;
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #ffb340, #f08a1c);
+}
+
+.mini-btn.primary:active {
+  background: linear-gradient(135deg, #ffa726, #e07f14);
+}
+
+.mini-btn.primary[disabled] {
+  opacity: 0.55;
+}
+
+.bk-tf-note {
+  margin-top: 12px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--txt-3);
+}
+
+.bk-tf-note b {
+  color: var(--txt-2);
+}
+
 /* ---------------------------------------------------------------- 主壳 */
 
 .app {
