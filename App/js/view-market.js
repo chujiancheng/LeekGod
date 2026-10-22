@@ -40,12 +40,12 @@
           '<div class="bar"><i id="mineRealmBar"></i></div>' +
         '</div>' +
       '</div>' +
-      '<div class="hero" id="idxHero">' +
-        '<button class="hero-name" id="idxArchive" aria-label="查看大盘档案">' +
+      '<div class="hero" id="idxHero" role="button" tabindex="0" aria-label="查看大盘行情">' +
+        '<div class="hero-name">' +
           '<span id="idxName">全村希望</span>' +
           '<span class="tag" id="idxCode">999999</span>' +
-          '<span class="archive-tag">档案 ›</span>' +
-        '</button>' +
+          '<span class="archive-tag hero-more">行情 ›</span>' +
+        '</div>' +
         '<div class="hero-price"><b class="num" id="idxLast">—</b>' +
           '<span class="hero-chg num" id="idxChg">—</span></div>' +
         '<div class="hero-spark"><canvas class="spark-canvas" id="idxSpark"></canvas></div>' +
@@ -59,7 +59,7 @@
       '</div>' +
       '<div class="sec-title">全部标的</div>' +
       '<div class="card card-flat"><div class="stock-list" id="stockList"></div></div>' +
-      '<div class="hint">点任意标的进入详情。左侧迷你走势来自全市场降采样，约 30 秒更新一次。</div>' +
+      '<div class="hint">点大盘卡看指数分时与成分股，点任意标的进入个股详情。左侧迷你走势来自全市场降采样，约 30 秒更新一次。</div>' +
       '<div class="sec-title">最新消息</div>' +
       '<div class="card card-flat">' +
         '<div class="news-list" id="homeNewsHints"></div>' +
@@ -78,10 +78,11 @@
       if (t.dataset.stock) GS.viewStock.open(t.dataset.stock);
     });
     GS.core.on(root, '#homeNewsMore', 'click', () => GS.viewNews.open());
-    // 指数 hero 名：打开大盘档案（股娘天团，立绘是全员合照）
-    GS.core.on(root, '#idxArchive', 'click', () => {
+    // 指数 hero：点整卡进「大盘行情」（分时/K线/成分股，与网页版点指数卡同口径）。
+    // 「股娘天团」档案入口挪到行情页里（个股页同款档案行），卡片上不再挂两个入口。
+    GS.core.on(root, '#idxHero', 'click', () => {
       const idx = GS.core.S.state && GS.core.S.state.index;
-      if (GS.company && idx) GS.company.openProfile(idx.stockId);
+      if (idx && idx.stockId) GS.viewStock.open(idx.stockId);
     });
 
     built = true;

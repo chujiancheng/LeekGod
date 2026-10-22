@@ -65,6 +65,10 @@
   }
 
   function skeleton(m) {
+    // 指数（999999）复用同一套骨架：行情头 + 图表 + 资金 + 消息完全一样，
+    // 只把「交易件」换掉——没有五档/分时成交（指数没有自己的盘口），
+    // 换成分成股列表；没有买卖栏、没有弹幕（指数没有 NPC 池，不产生弹幕）
+    const idx = !!(m && m.isIndex);
     const shareBtn = m
       ? '<button class="icon-btn" id="stockShare" aria-label="分享">' + GS.core.icon('share') + '</button>'
       : '';
@@ -87,7 +91,7 @@
             '<span>最低<b class="num" id="qLow">—</b></span>' +
             '<span>昨收<b class="num" id="qPrev">—</b></span>' +
             '<span>成交<b class="num" id="qTurn">—</b></span>' +
-            '<span>市值<b class="num" id="qCap">—</b></span>' +
+            '<span>' + (idx ? '总市值' : '市值') + '<b class="num" id="qCap">—</b></span>' +
           '</div>' +
         '</div>' +
 
@@ -106,21 +110,30 @@
               '<canvas id="chartCanvas"></canvas>' +
               '<div class="chart-tip" id="chartTip" hidden></div>' +
             '</div>' +
-            '<div class="dm-send">' +
-              '<input id="dmInput" maxlength="60" placeholder="发条弹幕…" enterkeyhint="send">' +
-              '<button class="mini-btn" id="dmSend">发送</button>' +
-            '</div>' +
+            (idx
+              ? ''
+              : '<div class="dm-send">' +
+                  '<input id="dmInput" maxlength="60" placeholder="发条弹幕…" enterkeyhint="send">' +
+                  '<button class="mini-btn" id="dmSend">发送</button>' +
+                '</div>') +
           '</div>' +
-          '<div class="book-panel">' +
-            '<div class="book-panel-title">五档盘口</div>' +
-            '<div class="book" id="bookBox"></div>' +
-            '<div class="book-sub">分时成交</div>' +
-            '<div class="panel-ticker" id="tickerBox"></div>' +
-          '</div>' +
+          (idx
+            ? '<div class="book-panel comp-panel">' +
+                '<div class="book-panel-title">成分股</div>' +
+                '<div class="comp-list" id="compList"></div>' +
+                '<div class="book-sub">点成分看个股</div>' +
+              '</div>'
+            : '<div class="book-panel">' +
+                '<div class="book-panel-title">五档盘口</div>' +
+                '<div class="book" id="bookBox"></div>' +
+                '<div class="book-sub">分时成交</div>' +
+                '<div class="panel-ticker" id="tickerBox"></div>' +
+              '</div>') +
         '</div>' +
 
         '<div class="card">' +
-          '<div class="card-head"><div class="card-title">资金</div>' +
+          '<div class="card-head"><div class="card-title">' +
+            (idx ? '资金 · 成分合计' : '资金') + '</div>' +
             '<div class="card-more num" id="flowNet">—</div></div>' +
           '<div class="flow-bar"><i id="flowOuter"></i><i id="flowInner"></i></div>' +
           '<div class="flow-legend"><span id="flowOuterTxt">外盘 —</span>' +
@@ -135,10 +148,12 @@
 
         '<div id="haltBox"></div>' +
       '</div>' +
-      '<div class="act-bar" id="actBar">' +
-        '<button class="btn-buy" data-side="buy_open">买入</button>' +
-        '<button class="btn-sell" data-side="sell_close">卖出</button>' +
-      '</div>'
+      (idx
+        ? ''
+        : '<div class="act-bar" id="actBar">' +
+            '<button class="btn-buy" data-side="buy_open">买入</button>' +
+            '<button class="btn-sell" data-side="sell_close">卖出</button>' +
+          '</div>')
     );
   }
 
@@ -154,13 +169,14 @@
     state.dmSeen.clear();
 
     const m = GS.core.market(state.stockId);
+    const idx = GS.core.isIndex(state.stockId);
     const ctl = GS.core.openPage({
       html: skeleton(m),
       onMount(el) {
         GS.core.bindPageBack(el.el);
         // 分享当前个股行情（头部右上角）
         GS.core.on(el.el, '#stockShare', 'click', () => GS.share.stockText(state.stockId));
-        // 公司档案两处入口：点头部股票名 / 点报价卡下的档案行
+        // 公司档案两处入口：点头部股票名 / 点报价卡下的档案行（指数是「股娘天团」）
         const openArchive = () => {
           if (GS.company) GS.company.openProfile(state.stockId);
         };
@@ -168,7 +184,16 @@
         GS.core.on(el.el, '#coEntry', 'click', openArchive);
         // 消息卡：点个股行不跳（就在本股），点「更多」进消息 tab 的本股过滤
         GS.core.on(el.el, '#stockNewsMore', 'click', () => {
-          GS.viewNews.open({ stockId: state.stockId });
+          // 指数没有「本股」概念，直接进消息 tab 的「大盘」档
+          if (GS.core.isIndex(state.stockId)) GS.viewNews.open({ filter: 'index' });
+          else GS.viewNews.open({ stockId: state.stockId });
+        });
+        // 成分股：换一只票看（二级页只有一份 DOM，先收掉本页再开新的，避免叠层丢内容）
+        GS.core.on(el.el, '.comp-row', 'click', (e, t) => {
+          const sid = t.dataset.compStock;
+          if (!sid || sid === state.stockId) return;
+          GS.core.closePage();
+          GS.viewStock.open(sid);
         });
         bindTabs(el.el);
         bindChartTouch(el.el);
@@ -186,14 +211,17 @@
       tick();
     });
     // 弹幕观看心跳（60s 一次，与网页版同口径）：没有它 watcher 过期后，
-    // 这只票就不再生成 NPC 弹幕——纯 App 玩家盯的票会整场冷清
-    const watchTick = () => {
-      GS.api
-        .getJSON('/api/danmaku/watch?stock=' + encodeURIComponent(state.stockId))
-        .catch(() => {});
-    };
-    watchTick();
-    state.dmWatchTimer = setInterval(watchTick, 60000);
+    // 这只票就不再生成 NPC 弹幕——纯 App 玩家盯的票会整场冷清。
+    // 指数不生成弹幕（没有 NPC 池），也就没有心跳可打
+    if (!idx) {
+      const watchTick = () => {
+        GS.api
+          .getJSON('/api/danmaku/watch?stock=' + encodeURIComponent(state.stockId))
+          .catch(() => {});
+      };
+      watchTick();
+      state.dmWatchTimer = setInterval(watchTick, 60000);
+    }
     const prevClose = ctl.onClose;
     ctl.onClose = () => {
       if (state.unsub) state.unsub();
@@ -852,6 +880,16 @@
     set('qTurn', fmtAmt(m.turnover));
     set('qCap', fmtAmt(m.marketCap));
 
+    // 指数（大盘行情页）：只有成分股、资金合计、消息与图表，没有盘口/逐笔/弹幕/下单
+    if (m.isIndex) {
+      renderComponents(m);
+      renderFlow(m);
+      renderHalt(st, m);
+      renderNews();
+      if (Date.now() - state.lastDraw > 500) draw();
+      return;
+    }
+
     renderBook(m);
     renderFlow(m);
     renderTicker(m);
@@ -918,6 +956,43 @@
     });
   }
 
+  /**
+   * 成分股列表（指数页右栏，替代个股的五档/分时成交）。
+   * 一帧一变的价格只 patch 文本；名单与权重变动才重建（权重每 tick 由服务端重算）。
+   * 行是 button：点一只成分股就换到那只票的详情页。
+   */
+  function renderComponents(m) {
+    const box = $('compList');
+    if (!box) return;
+    const rows = m.components || [];
+    const sig = rows.map((r) => r.stockId).join(',');
+    if (box.dataset.sig !== sig) {
+      box.dataset.sig = sig;
+      box.innerHTML =
+        rows
+          .map(
+            (r) =>
+              '<button class="comp-row" data-comp-stock="' + esc(r.stockId) + '">' +
+                '<span class="comp-name">' + esc(r.name || r.stockId) + '</span>' +
+                '<span class="comp-pct num" data-cpct="' + esc(r.stockId) + '">' +
+                  fmtPct(r.changePct) + '</span>' +
+                '<i class="comp-bar"><b data-cw="' + esc(r.stockId) + '"></b></i>' +
+              '</button>'
+          )
+          .join('') || '<div class="empty">暂无成分</div>';
+    }
+    rows.forEach((r) => {
+      const pct = box.querySelector('[data-cpct="' + r.stockId + '"]');
+      if (pct) {
+        pct.textContent = fmtPct(r.changePct);
+        pct.className = 'comp-pct num ' + cls(r.changePct);
+      }
+      // 权重条宽度走 CSSOM（CSP 禁内联 style 属性）
+      const bar = box.querySelector('[data-cw="' + r.stockId + '"]');
+      if (bar) bar.style.width = Math.max(0, Math.min(100, num(r.weight))) + '%';
+    });
+  }
+
   function renderFlow(m) {
     const f = m.flow || {};
     const outer = num(f.outerVol);
@@ -981,7 +1056,8 @@
     } else if (day && !day.trading) {
       html =
         '<div class="halt-tip">🕐 当前 ' + esc(day.label || '休市') +
-        '，' + fmtLeft(day.phaseLeftMs) + '后进入下一阶段。休市期间不能下单。</div>';
+        '，' + fmtLeft(day.phaseLeftMs) + '后进入下一阶段。' +
+        (m && m.isIndex ? '休市期间大盘走势不再刷新。' : '休市期间不能下单。') + '</div>';
     } else if (day && day.auction) {
       html = '<div class="halt-tip">📣 ' + esc(day.label || '集合竞价') + ' 进行中，' +
         fmtLeft(day.phaseLeftMs) + '后开盘。</div>';

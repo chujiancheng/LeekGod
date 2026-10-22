@@ -182,12 +182,24 @@ window.GS = window.GS || {};
     });
   }
 
-  /** 当前个股行情 */
+  /**
+   * 当前标的行情。个股在 `state.markets` 里，**指数（999999）单独挂在 `state.index`**——
+   * 服务端 `marketSnapshots()` 不把指数混进 markets 列表，所以这里做一次回落，
+   * 让「个股详情页」这套代码能原样拿去渲染大盘（字段同构，见 indexfeed.snapshot）。
+   */
   function market(stockId) {
     const st = S.state;
-    if (!st || !Array.isArray(st.markets)) return null;
+    if (!st) return null;
+    if (stockId && st.index && st.index.stockId === stockId) return st.index;
+    if (!Array.isArray(st.markets)) return null;
     if (!stockId) return st.markets[0] || null;
     return st.markets.find((m) => m.stockId === stockId) || null;
+  }
+
+  /** 是不是大盘指数：只读标的（不能下单、没有五档/股东榜/弹幕） */
+  function isIndex(stockId) {
+    const st = S.state;
+    return !!(st && st.index && st.index.stockId === stockId);
   }
 
   /** 账户某只股票的持仓 */
@@ -421,7 +433,7 @@ window.GS = window.GS || {};
     $, esc, on,
     fmtP, fmtPct, fmtChg, fmtQty, fmtAmt, fmtMoney, cls, fmtTime, fmtHM, fmtLeft, num,
     store, KEY, S,
-    subscribe, emit, market, position, isTrading, serverNow, stockName,
+    subscribe, emit, market, isIndex, position, isTrading, serverNow, stockName,
     toast, sheet, closeSheet, openPage, closePage, bindBackKey,
     icon, pageHead, bindPageBack,
     MASCOTS, mascotId, setMascot, mascotImg,

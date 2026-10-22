@@ -842,10 +842,92 @@ input::placeholder {
   pointer-events: none;
 }
 
+/* 大盘卡整卡可点：进「大盘行情」（分时/K线/成分股）。按下给一点缩放反馈 */
+.hero {
+  cursor: pointer;
+  transition: transform 0.14s var(--ease);
+}
+
+.hero:active {
+  transform: scale(0.992);
+}
+
+/* 「行情 ›」角标：靠右推到底，告诉玩家这张卡能点开 */
+.hero-more {
+  margin-left: auto;
+  margin-right: 27%; /* 让开右上角看板娘 */
+  color: var(--txt-3);
+}
+
 .spark-canvas {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* 指数页右栏：成分股列表（替代个股的五档 + 分时成交） */
+.comp-panel {
+  width: 132px;
+}
+
+.comp-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.comp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 4px;
+  width: 100%;
+  padding: 3px 8px 4px;
+  border: 0;
+  background: none;
+  text-align: left;
+  transition: background 0.15s var(--ease);
+}
+
+.comp-row:active {
+  background: var(--bg-2);
+}
+
+.comp-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--txt-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.comp-pct {
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.comp-bar {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 1px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.comp-bar b {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--gold);
+  opacity: 0.55;
 }
 
 .stock-list {
