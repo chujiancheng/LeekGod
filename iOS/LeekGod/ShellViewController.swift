@@ -21,6 +21,7 @@ final class ShellViewController: UIViewController {
 
     /// 当前服务器地址（已规范化，无尾斜杠）。空 = 还没设置。
     private var server = ""
+    private var didAskServer = false
 
     // MARK: - 生命周期
 
@@ -33,12 +34,17 @@ final class ShellViewController: UIViewController {
         server = storedServer()
         if server.isEmpty {
             loadOffline()
-            // 装好后第一次打开：构建时没注入地址，先让玩家填一次
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.askServer()
-            }
         } else {
             loadSite()
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 装好后第一次打开且构建时没注入地址：在这里弹（viewDidLoad 里 present 时视图还没进窗口）
+        if server.isEmpty && !didAskServer {
+            didAskServer = true
+            askServer()
         }
     }
 
