@@ -1984,6 +1984,16 @@
       const tab = $('tabs').querySelector('[data-tab="position"]');
       if (tab) tab.click();
     });
+    // 主页「收益排行」卡只放前 10 名，第 11 名以后在排行 tab 翻页看
+    const rankMore = $('homeRankMore');
+    if (rankMore) {
+      rankMore.addEventListener('click', () => {
+        setView('trade');
+        const tab = $('tabs').querySelector('[data-tab="rank"]');
+        if (tab) tab.click(); // 真 DOM：切 tab 的那条链路会顺手拉第一页
+        else loadRankPage(0, true);
+      });
+    }
   }
 
   // ---------- 数据 ----------
@@ -2183,6 +2193,8 @@
     renderOrderPanel();
     renderMarginCall();
     if (activeTab === 'seats') renderSeats();
+    // 排行 tab 停在榜上时定期刷当前页（名次随行情变，但不必每帧重拉；节流在 loadRankPage 里）
+    if (activeView === 'trade' && activeTab === 'rank') loadRankPage(rankPage.offset);
 
     // 新消息提醒
     if (s.lastNews && s.lastNews.id !== lastNewsSeen) {
@@ -3852,50 +3864,125 @@
   }
 
   // ---------- 排行 ----------
-  /** 排行行 HTML（主页只取前几行）。带券商简称与**组内名次**——组内名次是软分流的关键
-   *  （冷门券商的组内名次天然更容易靠前，争榜的动机会把人往冷门赶，§5.3） */
-  function rankRowsHtml(limit) {
-    const rows = (state.players || []).slice(0, limit || undefined);
-    return rows
-      .map((p, i) => {
-        const mine = p.account === me; // 按账号认"我"，昵称可重名可改
-        const b = p.broker ? brokerMeta[p.broker] : null;
-        const tag = b
-          ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
-             <span class="panel-sub">组内 #${p.brokerRank || 1}</span>${p.star > 1 ? `<span class="mb-star flat">${'★'.repeat(Math.min(p.star, 5))}</span>` : ''}`
-          : '<span class="panel-sub">未开户</span>';
-        // 「按账号取数」：按钮带上账号而不是昵称——昵称可重名、可随时改。
-        // 但 data-account 只做取数键，**不上屏**：榜上对外只露昵称。
-        const nick = p.name || '匿名玩家';
-        const act = p.account
-          ? `<td class="rank-act-cell"><button class="mini-btn rank-pos-btn" type="button"
-               data-account="${esc(p.account)}" data-nick="${esc(nick)}">持仓</button></td>`
-          : '<td class="rank-act-cell"></td>';
-        // 境界只作**附加展示**：不参与排序（排序键永远是权益），也不改行的宽度口径
-        const realmTag =
-          p.realm && p.realm.idx > 0
-            ? `<span class="realm-chip sm g-${esc(p.realm.group)}" title="${esc(p.realm.honor || '')}">${esc(p.realm.short || p.realm.name)}</span>`
-            : '';
-        // 前三给奖牌徽章 + 行高亮（纯展示，不动排序口径）
-        const topCls = i < 3 ? ` rank-top rank-top-${i + 1}` : '';
-        const noCell =
-          i < 3
-            ? `<span class="rank-medal rm${i + 1}" title="第 ${i + 1} 名">${i + 1}</span>`
-            : String(i + 1);
-        return `<tr class="${topCls.trim()}${mine ? ' row-mine' : ''}">
+  /** 排行**单行** HTML。
+   *  `no` 是全局名次下标（0 起）——分页时由「本页 offset + 页内序号」算出，
+   *  奖牌徽章、行首序号、前三行高亮都只看它，不依赖这一行恰好排在第几个 DOM 里，
+   *  否则翻到第 2 页又会出现三块金牌。 */
+  function rankRowHtml(p, no) {
+    const mine = p.account === me; // 按账号认"我"，昵称可重名可改
+    const b = p.broker ? brokerMeta[p.broker] : null;
+    const tag = b
+      ? `<span class="seat-cell" title="${esc(b.name)}">${brokerIcon(p.broker, 'xs')}<span class="seat-abbr">${esc(b.abbr)}</span></span>
+         <span class="panel-sub">组内 #${p.brokerRank || 1}</span>${p.star > 1 ? `<span class="mb-star flat">${'★'.repeat(Math.min(p.star, 5))}</span>` : ''}`
+      : '<span class="panel-sub">未开户</span>';
+    // 「按账号取数」：按钮带上账号而不是昵称——昵称可重名、可随时改。
+    // 但 data-account 只做取数键，**不上屏**：榜上对外只露昵称。
+    const nick = p.name || '匿名玩家';
+    const act = p.account
+      ? `<td class="rank-act-cell"><button class="mini-btn rank-pos-btn" type="button"
+           data-account="${esc(p.account)}" data-nick="${esc(nick)}">持仓</button></td>`
+      : '<td class="rank-act-cell"></td>';
+    // 境界只作**附加展示**：不参与排序（排序键永远是权益），也不改行的宽度口径
+    const realmTag =
+      p.realm && p.realm.idx > 0
+        ? `<span class="realm-chip sm g-${esc(p.realm.group)}" title="${esc(p.realm.honor || '')}">${esc(p.realm.short || p.realm.name)}</span>`
+        : '';
+    // 前三给奖牌徽章 + 行高亮（纯展示，不动排序口径）
+    const topCls = no < 3 ? ` rank-top rank-top-${no + 1}` : '';
+    const noCell =
+      no < 3
+        ? `<span class="rank-medal rm${no + 1}" title="第 ${no + 1} 名">${no + 1}</span>`
+        : String(no + 1);
+    return `<tr class="${topCls.trim()}${mine ? ' row-mine' : ''}">
           <td>${noCell}</td>
           <td><span class="rank-player"><span class="rank-nick">${avaHtml(p.ava, 22, p.realm && p.realm.group, nick)}<span class="rank-nick-text">${esc(nick)}${mine ? '（我）' : ''}</span></span><span class="rank-tags">${tag}${realmTag}</span></span></td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
         </tr>`;
-      })
+  }
+
+  /** 排行榜表体（主页「收益排行」卡用）。
+   *  数据取帧里的 `state.players`（服务端只发前 50 行），`limit` 是主页卡要显示几行；
+   *  想看第 51 名以后走排行 tab 的分页（`/api/leaderboard`）。 */
+  function rankRowsHtml(limit, offset) {
+    const start = Math.max(0, Math.floor(Number(offset)) || 0);
+    const end = limit ? start + limit : undefined;
+    return (state.players || [])
+      .slice(start, end)
+      .map((p, i) => rankRowHtml(p, start + i))
       .join('');
   }
 
+  // ---------- 排行 tab 的分页 ----------
+  // 帧里的 players 有上限（服务端 `leaderboard(limit = 50)`），第 51 名以后进不了 state。
+  // 所以玩家总榜改成**按页按需拉** `/api/leaderboard`，翻到哪页拉哪页；帧里的前几行只作首屏兜底。
+  const RANK_PAGE_SIZE = 10;
+  const RANK_REFRESH_MS = 5000; // 停在榜上时每 5 秒刷当前页（名次随行情变，但不必每帧重拉）
+  let rankPage = { offset: 0, limit: RANK_PAGE_SIZE, total: 0, players: [], loading: false, at: 0 };
+  let rankPageSeq = 0; // 请求序号：连点翻页时丢掉旧响应，避免"点了第 3 页回来的是第 2 页"
+
+  /** 拉某一页（offset 会按页对齐）。force=false 时同页 5 秒内不重复拉。 */
+  function loadRankPage(offset, force) {
+    const off = Math.max(0, Math.floor((Number(offset) || 0) / RANK_PAGE_SIZE) * RANK_PAGE_SIZE);
+    if (!force && off === rankPage.offset && Date.now() - rankPage.at < RANK_REFRESH_MS) return;
+    if (rankPage.loading && off === rankPage.offset) return;
+    const seq = ++rankPageSeq;
+    rankPage.loading = true;
+    apiGet('/api/leaderboard?offset=' + off + '&limit=' + RANK_PAGE_SIZE)
+      .then((r) => r.json())
+      .then((res) => {
+        if (seq !== rankPageSeq) return;
+        rankPage.loading = false;
+        if (!res || !res.ok) {
+          $('rankPageSub').textContent = (res && res.error) || '读取失败';
+          return;
+        }
+        rankPage = {
+          offset: res.offset || 0,
+          limit: res.limit || RANK_PAGE_SIZE,
+          total: res.total || 0,
+          players: res.players || [],
+          loading: false,
+          at: Date.now(),
+        };
+        renderRank();
+      })
+      .catch(() => {
+        if (seq !== rankPageSeq) return;
+        rankPage.loading = false;
+        $('rankPageSub').textContent = '网络错误';
+      });
+  }
+
+  /** 当前页的表体。分页数据还没到手时先用帧里的前几行顶着（别闪一下「暂无玩家」） */
+  function rankPageRowsHtml() {
+    const seed = !rankPage.at;
+    const list = seed ? (state.players || []).slice(0, RANK_PAGE_SIZE) : rankPage.players;
+    const base = seed ? 0 : rankPage.offset;
+    return list.map((p, i) => rankRowHtml(p, base + i)).join('');
+  }
+
+  function rankPageCount() {
+    return Math.max(1, Math.ceil((rankPage.total || 0) / RANK_PAGE_SIZE));
+  }
+
+  function renderRankPager() {
+    const pager = $('rankPager');
+    if (!pager) return;
+    const pages = rankPageCount();
+    const page = Math.floor(rankPage.offset / RANK_PAGE_SIZE) + 1;
+    pager.hidden = rankPage.total <= RANK_PAGE_SIZE; // 一页装得下就不显示翻页条
+    $('rankPageSub').textContent = `第 ${page} / ${pages} 页 · 共 ${rankPage.total} 人`;
+    $('rankPrevBtn').disabled = page <= 1;
+    $('rankNextBtn').disabled = page >= pages;
+  }
+
   function renderRank() {
-    $('rankBody').innerHTML = rankRowsHtml() || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
+    $('rankBody').innerHTML =
+      rankPageRowsHtml() || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
     // 榜单每 700ms 整块重写：裂图兜底得在写完之后重新挂一次（新节点没有监听器）
     bindAvaFallback($('rankBody'));
+    renderRankPager();
     renderBrokerBoard();
   }
 
@@ -4900,6 +4987,9 @@
     const markets = marketList(state);
 
     const players = state.players || [];
+    // 帧里只带前 50 行（服务端 leaderboard 的上限），真实人数看 online：
+    // 超过 50 人时用 players.length 会少报「共 50 位玩家」
+    const playerTotal = state.online || players.length;
     const myIdx = players.findIndex((p) => p.account === me);
     const pnl = (a.longPnl || 0) + (a.shortPnl || 0);
     const pos = positionsOf(a, markets);
@@ -4941,7 +5031,7 @@
       `在线 <b>${state.online || 0}</b> 人 · 共 <b>${players.length}</b> 位玩家`;
 
     $('homeSub').innerHTML = [
-      `收益排名 ${myIdx >= 0 ? `第 <b>${myIdx + 1}</b> / ${players.length} 名` : `共 <b>${players.length}</b> 位玩家`}`,
+      `收益排名 ${myIdx >= 0 ? `第 <b>${myIdx + 1}</b> / ${playerTotal} 名` : `共 <b>${playerTotal}</b> 位玩家`}`,
       `总权益 <b class="${cls(a.equity - state.rules.initialCash)}">¥${fmtMoney(a.equity)}</b>`,
       `持仓 <b>${heldStocks}</b> 只`,
       `挂单 <b>${a.orders.length}</b> 笔`,
@@ -5056,7 +5146,7 @@
         })
         .join('') || '<tr><td colspan="9" class="empty">暂无持仓</td></tr>';
 
-    $('homeRankSub').textContent = myIdx >= 0 ? `我第 ${myIdx + 1} 名` : `共 ${players.length} 人`;
+    $('homeRankSub').textContent = myIdx >= 0 ? `我第 ${myIdx + 1} 名 · 共 ${playerTotal} 人` : `共 ${playerTotal} 人`;
     $('homeRankBody').innerHTML =
       rankRowsHtml(HOME_RANK_LIMIT) || '<tr><td colspan="4" class="empty">暂无玩家</td></tr>';
 
@@ -5514,9 +5604,24 @@
           if (m) loadHolders(m.stockId, true);
         }
         if (activeTab === 'seats') renderSeats();
+        // 玩家总榜按页拉：进 tab 立即拉当前页（帧里的 players 只有前 50 行，翻不到的人走这里）
+        if (activeTab === 'rank') loadRankPage(rankPage.offset, true);
         drawChart();
       });
     });
+    // 翻页条：上一页 / 下一页。按钮 disabled 时浏览器不派发 click，这里再判一次更保险
+    const prev = $('rankPrevBtn');
+    const next = $('rankNextBtn');
+    if (prev) {
+      prev.addEventListener('click', () => {
+        if (!prev.disabled) loadRankPage(rankPage.offset - RANK_PAGE_SIZE, true);
+      });
+    }
+    if (next) {
+      next.addEventListener('click', () => {
+        if (!next.disabled) loadRankPage(rankPage.offset + RANK_PAGE_SIZE, true);
+      });
+    }
   }
   function updateBadges() {
     $('badgeNews').hidden = newsUnread === 0;

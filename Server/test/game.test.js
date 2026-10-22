@@ -834,5 +834,44 @@ console.log('\n[17] 快照的锁仓口径 = 账户券商（rules / lockedUntil /
   assert(zx.pos.long.sellable === 0, `钟信 long.sellable = 0（${zx.pos.long.sellable}）`);
 }
 
+// ---- 18. 玩家榜分页（排行 tab 翻页）：切片连续、名次由 offset 决定、越界与脏值都被夹住 ----
+// 帧里的 players 有上限（leaderboard 默认 50 行），第 51 名以后只能靠 /api/leaderboard
+// 按页拉；这条钉住"页与页不重不漏"和"越界不返回空页"，否则前端会误以为榜空了。
+console.log('\n[18] 玩家榜分页 leaderboardPage（/api/leaderboard）');
+{
+  for (let i = 0; i < 5; i += 1) g.onboard('pageprobe_' + i, '分页' + i, 'zhaoshang');
+  const all = g.leaderboard(Infinity);
+  const total = all.length;
+  assert(total >= 5, `造出至少 5 个玩家（${total}）`);
+
+  const p1 = g.leaderboardPage(0, 2);
+  const p2 = g.leaderboardPage(2, 2);
+  assert(p1.total === total && p2.total === total, 'total 是全部玩家数（不是这一页的行数）');
+  assert(p1.players.length === 2 && p2.players.length === 2, '每页按 limit 切片');
+  assert(p1.players[0].account === all[0].account, '第 1 页从第 1 名起');
+  assert(p2.players[0].account === all[2].account, '第 2 页从第 3 名起（offset 生效）');
+  assert(
+    !p1.players.some((a) => p2.players.some((b) => b.account === a.account)),
+    '两页之间不重人'
+  );
+  assert(
+    p1.players.every((r) => typeof r.brokerRank === 'number'),
+    '分页行仍带组内名次（与帧里的榜同源）'
+  );
+
+  const tail = g.leaderboardPage(total - 1, 10);
+  assert(tail.players.length === 1, `最后一页不足一页时只给剩下的人（${tail.players.length}）`);
+
+  const over = g.leaderboardPage(total + 99, 2);
+  assert(over.offset === total - 1, `越界 offset 夹到最后一页（${over.offset}）`);
+  assert(over.players.length >= 1, '越界不返回空页（否则前端会显示「暂无玩家」）');
+
+  const dirty = g.leaderboardPage('x', 0);
+  assert(dirty.offset === 0 && dirty.limit >= 1 && dirty.players.length <= dirty.limit, '脏参数不炸：offset 归 0、limit 至少 1');
+
+  const capped = g.leaderboardPage(0, 9999);
+  assert(capped.limit === 50, `单页上限 50 行（${capped.limit}）`);
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed > 0 ? 1 : 0);

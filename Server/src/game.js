@@ -2247,6 +2247,29 @@ class Game {
   }
 
   /**
+   * 玩家榜**分页**（`GET /api/leaderboard?offset=&limit=`，排行 tab 翻页用）。
+   *
+   * 为什么不复用每帧下发的 `players`：那是 SSE 帧的一部分，每行 ≈280B，抬到几百行
+   * 会把 700ms 一帧的体量撑爆；而榜要能翻到全部玩家，所以翻页时按需拉一页。
+   *
+   * 口径与 `leaderboard()` 完全同源（同一份排序、同一套字段、同一个 `brokerRank`），
+   * 只是把切片交给调用方指定。名次**不写进行里**——客户端用 `offset + i` 算，
+   * 一个数字只有一处来源，翻页时页码与名次不会各说各话。
+   *
+   * 参数全部容错：offset 负数/脏值夹到 0，越界夹到最后一页（不返回空页，免得前端误以为榜空了），
+   * limit 夹在 1~RANK_PAGE_MAX 之间。
+   */
+  leaderboardPage(offset, limit) {
+    const RANK_PAGE_MAX = 50;
+    const all = this.leaderboard(Infinity);
+    const total = all.length;
+    const lim = Math.min(RANK_PAGE_MAX, Math.max(1, Math.floor(Number(limit)) || 20));
+    const maxOff = Math.max(0, total - 1);
+    const off = Math.min(Math.max(0, Math.floor(Number(offset)) || 0), maxOff);
+    return { ok: true, total, offset: off, limit: lim, players: all.slice(off, off + lim) };
+  }
+
+  /**
    * 某个玩家的持仓概况（排行里点「持仓」按需拉，不进每帧 SSE）。
    * 只给「看得懂的仓位」：股票 × 方向的数量 / 均价 / 现价 / 市值 / 盈亏 + 账户级汇总。
    * 批次明细、强平价、挂单与成交流水**不下发**——那是本人视角；别人看榜只需要仓位。

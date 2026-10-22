@@ -271,6 +271,11 @@ src = src.replace(
     // 排行 → 玩家持仓弹窗
     openPlayerPositions, closePlayerPositions, renderPlayerPositions,
     rankPosShown: () => !$('rankPosOverlay').classList.contains('hidden'),
+    // 玩家总榜分页（每页 10 人，第 51 名以后走 /api/leaderboard）
+    renderRank, rankRowHtml, rankPageRowsHtml, renderRankPager, loadRankPage,
+    rankPageOf: () => ({ ...rankPage }),
+    setRankPage: (v) => { rankPage = v; },
+    rankPageSize: () => RANK_PAGE_SIZE,
     renderPositions, posRowsHtml,
     identity: () => ({ account: me, nick: myNick, token }),
     // 弹幕表情：渲染节点 + 选择器（面板挂在 body 上，靠 toggle 开合）
@@ -2941,6 +2946,64 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     assert(/data-locked="1"/.test(cells) && /转户到滑泰证券后解锁/.test(cells), '未解锁的卡带 data-locked 与服务端文案');
     assert(/ava-lock/.test(cells), '锁卡有锁图标');
     assert((cells.match(/avatar-[a-z-]+-192\.png/g) || []).length === 3, '弹层 64px 卡取 -192 档');
+  }
+
+  // ============================================================
+  console.log('\n[27] 玩家总榜分页：每页 10 人、名次按 offset 累加、没装满就不出翻页条');
+  {
+    const pageSize = api.rankPageSize();
+    assert(pageSize === 10, `每页 ${pageSize} 人（主页卡同口径）`);
+
+    // ---- ① 名次是全局的：第 2 页第一行是 11，且不重发前三的奖牌 ----
+    const rows = [0, 1].map((i) => ({
+      account: 'page_' + (10 + i),
+      name: '翻页' + (10 + i),
+      equity: 900000 - i,
+      broker: 'zhaoshang',
+      brokerRank: 3,
+      star: 1,
+    }));
+    api.setRankPage({ offset: 10, limit: pageSize, total: 25, players: rows, loading: false, at: Date.now() });
+    const body = api.rankPageRowsHtml();
+    assert(/<td>11<\/td>/.test(body) && /<td>12<\/td>/.test(body), '第 2 页的行号接着第 1 页（11、12）');
+    assert(body.indexOf('rank-medal') < 0, '第 2 页不出金牌（奖牌只看全局名次）');
+    assert((body.match(/rank-pos-btn/g) || []).length === 2, '分页行照样带「持仓」按钮');
+
+    // ---- ② 翻页条：页数、共几人、首末页按钮禁用 ----
+    api.renderRankPager();
+    assert(api.el('rankPageSub').textContent === '第 2 / 3 页 · 共 25 人',
+      `pager 文案（${api.el('rankPageSub').textContent}）`);
+    assert(api.el('rankPager').hidden === false, '超过一页才显示翻页条');
+    assert(api.el('rankPrevBtn').disabled === false && api.el('rankNextBtn').disabled === false, '中间页两个按钮都能点');
+
+    api.setRankPage({ offset: 0, limit: pageSize, total: 25, players: rows, loading: false, at: Date.now() });
+    api.renderRankPager();
+    assert(api.el('rankPrevBtn').disabled === true, '第 1 页「上一页」禁用');
+    api.setRankPage({ offset: 20, limit: pageSize, total: 25, players: rows, loading: false, at: Date.now() });
+    api.renderRankPager();
+    assert(api.el('rankNextBtn').disabled === true, '末页「下一页」禁用');
+    assert(api.el('rankPageSub').textContent === '第 3 / 3 页 · 共 25 人', '末页页码正确');
+
+    api.setRankPage({ offset: 0, limit: pageSize, total: 8, players: rows, loading: false, at: Date.now() });
+    api.renderRankPager();
+    assert(api.el('rankPager').hidden === true, '只够一页时整条翻页条隐藏');
+
+    // ---- ③ 拉页：URL 带 offset/limit，翻页对齐到页边界 ----
+    api.setRankPage({ offset: 0, limit: pageSize, total: 0, players: [], loading: false, at: 0 });
+    scriptFetch((url) =>
+      String(url).indexOf('/api/leaderboard') === 0
+        ? { ok: true, total: 25, offset: 13, limit: pageSize, players: rows }
+        : { ok: false, error: '不该请求这里' }
+    );
+    api.loadRankPage(13, true); // 不是 10 的整数倍 → 内部对齐成 10
+    await flush();
+    await flush();
+    const req = fetchCalls.filter((c) => String(c.url).indexOf('/api/leaderboard') === 0)[0];
+    assert(!!req && req.url === '/api/leaderboard?offset=10&limit=10',
+      `按页对齐后再拉（${req && req.url}）`);
+    assert(api.rankPageOf().offset === 13 && api.rankPageOf().total === 25, '服务端回的 offset/total 原样收下');
+    assert(api.el('rankBody').innerHTML.indexOf('翻页10') >= 0, '拉回来就重画表体（不必等下一帧）');
+    resetFetch();
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

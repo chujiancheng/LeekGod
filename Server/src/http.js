@@ -726,6 +726,19 @@ function createServer(game, options) {
         return json(res, r.ok ? 200 : 404, r);
       }
 
+      // ---- 玩家榜分页：排行 tab 翻页时按需拉一页（帧里只带前 50 行，翻不到的人走这里）----
+      if (p === '/api/leaderboard' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const token = bearerToken(req) || url.searchParams.get('token') || '';
+        if (!game.accountFor(token)) {
+          return json(res, 401, { ok: false, error: '请先登录' });
+        }
+        const r = game.leaderboardPage(url.searchParams.get('offset'), url.searchParams.get('limit'));
+        return json(res, 200, r);
+      }
+
       if (p === '/api/order' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.order)) return;
         const body = await readBody(req);

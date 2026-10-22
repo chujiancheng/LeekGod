@@ -542,6 +542,30 @@ input { font: inherit; color: inherit; }
 /* flex 容器会吃掉行内元素间的自然基线，头像用垂直居中兜齐 */
 .rank-player .ava { flex: none; }
 
+/* ---------- 玩家总榜分页（排行 tab） ----------
+   帧里只带前 50 行，第 51 名以后靠翻页按需拉；一页装得下时整条 pager 直接 hidden。
+   表格放进 .rank-scroll 里自己滚（不把翻页条顶出可视区）。 */
+.rank-scroll { max-height: 46vh; overflow-y: auto; }
+.rank-pager {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 8px 0 2px;
+}
+.rank-pager[hidden] { display: none; }
+.rank-page-sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rank-pager .mini-btn { flex: none; height: 24px; padding: 0 12px; }
+.rank-pager .mini-btn:disabled { opacity: .45; cursor: default; }
+
+/* 主页卡页脚（「查看完整榜」入口）：贴着卡片底边，不抢表格高度 */
+.card-foot {
+  display: flex; justify-content: flex-end; align-items: center;
+  padding: 4px 10px 2px; border-top: 1px solid var(--line);
+}
+.link-btn {
+  background: none; border: 0; padding: 2px 0; cursor: pointer;
+  color: var(--blue); font-size: 12px; font-family: inherit;
+}
+.link-btn:hover { text-decoration: underline; }
+
 /* ---------- 布局 ---------- */
 .app {
   height: 100vh;
