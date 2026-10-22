@@ -20,9 +20,15 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-14 的默认 Xcode 是 15.4，读不了 xcodegen 生成的 objectVersion 77（Xcode 16 格式）；
+    # macos-15 自带 Xcode 16.x，再用 setup-xcode 固定到 latest-stable 兜住镜像漂移。
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: Show toolchain
         run: |
@@ -39,7 +45,8 @@ jobs:
         run: |
           if [ -n "$GUSHEN_SERVER_URL" ]; then
             /usr/libexec/PlistBuddy -c "Set :GushenServerUrl $GUSHEN_SERVER_URL" LeekGod/Info.plist
-            echo "server url = $(/usr/libexec/PlistBuddy -c 'Print :GushenServerUrl' LeekGod/Info.plist)"
+            # 公开仓库的构建日志人人可见：只回显是否注入成功，不打印地址本身
+            echo "已注入 GUSHEN_SERVER_URL（值不回显）"
           else
             echo "GUSHEN_SERVER_URL 未设置：App 首启会弹框让玩家填地址"
           fi
