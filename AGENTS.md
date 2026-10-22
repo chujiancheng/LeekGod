@@ -36,6 +36,11 @@ stop / restart 是**安全关服**，不是立刻杀进程：
 注意：Agent 在会话内**不要**跑 start/stop/restart（PID 文件全局一份，会打掉用户正在跑的正式服务）；
 临时验证用 GU_PID_FILE + PORT + PERSIST_FILE 各指一份临时路径，跑完清临时文件。
 
+**临时验证绝不能设 `ADMIN_TOKEN` 环境变量**（2026-10-22 事故）：src/admin.js 在读到 ADMIN_TOKEN 时
+会把它**写回 Server/data/admin.token**，把正式服的运维口令覆盖掉——正式服内存里还是旧口令，
+之后 server.py 的 clock/stop/notice 全部 403，restart 表现为「等不到交易日时钟」无限重试。
+临时实例要定制口令只能用 `ADMIN_TOKEN_FILE=<临时路径>`（config.js 支持，server.py 不读它，两不相扰）。
+
 # 内存体检（堆一直涨时先看这个）
 curl -H "x-admin-token: <Server/data/admin.token>" http://127.0.0.1:3000/api/admin/memory
 - 先看 sse.bufferedMb / maxBufferedMb / slowConnections：**持续上涨就是有客户端读不动**
