@@ -12,11 +12,12 @@
   <img src="Client/img/mascot-sakura-256.png" width="120" alt="樱">
 </p>
 
-免密登录 → 开户（起昵称 + 选券商）→ 在 **10 只股票**上做多/做空，和 **3160 个 NPC** 共用同一本订单簿；行情由服务端做市引擎驱动，有消息、有内幕、有涨跌停、有集合竞价、有收盘结算和隔夜跳空。一天 620 秒，收盘后给你算账，顺便发彩蛋。
+免密登录 → 开户（起昵称 + 选券商）→ 在 **10 只股票**上做多/做空，和 **3160 个 NPC 投资者 + 每股 6 家券商自营做市**共用同一本订单簿；行情由服务端做市引擎驱动，有消息、有内幕、有涨跌停、有集合竞价、有收盘结算和隔夜跳空。一天 620 秒，收盘后给你算账，顺便发彩蛋。
 
-- **纯 H5 前端**（无构建、无框架）+ **Node.js 原生 http 服务**（REST 写操作 + SSE 推送）
+- **纯 H5 前端**（无构建、无框架）+ **Node.js 原生 http 服务**（REST 写操作 + SSE 推送，带写背压闸门防 OOM）
 - **SQLite 存档**：停服重启接着上一局玩，账号 / 持仓 / 挂单 / 流水 / 行情断点都在
 - **零外部依赖**：不需要数据库、Redis、WebSocket 服务；Node 依赖只有 `log4js` + `better-sqlite3`
+- **Android 客户端**：`App/` 移动端页面（服务端托管在 `/m/`）+ `Mobile/` 原生 WebView 壳，一键打包 APK
 
 ---
 
@@ -33,12 +34,17 @@ python server.py start
 打开 <http://127.0.0.1:3000>，输入任意合规账号（3~16 位、字母开头）即可开始。
 
 ```bash
-python server.py status     # 看是否在跑
-python server.py stop       # 停服
-python server.py restart    # 重启（改配置后必须执行）
+python server.py status     # 看是否在跑 + 当前交易日阶段 + 能否安全关服
+python server.py clock      # 只读：交易日时钟（阶段 / 剩余时间 / 是否停牌）
+python server.py stop       # 安全停服：收盘休市立刻停，盘中会挂机等收盘（先发公告）
+python server.py restart    # 安全重启（改配置后必须执行）
+python server.py notice "维护公告" [分钟]   # 全员横幅 + toast；--clear 撤下
 python server.py halt       # 全市场停牌 5 分钟
 python server.py resume     # 复牌
+python server.py whales     # 运维专用：打印 AI 主力完整持仓（玩家接口不可见）
 ```
+
+stop / restart 是**安全关服**：盘中执行会先发「收盘后维护」公告，等当天收盘落进休市窗口再动手（默认最多等 900 秒，`--now` 立即停牌关服、`--force` 不做检查直接杀）。
 
 换端口：`PORT=3100 python server.py start`（PowerShell：`$env:PORT=3100; python server.py start`）。
 
@@ -116,6 +122,7 @@ python server.py resume     # 复牌
 - **自动化策略**：止盈止损（TPS）、网格、均线（MA）、定投（DCA），按股票绑定，服务端逐 tick 执行。
 - **融资融券**：融资自备 50%（最高 2 倍）；融券池每股一套，出借人是不做空的被动持有者，日息 0.1%~0.4%。
 - **彩蛋（里程碑）**：收盘结算时按权益水位、回撤、风险度、首次爆仓判定，发称号与横幅；三档文案基调（吐槽 / 温和 / 冷面），权益跌破 10 万自动切温和。
+- **修仙境界头衔**：按收盘权益判定"你现在是谁"，升境 / 跌境全服广播，零数值特权，纯身份观感。
 - **排行榜 / 股东榜 / 资金流向 / 日线周线月线 K 线 / MACD**，涨红跌绿。
 - **股娘图鉴**：每只股票一份拟人档案（`Client/lore.js`），纯前端数据，服务端不感知。
 
@@ -145,7 +152,7 @@ python openkey.py revoke <KeyID>
 ## 项目结构
 
 ```
-Client/                 前端（无构建，服务端直接静态托管）
+Client/                 桌面网页前端（无构建，服务端直接静态托管）
   index.html            主页 + 交易终端
   app.js                单文件前端逻辑，SSE 驱动全量重渲染
   style.css             主题系统（7 套配色，涨红跌绿）
@@ -154,14 +161,24 @@ Client/                 前端（无构建，服务端直接静态托管）
   docs.html|js|css      开放平台文档阅读页
   img/                  立绘、券商图标、漫画、彩蛋头像
   test/                 前端离线自检（vm + DOM 桩，真跑 app.js）
+App/                    移动端 H5（服务端托管在 /m/，Android 壳加载的就是它）
+  index.html            移动端入口
+  js/                   按视图拆分（登录/行情/个股/交易/排行/我的 + core/api/chart）
+  css/                  移动端样式
+Mobile/                 Android WebView 壳（零第三方依赖，连 AndroidX 都不用）
+  build-apk.bat         一键打包：产物 output/LeekGod-v<版本>.apk，网页端「下载 App」自动取最新
+  app/                  壳工程：地址管理、离线兜底页、返回键适配
+  README.md             打包/签名/服务器地址配置说明
 Server/
-  server.py             进程管理：start / stop / restart / status / halt / resume
+  server.py             进程管理：start / stop / restart / status / clock / notice / halt / resume / whales
   openkey.py            API Key 运维命令
   index.js              入口：开存档 → Game.start → listen
   src/
     game.js             门面 + 主循环（700ms/tick）
     market.js           撮合与风控（每股一个实例）
-    npc.js              做市引擎（公允价值/趋势/意图/盘口）
+    orderbook.js        订单簿
+    npc.js              NPC 生态：每股 6 家券商自营做市 + 3160 投资者（跨股闸门）
+    identity.js         NPC 展示名确定性生成（真人名/机构名/游资绰号）
     daycycle.js         交易日时钟（6 阶段）
     broker.js           券商纯函数层（per-broker 参数解析）
     news.js             消息系统（分层可见性）
@@ -169,10 +186,12 @@ Server/
     milestones.js       彩蛋判定内核
     openapi.js          开放交易接口 /open/v1/*
     http.js             路由、SSE、静态托管、CSP、限流
+    sseback.js          SSE 写背压闸门（慢客户端跳帧/拆连接，防 OOM）
     persist.js / db.js  SQLite 存档
     store.js            账户模型（现金/持仓批次/保证金）
     flow.js             资金流向与日线
     indexfeed.js        大盘指数合成
+    realm.js            修仙境界（头衔）判定内核，与彩蛋共用结算口径
     llm/                大模型主力脑（可选，默认关闭）
   examples/             量化策略示例
   test/                 服务端测试与仿真探针
@@ -194,7 +213,7 @@ node test/day.test.js             # 交易日机制（用真实配置：涨跌�
 node ../Client/test/client-day.test.js   # 前端自检（把 app.js 真跑一遍）
 ```
 
-当前回归基线约 **1900** 条断言（前端自检 500+ 条），改撮合 / 行情 / 持久化后请全跑一遍。
+当前回归基线约 **1900** 条断言（服务端约 1300 + 前端自检 600+），改撮合 / 行情 / 持久化后请全跑一遍。
 
 改行情参数、交易日节奏、券商数值前，先跑对应探针（纯内存，不碰正式存档）：
 
@@ -211,12 +230,12 @@ node test/diag-bid-depth.js # 买盘深度与空段诊断
 
 | 路径 | 说明 |
 |---|---|
-| `Server/data/game.db` | 正式存档（SQLite + WAL，不入库） |
+| `D:/GushenData/game.db` | 正式存档（SQLite + WAL，不入库；在 D 盘机械硬盘，省 SSD 磨损） |
 | `Server/data/admin.token` | 运维口令，首次启动自动生成 |
 | `Server/log/server.YYYY-MM-DD.log` | 业务日志，按天切割，保留 30 天 |
 | `Server/log/server-console.log` | 仅承接 logger 初始化前的崩溃输出 |
 
-**开新一局**：停服 → 删掉 `Server/data/game.db`（连同 `-wal` / `-shm`）→ 启动。
+**开新一局**：停服 → 删掉 `D:/GushenData/game.db`（连同 `-wal` / `-shm`）→ 启动。
 
 **验收 / 调试不要污染正式存档**，用临时库：
 
@@ -241,6 +260,8 @@ PERSIST_FILE=/tmp/gushen-verify.db python server.py start
 | [`Doc/玩家申请APIKey.md`](Doc/玩家申请APIKey.md) | 玩家版 API Key 入门 |
 | [`Doc/券商方案.md`](Doc/券商方案.md) | 券商 / 声誉星级 / 席位系统设计 |
 | [`Doc/消息分层方案.md`](Doc/消息分层方案.md) | 消息生命周期三段式设计 |
+| [`Doc/头衔方案.md`](Doc/头衔方案.md) | 修仙境界（头衔）设计 |
+| [`Mobile/README.md`](Mobile/README.md) | Android 壳打包 / 签名 / 服务器地址配置 |
 | [`Doc/彩蛋玩法方案.md`](Doc/彩蛋玩法方案.md) | 里程碑彩蛋设计 |
 | [`Doc/我是股神设计.md`](Doc/我是股神设计.md) | 最初需求备忘（部分数值已被实现取代） |
 
