@@ -530,6 +530,18 @@ input { font: inherit; color: inherit; }
 /* 「我」的行底色优先级更高：既是前三又是我时保留蓝色认人 */
 .grid-table tr.rank-top.row-mine td { background: color-mix(in srgb, var(--blue) 12%, transparent); }
 
+/* ---------- 排行榜玩家列对齐 ----------
+   grid-table 默认整格右对齐，而玩家列是「昵称 + 宽度不一的徽章」，
+   徽章宽窄不一把昵称起点挤得参差不齐。改为：昵称统一左对齐、徽章统一靠右。 */
+.rank-table th:nth-child(2), .rank-table td:nth-child(2) { text-align: left; }
+.rank-player { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rank-nick { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.rank-nick-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-tags { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.rank-tags .realm-chip.sm { margin-left: 0; }
+/* flex 容器会吃掉行内元素间的自然基线，头像用垂直居中兜齐 */
+.rank-player .ava { flex: none; }
+
 /* ---------- 布局 ---------- */
 .app {
   height: 100vh;

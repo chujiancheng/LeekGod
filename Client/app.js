@@ -3884,7 +3884,7 @@
             : String(i + 1);
         return `<tr class="${topCls.trim()}${mine ? ' row-mine' : ''}">
           <td>${noCell}</td>
-          <td>${avaHtml(p.ava, 22, p.realm && p.realm.group, nick)}${esc(nick)}${mine ? '（我）' : ''} ${tag}${realmTag}</td>
+          <td><span class="rank-player"><span class="rank-nick">${avaHtml(p.ava, 22, p.realm && p.realm.group, nick)}<span class="rank-nick-text">${esc(nick)}${mine ? '（我）' : ''}</span></span><span class="rank-tags">${tag}${realmTag}</span></span></td>
           <td class="${cls(p.equity - state.rules.initialCash)}">${fmtMoney(p.equity)}</td>
           ${act}
         </tr>`;
