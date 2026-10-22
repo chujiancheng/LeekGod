@@ -37,7 +37,7 @@
   }
 
   function update(root) {
-    if (!built) build(root);
+    if (!built || !root.childElementCount) build(root);
     renderList();
   }
 

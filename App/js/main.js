@@ -32,6 +32,9 @@
   let active = GS.core.S.tab || 'market';
   let timer = null;
   let sparkTimer = null;
+  /** 本轮壳会话是否已进过壳：登录/开户按钮被重复触发时 enter 可能被调多次，
+   *  二次 enter 会 buildPanes 清空 pane 而各视图 built 仍 true → 整页空白（真机事故）。 */
+  let entered = false;
 
   /* ---------------------------------------------------------------- 顶栏 */
 
@@ -164,6 +167,8 @@
   /* ---------------------------------------------------------------- 进入 */
 
   function enter() {
+    if (entered) return;
+    entered = true;
     $('boot').hidden = true;
     GS.viewLogin.hide();
     $('shell').hidden = false;
@@ -210,6 +215,7 @@
   }
 
   function showLogin(prefill) {
+    entered = false; // 退出登录后允许再次进壳
     clearInterval(timer);
     clearInterval(sparkTimer);
     $('shell').hidden = true;

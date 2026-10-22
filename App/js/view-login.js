@@ -70,6 +70,7 @@
       return;
     }
     const btn = $('accBtn');
+    if (btn.disabled) return; // 慢网双击防重：请求在途时忽略再次触发
     btn.disabled = true;
     btn.textContent = '正在登录…';
 
@@ -138,6 +139,7 @@
     });
 
     btn.onclick = () => {
+      if (btn.disabled) return; // 慢网双击防重：两次成功回调会各进一次壳，第二次 enter 会清空页面
       const v = nick.value.trim();
       if (!NICK_RE.test(v)) return toast('昵称 2~12 位，中文/字母/数字', 'err');
       if (!picked) return toast('先选一家券商', 'err');

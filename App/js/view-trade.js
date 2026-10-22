@@ -71,7 +71,7 @@
   /* ---------------------------------------------------------------- 更新 */
 
   function update(root) {
-    if (!built) build(root);
+    if (!built || !root.childElementCount) build(root);
     const st = GS.core.S.state;
     if (!st || !st.account) return;
     const a = st.account;

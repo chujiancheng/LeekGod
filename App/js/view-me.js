@@ -55,7 +55,8 @@
   }
 
   function update(root) {
-    if (!built) build(root);
+    // 同 view-market：pane 被重建后 DOM 会空，必须复查而不是只信 built
+    if (!built || !root.childElementCount) build(root);
     const st = GS.core.S.state;
     if (!st || !st.account) return;
     const a = st.account;

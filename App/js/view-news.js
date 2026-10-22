@@ -173,7 +173,7 @@
   }
 
   function update(root) {
-    if (!built) build(root);
+    if (!built || !root.childElementCount) build(root);
     renderSeg(root);
     renderPane();
     // 看着消息 tab 时清零未读

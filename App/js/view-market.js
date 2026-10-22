@@ -150,7 +150,9 @@
   /* ---------------------------------------------------------------- 更新 */
 
   function update(root) {
-    if (!built) build(root);
+    // built 之外还要确认 DOM 真在：enter() 重建 pane 会把 innerHTML 清空，
+    // 而模块级 built 仍是 true → 若不复查就会永远空白且无报错（App 真机事故 2026-10-22）
+    if (!built || !root.childElementCount) build(root);
     const st = GS.core.S.state;
     if (!st) return;
     const markets = st.markets || [];
