@@ -397,6 +397,7 @@ python check.py
 | `Doc/开放平台API.md` | 完整接口手册：每个端点、每个字段、交易规则、拒单对照、可直接给 AI 的施工说明 |
 | `Server/examples/quant_template.py` | 可长期运行的策略骨架（对账、目标仓位、成交游标、风控、DRY_RUN） |
 | `Server/examples/quant_ma.py` | 最小双均线示例，适合先跑通 |
+| `Server/examples/quant_grid.py` | 波动率自适应网格，震荡市低买高卖（默认只打印不下单） |
 
 把 `Doc/开放平台API.md` 和你自己的策略想法一起丢给你的 AI，它能照着写出可运行的脚本——那份文档第 12 节就是专门为这个准备的。
 

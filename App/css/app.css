@@ -2328,6 +2328,17 @@ input::placeholder {
   transform: translateY(-12px);
   opacity: 0;
   transition: transform 0.24s var(--ease), opacity 0.24s var(--ease);
+  /* 父容器是 pointer-events:none，这里显式打开：点一下就收起（core.js 绑了 click），
+     否则手指会穿透到下面的元素，反而又冒出一条新 toast */
+  pointer-events: auto;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 淡出中不再拦手指 */
+.toast[data-out] {
+  pointer-events: none;
 }
 
 .toast.in {

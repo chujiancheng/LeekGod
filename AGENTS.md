@@ -65,8 +65,17 @@ cd Server
 - 网页生成不绑 IP；玩家要锁来源时用上面 `--ip` 代发。
 - 接口文档 Doc/开放平台API.md（完全手册，含逐字段说明与可直接给 AI 的施工说明），
   玩家入门 Doc/玩家申请APIKey.md（玩家版，网页自助，不含运维命令），
-  示例策略 Server/examples/quant_ma.py（双均线演示）、Server/examples/quant_template.py（长期运行骨架）。
+  示例策略 Server/examples/quant_ma.py（双均线演示）、Server/examples/quant_template.py（长期运行骨架）、
+  Server/examples/quant_grid.py（波动率自适应网格，震荡市）。
 - 会话令牌与 API Key 是两套凭据，不能互相顶替。
+- **`Server/examples/` 那四个示例脚本本地带真实 Key**（用户 2026-10-22 选定「只本地用不提交」）：
+  `quant_ma.py` / `quant_template.py` / `quant_rotation.py` / `quant_grid.py` 在 git 里都打了
+  `skip-worktree` 标记——**暂存区与远端只有 `API_KEY = ""` 的空版本，工作区里是真 Key**。
+  改这几个文件前先 `git update-index --no-skip-worktree <文件>`，改完立刻重新 `--skip-worktree`；
+  `git pull` / `checkout` 报 "local changes would be overwritten" 也是这个标记造成的，不是真的冲突。
+  **任何时候都不要为了改它们而顺手 `git add`**，那会把 Key 写进仓库（推上去就是公开泄露）。
+- 启动器 `Server/examples/run-quant.bat` 是**纯 ASCII + CRLF**，跟 Mobile/build-apk.bat 同规矩：中文注释会让 cmd
+  读错行。只做一件事：改顶部 SCRIPT / ARGS / KEY 三行，然后把参数原样传给 Python。KEY 留空就用 .py 里的 API_KEY 常量。
 
 # 依赖
 Server 需要 npm 依赖（log4js 日志 + better-sqlite3 存档）。新环境首次运行前先在 Server 目录执行 npm install，

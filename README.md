@@ -134,7 +134,7 @@ stop / restart 是**安全关服**：盘中执行会先发「收盘后维护」�
 
 1. 登录游戏 → 主页「开放接口」→ `/portal.html` 自助生成 API Key（明文只显示一次，库里只存 sha256）。
 2. 阅读文档：`/docs.html?doc=player`（入门）、`/docs.html?doc=api`（完整手册）。
-3. 跑示例：`Server/examples/quant_ma.py`（双均线）、`quant_template.py`（带对账/风控的长期运行骨架）、`quant_rotation.py`（多股票动量轮动）。
+3. 跑示例：`Server/examples/quant_ma.py`（双均线）、`quant_template.py`（带对账/风控的长期运行骨架）、`quant_rotation.py`（多股票动量轮动）、`quant_grid.py`（波动率自适应网格）。Windows 上改一下 `Server/examples/run-quant.bat` 顶部三行就能双击跑。
 
 运维代管（锁 IP、帮查、被盗撤销）：
 

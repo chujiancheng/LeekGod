@@ -225,21 +225,63 @@ window.GS = window.GS || {};
 
   /* ---------------------------------------------------------------- toast */
 
-  let toastTimer = null;
+  /* 每条 toast 各管各的两个定时器（淡出 / 移除）。
+     早期版本共用一个全局 timer：新 toast 的 clearTimeout 会把上一条的「收起」动作
+     一起清掉，那条就永远停在屏幕上——尤其容易在「触碰/点击消息」时触发
+     （点一下冒出新 toast，旧的就赖着不走了）。
+     另外：App 熄屏 / 切后台时 setTimeout 会被冻结，回到前台按出生时刻补清。 */
+  const TOAST_MS = 2200; // 停留时长
+  const TOAST_FADE = 240; // 淡出，与 CSS transition 对齐
+  const TOAST_MAX = 3; // 同屏最多留几条，超了最老的先走
+  const toastTimers = new WeakMap(); // el -> { hide, kill }
+
+  /** 收起某条：幂等，重复调用只会走第一次 */
+  function dismissToast(el) {
+    if (!el || !el.isConnected || el.dataset.out) return;
+    const t = toastTimers.get(el);
+    if (t) clearTimeout(t.hide);
+    el.dataset.out = '1';
+    el.classList.remove('in');
+    const kill = setTimeout(() => {
+      toastTimers.delete(el);
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, TOAST_FADE + 80);
+    toastTimers.set(el, { hide: 0, kill });
+  }
+
+  /** 回到前台：熄屏 / 后台期间被冻结的过期 toast 会被系统留着，按出生时刻补清 */
+  function sweepToast() {
+    const wrap = $('toastWrap');
+    if (!wrap) return;
+    const now = Date.now();
+    Array.prototype.slice.call(wrap.children).forEach((c) => {
+      const born = Number(c.dataset.born) || 0;
+      if (!c.dataset.out && born && now - born >= TOAST_MS) dismissToast(c);
+    });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) sweepToast();
+  });
 
   function toast(msg, kind) {
     const wrap = $('toastWrap');
     if (!wrap) return;
+    // 超上限的部分（只数还在显示的）先让位，避免刷屏糊成一片
+    const alive = Array.prototype.filter.call(wrap.children, (c) => !c.dataset.out);
+    for (let i = 0; i <= alive.length - TOAST_MAX; i++) dismissToast(alive[i]);
+
     const el = document.createElement('div');
     el.className = 'toast ' + (kind || '');
     el.textContent = String(msg);
+    el.dataset.born = String(Date.now());
+    // 手指碰到就收起：父容器是 pointer-events:none，点击会穿透到下面的元素，
+    // 反而冒出新 toast——不如让 toast 自己吃掉这一下
+    el.addEventListener('click', () => dismissToast(el), { passive: true });
     wrap.appendChild(el);
-    requestAnimationFrame(() => el.classList.add('in'));
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      el.classList.remove('in');
-      setTimeout(() => el.remove(), 280);
-    }, 2200);
+    void el.offsetHeight; // 强制回流触发过渡；不用 rAF——后台不跑，回来会卡在 opacity:0
+    el.classList.add('in');
+    toastTimers.set(el, { hide: setTimeout(() => dismissToast(el), TOAST_MS), kill: 0 });
     if (navigator.vibrate) {
       try {
         navigator.vibrate(kind === 'err' ? [0, 26] : 12);

@@ -2081,13 +2081,34 @@ SSE 的注意点：
 
 ## 11. 完整示例解读
 
-仓库里有三个示例：
+仓库里有四个示例：
 
 | 文件 | 用途 | 依赖 |
 |---|---|---|
 | `Server/examples/quant_ma.py` | 双均线策略，演示轮询、冷却、幂等、整手、可卖量 | 仅标准库 |
 | `Server/examples/quant_template.py` | 策略骨架，带 Client 封装、对账、风控、目标仓位 | 仅标准库 |
 | `Server/examples/quant_rotation.py` | 多股票动量轮动，演示选股、换股、止损禁入、补仓阻尼 | 仅标准库 |
+| `Server/examples/quant_grid.py` | 波动率自适应网格，演示震荡市低买高卖、成对止盈、趋势闸门 | 仅标准库 |
+
+四个示例的传参方式一致，优先级 **命令行 > 环境变量 > 文件顶部常量**：
+
+```bash
+python Server/examples/quant_grid.py --key gs_xxx --stock 600001     # 推荐：命令行传参
+python Server/examples/quant_grid.py -k gs_xxx -s 600002 --live      # 短参数 + 真下单
+python Server/examples/quant_grid.py --dry-run                       # 强制只打印
+python Server/examples/quant_grid.py --help                          # 打印该脚本的说明
+```
+
+| 参数 | 短写 | 对应环境变量 | 说明 |
+|---|---|---|---|
+| `--key` | `-k` | `GUSHEN_API_KEY` | API Key，不传就用文件顶部 `API_KEY` |
+| `--base` | `-b` | `GUSHEN_BASE` | 服务器地址，默认 `http://127.0.0.1:3000` |
+| `--stock` | `-s` | `GUSHEN_STOCK` | 只做哪只票（`quant_rotation.py` 用 `--stocks` 传逗号分隔的多只） |
+| `--live` / `--dry-run` | — | `DRY_RUN`（grid 另认 `IF_DRY_RUN`） | 覆盖文件里的 `DRY_RUN_DEFAULT` |
+| `--help` | `-h` | — | 打印脚本自带的说明，不连服务器 |
+
+`--key gs_xxx` 与 `--key=gs_xxx` 两种写法都认。
+
 
 ### 11.1 `quant_rotation.py` 的关键逻辑
 
@@ -2115,7 +2136,9 @@ gap = win - (long.qty + 在途买 - 在途卖)
 - **止损禁入**（`STOP_OUT_SEC`）：止损卖掉后分数往往还很高，下一 tick 会原价买回来，白交两趟手续费。
 - **买卖不打架**：同一只票有在途买单时不发卖单（先撤），有在途卖单时不发买单。§6.13 说系统会撤掉你自己的旧挂单，但那是兜底，不该依赖。
 
-跑法：把文件顶部「直接改这里」的 `API_KEY` / `BASE_URL` / `DRY_RUN_DEFAULT` 三行填上，直接 `python Server/examples/quant_rotation.py`（环境变量 `GUSHEN_API_KEY` / `GUSHEN_BASE` / `DRY_RUN` 仍然优先，换机器时不用改代码）；`TOP_N` / `POSITION_PCT` / `LOOKBACK` / `ENTRY_SCORE` 等调参项走环境变量，文件头有全套默认值。**Key 写进代码后别再把这个文件提交到 git 或发给别人。**
+跑法：`python Server/examples/quant_rotation.py --key gs_xxx`（或 `-k`、或填文件顶部 `API_KEY`、或设环境变量；
+优先级见本节开头的参数表）；`TOP_N` / `POSITION_PCT` / `LOOKBACK` / `ENTRY_SCORE` 等调参项走环境变量，
+`--stocks 600001,600002` 可临时限定标的，文件头有全套默认值。**Key 写进代码后别再把这个文件提交到 git 或发给别人。**
 
 ### 11.2 `quant_ma.py` 的关键逻辑
 
@@ -2179,11 +2202,72 @@ Engine         reconcile() 启动对账
 跑法：
 
 ```bash
-export GUSHEN_API_KEY='gs_...'
-python Server/examples/quant_template.py
+python Server/examples/quant_template.py --key gs_xxx       # 默认只打印（DRY_RUN_DEFAULT=True）
+python Server/examples/quant_template.py --key gs_xxx --live   # 确认信号合理后再真下单
 ```
 
-它默认只读 + 模拟（`DRY_RUN=1`），确认信号合理后再设 `DRY_RUN=0` 真下单。
+不传 `--key` 就用文件顶部 `API_KEY` / 环境变量 `GUSHEN_API_KEY`（优先级见本节开头）。
+
+### 11.4 `quant_grid.py` 的关键逻辑
+
+前三个示例都在赌方向（趋势、强弱），这个不赌方向：价格围绕中枢来回摆，就一格一格低买高卖。
+这个盘特别适合网格——每只票有 6 家做市商围着公允价值双边报价，10 分钟的交易日里来回摆十几次很常见。
+
+```python
+# 1) 格宽跟着波动率走，别写死
+#    σ_tick = 最近 VOL_WINDOW 个 tick 的对数收益标准差
+#    step   = clamp(VOL_X × σ_tick × √HOLD_TICKS, STEP_MIN, STEP_MAX)
+#    √HOLD_TICKS 是因为买入后有 rules.lockMs 锁仓，锁仓期内的"格子"根本卖不出去
+step = max(STEP_MIN, min(STEP_MAX, VOL_X * stdev(ret) * math.sqrt(HOLD_TICKS)))
+
+# 2) 中枢 + 格子：买点永远挂在"中枢下面第 N 格"，并且必须比上一笔买入价再低一格
+level = anchor * (1 - (held_lots + 1) * step)
+if lots:
+    level = min(level, max(l["price"] for l in lots) * (1 - step))
+
+# 3) 止盈不猜目标价，成对平仓：账户里最老的一批可卖持仓涨到 cost × (1 + step) 就卖
+oldest = min(sellable_lots, key=lambda l: l["ts"])      # FIFO，跟服务端一致
+if price >= oldest["price"] * (1 + step):
+    sell(qty=min(oldest["qty"], pos["long"]["sellable"]))
+
+# 4) 趋势闸门：短均线跌破中枢 0.6% 就停止加仓（网格最怕单边下跌，一边跌一边接刀）
+if short_ma < anchor * (1 - TREND_BREAK_PCT):
+    return None
+```
+
+三个值得抄的工程点：
+
+- **不本地记账**：可卖批次、成本、锁仓解禁时间全部读 `/account` 的 `positions[].long.lots[]`，
+  重启、断线、部分成交之后都不会算错——网格最容易死在"自己记的仓位跟服务端对不上"上。
+- **格宽下限要 ≥ 3 倍买卖价差**：主动吃对手价成交（`touch_px`），价差是实打实的成本；
+  默认 `STEP_MIN=0.002`（0.2%），费率万分之一量级时一次往返还有肉。
+- **在途单只留一张 + TTL 撤单**：账户冷却 0.5~3 秒，同一时刻挂两张单没意义；
+  `ORDER_TTL_SEC`（默认 20 秒）没成交就撤，下一 tick 按新的中枢重算，避免"僵尸挂单"占着资金和 `sellable`。
+
+跑法：同另外三个示例，`--key` / `--stock` 命令行传参，或填文件顶部常量。
+
+```bash
+python Server/examples/quant_grid.py --key gs_xxx            # 默认只打印不下单
+python Server/examples/quant_grid.py --key gs_xxx --live     # 真下单
+python Server/examples/quant_grid.py --dry-run               # 强制只打印（压过 --live / DRY_RUN=0）
+```
+
+调参走环境变量（`VOL_X` / `STEP_MIN` / `MAX_LEVELS` / `POSITION_CAP_PCT` / `TREND_BREAK_PCT` 等），
+文件头有全套默认值。**网格是震荡市策略：遇到单边趋势它一定跑输趋势策略**，趋势闸门只是止血，不是盈利来源。
+
+### 11.5 Windows 一键启动 `run-quant.bat`
+
+`Server/examples/run-quant.bat`，17 行，改顶部三行就行：
+
+```bat
+set "SCRIPT=quant_grid.py"     :: 换策略：quant_ma / quant_rotation / quant_template / quant_grid
+set "ARGS=--stock 600001"      :: rotation 换成 --stocks 600001,600002
+set "KEY="                     :: 填 gs_... 就用自己的 Key；留空则用 .py 里的 API_KEY
+```
+
+双击运行，或者 `run-quant.bat --live`（后面的参数原样传给 Python）。加 `--live` 真下单，不加就是脚本默认（`quant_grid` / `quant_template` / `quant_rotation` 都是只打印）。
+
+`.bat` 必须纯 ASCII + CRLF，所以里面只写英文注释（中文注释 + `chcp 65001` 会让 cmd 按字节偏移读错行）。
 
 ---
 
@@ -2193,8 +2277,9 @@ python Server/examples/quant_template.py
 
 ```text
 你在为「我是股神」模拟盘写量化策略。策略跑在本地，只能通过 HTTP 调用
-http://<服务器地址>:3000/open/v1/*，鉴权头 X-API-Key: gs_...（从环境变量
-GUSHEN_API_KEY 读，绝不要写进代码）。
+http://<服务器地址>:3000/open/v1/*，鉴权头 X-API-Key: gs_...（优先从环境变量
+GUSHEN_API_KEY 读；玩家自己单机跑时也可以写在脚本顶部的 API_KEY 常量里，
+但**要交给别人、要提交到仓库的代码必须走环境变量**）。
 
 前提：玩家已经在开放平台页（`/portal.html`）自己生成过 Key，知道服务器地址。
 如果环境变量是空的，先让玩家去生成，不要自己猜地址、不要尝试免登录接口。
