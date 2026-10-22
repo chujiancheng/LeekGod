@@ -489,6 +489,66 @@ input::placeholder {
   padding: 10px 10px calc(var(--safe-bottom) + 20px);
 }
 
+/* 二级页内容层：左右滑换标的的「跟手层」。
+   翻票时只换这一层的 innerHTML（见 view-stock.js swapTo），所以：
+   - transform 给跟手位移与回弹，动画期间由 .swiping 关掉过渡；
+   - touch-action: pan-y 把横向手势留给 JS（竖向滚动、图表内部手势不受影响，
+     .chart-wrap.kline-mode 的 touch-action:none 更严格，交集仍是 none）；
+   - overflow: hidden 防止滑入位移把页面顶出横向滚动条。 */
+.page-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: pan-y;
+  transition: transform 0.22s var(--ease);
+}
+
+.page-inner.swiping {
+  transition: none;
+}
+
+/* 左右滑翻票：新一只从手指来的方向滑入（往左滑看下一只 → 从右边进） */
+@keyframes stockInNext {
+  from {
+    transform: translateX(28%);
+    opacity: 0.4;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes stockInPrev {
+  from {
+    transform: translateX(-28%);
+    opacity: 0.4;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.page-inner.slide-next {
+  animation: stockInNext 0.24s var(--ease);
+}
+
+.page-inner.slide-prev {
+  animation: stockInPrev 0.24s var(--ease);
+}
+
+/* 个股页头部「3/10」：当前位置提示，也是可左右翻的暗示。
+   .icon-btn（分享）带 -8px 左负边距，这里补一点间距免得贴上去 */
+.head-pager {
+  padding: 0 6px 0 2px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--txt-3);
+}
+
 .icon-btn {
   display: flex;
   align-items: center;

@@ -20,7 +20,11 @@
     dmSeen: new Set(),
     dmWatchTimer: null,
     lastDraw: 0,
+    ctl: null, // 当前二级页控制器（左右翻票原地换内容用）
   };
+
+  /** 首次进个股页弹一次的「左右滑」提示（本地只弹一次，换账号也不烦） */
+  const SWIPE_HINT_KEY = 'gushen_app_swipe_hint';
 
   const ACTION_LABEL = {
     buy_open: '买入开多',
@@ -64,6 +68,14 @@
     );
   }
 
+  const CHART_TABS = [
+    ['min', '分时'],
+    ['5d', '五日'],
+    ['day', '日K'],
+    ['week', '周K'],
+    ['month', '月K'],
+  ];
+
   function skeleton(m) {
     // 指数（999999）复用同一套骨架：行情头 + 图表 + 资金 + 消息完全一样，
     // 只把「交易件」换掉——没有五档/分时成交（指数没有自己的盘口），
@@ -74,8 +86,15 @@
       : '';
     // 「档案 ›」角标只在真有档案数据时挂（没有就别骗人点）
     const hasLore = !!(m && GS.company && GS.company.loreOf && GS.company.loreOf(m.stockId));
+    // 图表类型跟着 state.mode 走：左右翻票时保留玩家刚选的类型，不被打回分时
+    const tabBtns = CHART_TABS.map((t) =>
+      '<button data-mode="' + t[0] + '"' + (state.mode === t[0] ? ' class="on"' : '') + '>' + t[1] + '</button>'
+    ).join('');
+    // .page-inner：左右翻票的「跟手层」。翻票只换这一层的内容，不重建二级页
+    // （closePage/openPage 会把整页滑出屏幕再滑入，和跟手动画打架）
     return (
-      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', shareBtn, {
+      '<div class="page-inner">' +
+      GS.core.pageHead(m ? m.name : '个股', m ? m.stockId : '', pagerHtml() + shareBtn, {
         tapId: 'stockArchive',
         badge: hasLore ? '档案 ›' : '',
       }) +
@@ -99,13 +118,7 @@
 
         '<div class="stock-columns">' +
           '<div class="card chart-card">' +
-            '<div class="chart-tabs" id="chartTabs">' +
-              '<button data-mode="min" class="on">分时</button>' +
-              '<button data-mode="5d">五日</button>' +
-              '<button data-mode="day">日K</button>' +
-              '<button data-mode="week">周K</button>' +
-              '<button data-mode="month">月K</button>' +
-            '</div>' +
+            '<div class="chart-tabs" id="chartTabs">' + tabBtns + '</div>' +
             '<div class="chart-wrap" id="chartWrap">' +
               '<canvas id="chartCanvas"></canvas>' +
               '<div class="chart-tip" id="chartTip" hidden></div>' +
@@ -153,7 +166,8 @@
         : '<div class="act-bar" id="actBar">' +
             '<button class="btn-buy" data-side="buy_open">买入</button>' +
             '<button class="btn-sell" data-side="sell_close">卖出</button>' +
-          '</div>')
+          '</div>') +
+      '</div>'
     );
   }
 
@@ -161,78 +175,255 @@
 
   function open(stockId) {
     state.stockId = stockId || state.stockId;
+    // 从列表/消息点进来一律回到分时；左右滑翻票走 swapTo，不动玩家选的图表类型
     state.mode = 'min';
+    resetStock();
+    const ctl = GS.core.openPage({
+      html: skeleton(GS.core.market(state.stockId)),
+      onMount(el) {
+        mount(el, 0);
+      },
+    });
+    const prevClose = ctl.onClose;
+    ctl.onClose = () => {
+      stopWatch();
+      if (prevClose) prevClose();
+    };
+    return ctl;
+  }
+
+  /**
+   * 把内容装进二级页容器：绑定 + 首帧。
+   * dir ≠ 0 表示是左右翻过来的一只票（滑入动画），0 = 正常打开。
+   */
+  function mount(ctl, dir) {
+    const root = ctl.el.querySelector('.page-inner') || ctl.el;
+    ctl.root = root;
+    state.ctl = ctl;
+
+    GS.core.bindPageBack(root);
+    // 分享当前个股行情（头部右上角）
+    GS.core.on(root, '#stockShare', 'click', () => GS.share.stockText(state.stockId));
+    // 公司档案两处入口：点头部股票名 / 点报价卡下的档案行（指数是「股娘天团」）
+    const openArchive = () => {
+      if (GS.company) GS.company.openProfile(state.stockId);
+    };
+    GS.core.on(root, '#stockArchive', 'click', openArchive);
+    GS.core.on(root, '#coEntry', 'click', openArchive);
+    // 消息卡：点个股行不跳（就在本股），点「更多」进消息 tab 的本股过滤
+    GS.core.on(root, '#stockNewsMore', 'click', () => {
+      // 指数没有「本股」概念，直接进消息 tab 的「大盘」档
+      if (GS.core.isIndex(state.stockId)) GS.viewNews.open({ filter: 'index' });
+      else GS.viewNews.open({ stockId: state.stockId });
+    });
+    // 成分股：换一只票看（原地换内容，不再叠一层 / 滑出整页）
+    GS.core.on(root, '.comp-row', 'click', (e, t) => {
+      const sid = t.dataset.compStock;
+      if (!sid || sid === state.stockId) return;
+      navigateTo(sid);
+    });
+    bindTabs(root);
+    bindChartTouch(root);
+    bindAct(root);
+    bindDanmakuSend(root);
+    bindSwipe(root);
+
+    renderNews();
+    draw();
+    // 拉分时（日线在 draw 里按需拉）
+    GS.api.loadHistory(state.stockId).then(() => draw());
+    startWatch();
+
+    if (dir) playSlide(root, dir);
+    else hintSwipe();
+  }
+
+  /** 清掉「上一只票」的图表/十字光标/弹幕状态（图表类型 state.mode 不动） */
+  function resetStock() {
     state.cursor = -1;
     state.bars = null;
     state.barsFor = '';
     state.barsDay = 0;
     state.dmSeen.clear();
+  }
 
-    const m = GS.core.market(state.stockId);
-    const idx = GS.core.isIndex(state.stockId);
-    const ctl = GS.core.openPage({
-      html: skeleton(m),
-      onMount(el) {
-        GS.core.bindPageBack(el.el);
-        // 分享当前个股行情（头部右上角）
-        GS.core.on(el.el, '#stockShare', 'click', () => GS.share.stockText(state.stockId));
-        // 公司档案两处入口：点头部股票名 / 点报价卡下的档案行（指数是「股娘天团」）
-        const openArchive = () => {
-          if (GS.company) GS.company.openProfile(state.stockId);
-        };
-        GS.core.on(el.el, '#stockArchive', 'click', openArchive);
-        GS.core.on(el.el, '#coEntry', 'click', openArchive);
-        // 消息卡：点个股行不跳（就在本股），点「更多」进消息 tab 的本股过滤
-        GS.core.on(el.el, '#stockNewsMore', 'click', () => {
-          // 指数没有「本股」概念，直接进消息 tab 的「大盘」档
-          if (GS.core.isIndex(state.stockId)) GS.viewNews.open({ filter: 'index' });
-          else GS.viewNews.open({ stockId: state.stockId });
-        });
-        // 成分股：换一只票看（二级页只有一份 DOM，先收掉本页再开新的，避免叠层丢内容）
-        GS.core.on(el.el, '.comp-row', 'click', (e, t) => {
-          const sid = t.dataset.compStock;
-          if (!sid || sid === state.stockId) return;
-          GS.core.closePage();
-          GS.viewStock.open(sid);
-        });
-        bindTabs(el.el);
-        bindChartTouch(el.el);
-        bindAct(el.el);
-        bindDanmakuSend(el.el);
-        renderNews();
-        draw();
-      },
-    });
-
-    // 拉分时 + 日线（日线按需）
-    GS.api.loadHistory(state.stockId).then(() => draw());
+  /** 收订阅与弹幕观看心跳（关页 / 换票前都要收，否则旧票的 tick 会打在新页上） */
+  function stopWatch() {
     if (state.unsub) state.unsub();
+    state.unsub = null;
+    if (state.dmWatchTimer) {
+      clearInterval(state.dmWatchTimer);
+      state.dmWatchTimer = null;
+    }
+  }
+
+  /** 订阅帧 + 打弹幕观看心跳（60s 一次，与网页版同口径：没有它 watcher 过期后
+   *  这只票就不再生成 NPC 弹幕——纯 App 玩家盯的票会整场冷清。指数没有 NPC 池，跳过） */
+  function startWatch() {
+    stopWatch();
     state.unsub = GS.core.subscribe(() => {
       tick();
     });
-    // 弹幕观看心跳（60s 一次，与网页版同口径）：没有它 watcher 过期后，
-    // 这只票就不再生成 NPC 弹幕——纯 App 玩家盯的票会整场冷清。
-    // 指数不生成弹幕（没有 NPC 池），也就没有心跳可打
-    if (!idx) {
-      const watchTick = () => {
-        GS.api
-          .getJSON('/api/danmaku/watch?stock=' + encodeURIComponent(state.stockId))
-          .catch(() => {});
-      };
-      watchTick();
-      state.dmWatchTimer = setInterval(watchTick, 60000);
-    }
-    const prevClose = ctl.onClose;
-    ctl.onClose = () => {
-      if (state.unsub) state.unsub();
-      state.unsub = null;
-      if (state.dmWatchTimer) {
-        clearInterval(state.dmWatchTimer);
-        state.dmWatchTimer = null;
-      }
-      if (prevClose) prevClose();
+    if (GS.core.isIndex(state.stockId)) return;
+    const watchTick = () => {
+      GS.api
+        .getJSON('/api/danmaku/watch?stock=' + encodeURIComponent(state.stockId))
+        .catch(() => {});
     };
-    return ctl;
+    watchTick();
+    state.dmWatchTimer = setInterval(watchTick, 60000);
+  }
+
+  /* ---------------------------------------------------- 翻票（上一个/下一个） */
+
+  /** 翻页顺序 = 首页「全部标的」的顺序；指数 999999 不在其中，不参与左右翻 */
+  function marketList() {
+    const st = GS.core.S.state;
+    return st && Array.isArray(st.markets) ? st.markets : [];
+  }
+
+  /**
+   * 相对当前个股的上(-1)/下(+1)一只，**首尾循环**：最后一只往左滑回到第一只，
+   * 第一只往右滑跳到最后一只（用户要求：翻到头不要卡住）。
+   * 当前标的不在列表里（指数 999999）返回 ''，即不参与左右翻。
+   */
+  function neighborOf(dir) {
+    const list = marketList();
+    const n = list.length;
+    if (n < 2) return '';
+    const i = list.findIndex((m) => m.stockId === state.stockId);
+    if (i < 0) return '';
+    return list[(i + dir + n) % n].stockId;
+  }
+
+  /** 头部「3/10」页码：知道自己在第几只，也暗示这页可以左右翻 */
+  function pagerHtml() {
+    const list = marketList();
+    const i = list.findIndex((m) => m.stockId === state.stockId);
+    if (i < 0 || list.length < 2) return '';
+    return '<span class="head-pager num" id="stockPager">' + (i + 1) + '/' + list.length + '</span>';
+  }
+
+  /** 点成分股等「跳到任意一只」：按在标的列表里的前后关系决定滑入方向 */
+  function navigateTo(sid) {
+    const list = marketList();
+    const from = list.findIndex((m) => m.stockId === state.stockId);
+    const to = list.findIndex((m) => m.stockId === sid);
+    const dir = from >= 0 && to >= 0 && to !== from ? (to > from ? 1 : -1) : 0;
+    swapTo(sid, dir);
+  }
+
+  /**
+   * 原地换一只票：只替换 .page-inner 的内容并重新绑定，不 closePage/openPage。
+   * 走开关页会把整页滑出屏幕再滑入（还有 300ms 的隐藏延时），和跟手翻页打架。
+   * 图表类型（state.mode）保留——玩家选了日K，翻下一只还是日K。
+   */
+  function swapTo(sid, dir) {
+    const ctl = state.ctl || GS.core.S.page;
+    const m = GS.core.market(sid);
+    if (!ctl || !m) return false;
+    stopWatch();
+    state.stockId = sid;
+    resetStock();
+    ctl.el.innerHTML = skeleton(m);
+    ctl.body = ctl.el.querySelector('.page-body');
+    mount(ctl, dir || 0);
+    return true;
+  }
+
+  /* -------------------------------------------------------- 左右滑手势 */
+
+  // 起手就放过的区域：图表自己吃手势（K 线平移/捏合、分时十字光标），
+  // 买卖栏、横向 tab 条与输入框也不该被翻页抢走
+  const SWIPE_SKIP = '#chartWrap, .act-bar, .chart-tabs, input, textarea, select';
+  const SWIPE_MIN = 54; // 松手时水平位移超过这么多 px 才翻页（约屏幕 1/7）
+  const SWIPE_SLOPE = 1.25; // 水平/垂直位移比：大于它才算「左右滑」，否则当竖向滚动
+
+  /**
+   * 左右滑切换上一个/下一个标的（首尾循环，翻到最后一只再左滑回到第一只）：
+   * 跟手位移 + 松手够远才翻。
+   * 手势绑在 .page-inner 上（每次换票都会重建，天然不累积监听）。
+   * CSS 里这套容器是 touch-action: pan-y，横向手势浏览器不抢，全程能收到 touchmove。
+   */
+  function bindSwipe(root) {
+    let g = null; // { x0, y0, dx, axis:null|'x'|'y' }
+
+    const reset = () => {
+      if (!g) return;
+      root.classList.remove('swiping');
+      root.style.transform = ''; // 松手回弹（.page-inner 上有 0.22s 过渡）
+      g = null;
+    };
+
+    root.addEventListener(
+      'touchstart',
+      (ev) => {
+        if (ev.touches.length !== 1) {
+          reset();
+          return;
+        }
+        const tg = ev.target;
+        if (tg && tg.closest && tg.closest(SWIPE_SKIP)) {
+          g = null;
+          return;
+        }
+        const t = ev.touches[0];
+        g = { x0: t.clientX, y0: t.clientY, dx: 0, axis: null };
+      },
+      { passive: true }
+    );
+
+    root.addEventListener(
+      'touchmove',
+      (ev) => {
+        if (!g || ev.touches.length !== 1) return;
+        const t = ev.touches[0];
+        const dx = t.clientX - g.x0;
+        const dy = t.clientY - g.y0;
+        if (!g.axis) {
+          if (Math.abs(dx) < 9 && Math.abs(dy) < 9) return;
+          g.axis = Math.abs(dx) > Math.abs(dy) * SWIPE_SLOPE ? 'x' : 'y';
+          // 跟手期间必须去掉过渡，否则每帧都在追 0.22s 的动画
+          if (g.axis === 'x') root.classList.add('swiping');
+        }
+        if (g.axis !== 'x') return;
+        g.dx = dx;
+        // 翻不动的情形（指数页 / 标的少于 2 只）只给 1/4 阻尼位移，表示这边没有别的票
+        const stick = neighborOf(dx < 0 ? 1 : -1) ? dx : dx * 0.25;
+        const cap = (window.innerWidth || 360) * 0.6;
+        root.style.transform = 'translateX(' + Math.max(-cap, Math.min(cap, stick)) + 'px)';
+      },
+      { passive: true }
+    );
+
+    root.addEventListener(
+      'touchend',
+      () => {
+        if (!g) return;
+        const { dx, axis } = g;
+        const target = axis === 'x' ? neighborOf(dx < 0 ? 1 : -1) : '';
+        reset();
+        if (target && Math.abs(dx) >= SWIPE_MIN) swapTo(target, dx < 0 ? 1 : -1);
+      },
+      { passive: true }
+    );
+
+    root.addEventListener('touchcancel', reset, { passive: true });
+  }
+
+  /** 新一只滑入：手指往左（看下一只）→ 新内容从右边进，反之从左边 */
+  function playSlide(root, dir) {
+    const k = dir > 0 ? 'slide-next' : 'slide-prev';
+    root.classList.add(k);
+    root.addEventListener('animationend', () => root.classList.remove(k), { once: true });
+  }
+
+  /** 首次进个股页提示一次左右滑（没人会去读说明，手势得自己冒出来） */
+  function hintSwipe() {
+    if (!neighborOf(1) && !neighborOf(-1)) return;
+    if (GS.core.store.get(SWIPE_HINT_KEY, '')) return;
+    GS.core.store.set(SWIPE_HINT_KEY, '1');
+    setTimeout(() => GS.core.toast('左右滑动可切换个股'), 700);
   }
 
   /** 弹幕发送：POST /api/danmaku（长度/频率/敏感词由服务端判，错误信息直接展示） */
