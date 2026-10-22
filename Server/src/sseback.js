@@ -39,7 +39,7 @@ class SseBackpressure {
 
   /** 队列是否已经超过「该跳过」的门槛（含计数/计时，返回 true 表示本帧可以写） */
   check(conn, now = Date.now()) {
-    const n = conn.res.writableLength || 0;
+    const n = bufferedOf(conn);
     if (n >= this.dropBytes) {
       this.onDrop(conn, '写队列超限', n);
       return false;
@@ -67,7 +67,7 @@ class SseBackpressure {
 
   /** 当前积压字节数（诊断用） */
   static bufferedOf(conn) {
-    return conn.res.writableLength || 0;
+    return bufferedOf(conn);
   }
 
   /** 本 hub 的积压快照：连接数、单条最大、合计（诊断用） */
@@ -85,4 +85,14 @@ class SseBackpressure {
   }
 }
 
-module.exports = { SseBackpressure };
+/**
+ * 连接的待发积压字节：SSE 走 gzip 压缩流时（conn.out，见 src/gzip.js），
+ * 压缩前的队列 + 压缩后 res 的队列都要算——只看 res 会漏掉堵在压缩流里的帧。
+ */
+function bufferedOf(conn) {
+  let n = conn.res.writableLength || 0;
+  if (conn.out) n += conn.out.writableLength || 0;
+  return n;
+}
+
+module.exports = { SseBackpressure, bufferedOf };

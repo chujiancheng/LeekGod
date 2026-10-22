@@ -13,6 +13,8 @@ const admin = require('./admin');
 const openapi = require('./openapi');
 const milestones = require('./milestones');
 const { SseBackpressure } = require('./sseback');
+const gzip = require('./gzip');
+const { gzipBody } = gzip;
 const { logger } = require('./logger');
 
 const CLIENT_DIR = path.join(__dirname, '..', '..', 'Client');
@@ -150,6 +152,17 @@ const withSecurity = (headers) => Object.assign({}, SECURITY_HEADERS, headers);
 
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
+  // 大响应（state / markets 这类 50~90KB 的 JSON）按客户端能力压缩，见 src/gzip.js
+  const gz = gzipBody(res.req, body);
+  if (gz) {
+    res.writeHead(code, withSecurity({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Encoding': 'gzip',
+      'Vary': 'Accept-Encoding',
+    }));
+    return res.end(gz);
+  }
   res.writeHead(code, withSecurity({
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -331,7 +344,7 @@ class SseHub {
       for (const c of [...this.conns]) {
         if (!this.back.check(c, now)) continue;
         try {
-          c.res.write(': ping\n\n');
+          this.write(c, ': ping\n\n');
         } catch (e) {
           this.remove(c);
         }
@@ -390,10 +403,20 @@ class SseHub {
   /** 已序列化好的帧直接写（省掉二次 stringify），异常时摘除连接 */
   sendRaw(conn, event, frame) {
     try {
-      conn.res.write(`event: ${event}\ndata: ${frame}\n\n`);
+      this.write(conn, `event: ${event}\ndata: ${frame}\n\n`);
     } catch (e) {
       this.remove(conn);
     }
+  }
+
+  /**
+   * 帧写入：客户端带 Accept-Encoding: gzip 时帧进压缩流（建连时挂好），
+   * 每个完整事件后 flush（Z_SYNC_FLUSH）保证客户端立刻解出本帧；否则原样直写。
+   */
+  write(conn, chunk) {
+    const out = conn.out || conn.res;
+    out.write(chunk);
+    if (conn.out) conn.out.flush();
   }
 
   broadcastAll() {
@@ -423,11 +446,11 @@ class SseHub {
           selfChunk = JSON.stringify(self).slice(1); // 去掉开头的 '{'，接在公共段后面
           selfCache.set(conn.token, selfChunk);
         }
-        conn.res.write(SSE_STATE_HEAD);
-        conn.res.write(commonBody);
-        conn.res.write(',');
-        conn.res.write(selfChunk);
-        conn.res.write('\n\n');
+        this.write(conn, SSE_STATE_HEAD);
+        this.write(conn, commonBody);
+        this.write(conn, ',');
+        this.write(conn, selfChunk);
+        this.write(conn, '\n\n');
       } catch (e) {
         this.remove(conn);
       }
@@ -1027,13 +1050,21 @@ function createServer(game, options) {
         if (reason) {
           return json(res, 503, { ok: false, error: reason });
         }
-        res.writeHead(200, withSecurity({
+        // 先建压缩通道再写响应头：gzip 的魔数在响应体里，必须在头里声明
+        // Content-Encoding 客户端才会自动解压（EventSource/requests/curl --compressed 同此）
+        const conn = { res, token, ip };
+        conn.out = gzip.sseEncoder(req, res);
+        const sseHeaders = {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-store',
           Connection: 'keep-alive',
-        }));
-        res.write('retry: 2000\n\n');
-        const conn = { res, token, ip };
+        };
+        if (conn.out) {
+          sseHeaders['Content-Encoding'] = 'gzip';
+          sseHeaders['Vary'] = 'Accept-Encoding';
+        }
+        res.writeHead(200, withSecurity(sseHeaders));
+        hub.write(conn, 'retry: 2000\n\n');
         hub.add(conn);
         // 首帧立即推送（行情全量 + 账户快照；分时按需拉 /api/history）
         hub.send(conn, 'state', game.stateFor(token));

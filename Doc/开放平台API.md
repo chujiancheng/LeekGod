@@ -1480,6 +1480,11 @@ data: {"seq":18423,...}
 - 每 15 秒发一行 `: ping` 注释作为心跳。
 - `retry: 2000` 建议客户端断线后 2 秒重连（浏览器 `EventSource` 会自动遵守）。
 - **不含账户段**。账户变化请单独调 `/account`。
+- **gzip 压缩**（2026-10-22 起）：客户端请求头带 `Accept-Encoding: gzip` 时，
+  整条流是 gzip 压缩的（响应头 `Content-Encoding: gzip`），帧体压掉 ~80%+
+  （默认参数 52KB/帧 → ~8.6KB）。`requests` / `EventSource` / OkHttp 自动解压，
+  脚本零改动；`urllib.request` 不主动带该头，服务器就不压缩。裸 socket 自解析的
+  脚本要么自己带这个头并解压，要么保持不带、按明文处理。
 - 单 Key 最多 2 条连接，全服最多 100 条。
   - 超过每 Key 上限：`429 rate_limited`。
   - 全服满：`503 unavailable`。

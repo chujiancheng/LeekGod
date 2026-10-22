@@ -179,6 +179,13 @@ const config = {
       slowDropBytes: 8 * 1024 * 1024, // 单连接 8MB 封顶，500 连接最坏 4GB → 实际远低于此
       slowKickMs: 60000, // 连续 1 分钟一帧都塞不进去，基本可以确定是僵尸连接
     },
+    // gzip 压缩（见 src/gzip.js）：REST 大响应与 SSE 行情流都吃它。
+    // JSON 满屏重复字段名，实测 81KB 的 state 帧压到 ~9KB、52KB 的行情帧压到 ~7KB；
+    // 量化客户端轮询/SSE 是带宽大头，关掉它 10Mbps 会原样回来。
+    // 客户端不带 Accept-Encoding: gzip（curl 裸调、urllib.request）就自动不压缩，零破坏。
+    gzip: {
+      enabled: true,
+    },
   },
 
   // 开放交易接口（/open/v1）：玩家自带量化模型，在自己机器上跑策略，调这里读写。

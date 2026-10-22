@@ -30,6 +30,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const broker = require('./broker');
 const { SseBackpressure } = require('./sseback');
+const { gzipBody, sseEncoder } = require('./gzip');
 const { logger } = require('./logger');
 
 const PREFIX = '/open/v1';
@@ -54,6 +55,16 @@ const OPEN_HEADERS = Object.assign(
 // http.js 要 require 本文件来挂路由，反向依赖会成环。两边都只依赖 node 原生模块。
 function send(res, code, obj) {
   const body = JSON.stringify(obj);
+  // 大响应（markets 全量 50KB+）按客户端能力压缩，见 src/gzip.js
+  const gz = gzipBody(res.req, body);
+  if (gz) {
+    res.writeHead(code, Object.assign({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Encoding': 'gzip',
+      'Vary': 'Accept-Encoding',
+    }, OPEN_HEADERS));
+    return res.end(gz);
+  }
   res.writeHead(code, Object.assign({ 'Content-Type': 'application/json; charset=utf-8' }, OPEN_HEADERS));
   res.end(body);
 }
@@ -481,7 +492,8 @@ function createOpenApi(game) {
         markets: marketsViewFrom(snaps, c.opt),
       };
       try {
-        c.res.write(`event: tick\ndata: ${JSON.stringify(frame)}\n\n`);
+        // 客户端支持 gzip 时帧进压缩流（建连时挂好），每帧 flush 保证立刻可解
+        writeSse(c, `event: tick\ndata: ${JSON.stringify(frame)}\n\n`);
       } catch (e) {
         dropStream(c);
       }
@@ -491,7 +503,7 @@ function createOpenApi(game) {
     for (const c of [...streams]) {
       if (!streamBack.check(c, nowMs())) continue;
       try {
-        c.res.write(': ping\n\n');
+        writeSse(c, ': ping\n\n');
       } catch (e) {
         dropStream(c);
       }
@@ -504,6 +516,13 @@ function createOpenApi(game) {
     const n = (streamByKey.get(c.keyId) || 0) - 1;
     if (n > 0) streamByKey.set(c.keyId, n);
     else streamByKey.delete(c.keyId);
+  }
+
+  /** 事件写入：走连接的压缩流（若建连时挂了 gzip），每个完整事件后 flush */
+  function writeSse(c, chunk) {
+    const out = c.out || c.res;
+    out.write(chunk);
+    if (c.out) c.out.flush();
   }
 
   // 撤销 Key 时掐掉它的全部 SSE：见 ApiKeys.revoke 的注释。
@@ -817,17 +836,25 @@ function createOpenApi(game) {
       if ((streamByKey.get(rec.id) || 0) >= cfg.maxStreamsPerKey) {
         return send(res, 429, { ok: false, error: `单个 Key 最多 ${cfg.maxStreamsPerKey} 条推送连接`, code: 'rate_limited' });
       }
-      res.writeHead(
-        200,
-        Object.assign({ 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive' }, OPEN_HEADERS)
-      );
-      res.write('retry: 2000\n\n');
+      // 先建压缩通道再写响应头：必须在头里声明 Content-Encoding，客户端才会自动解压
       const conn = { res, keyId: rec.id, opt: marketOpts(q) };
+      conn.out = sseEncoder(req, res);
+      const sseHeaders = Object.assign(
+        { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive' },
+        OPEN_HEADERS
+      );
+      if (conn.out) {
+        sseHeaders['Content-Encoding'] = 'gzip';
+        sseHeaders['Vary'] = 'Accept-Encoding';
+      }
+      res.writeHead(200, sseHeaders);
+      writeSse(conn, 'retry: 2000\n\n');
       streams.add(conn);
       streamByKey.set(rec.id, (streamByKey.get(rec.id) || 0) + 1);
       // 首帧立即给一份，脚本不用等到下一个 tick
       try {
-        res.write(
+        writeSse(
+          conn,
           `event: tick\ndata: ${JSON.stringify({
             seq: game.tickCount,
             t: nowMs(),
