@@ -19,9 +19,11 @@
     unsub: null,
     dmSeen: new Set(),
     dmWatchTimer: null,
+    auTimer: null, // 竞价倒计时（500ms）
     lastDraw: 0,
     ctl: null, // 当前二级页控制器（左右翻票原地换内容用）
     day: 0, // 最近看到的服务端交易日号（跨天清零 Cross-hair 用）
+    auSig: '', // 竞价条当前渲染的是开盘还是收盘竞价（结构重建的签名）
   };
 
   /** 首次进个股页弹一次的「左右滑」提示（本地只弹一次，换账号也不烦） */
@@ -101,6 +103,23 @@
       }) +
       '<div class="page-body" id="stockBody">' +
         '<div class="quote-head">' +
+          // 集合竞价条：竞价阶段才有内容（开盘 / 收盘两段都用它）。
+          // 竞价时 last 还是**昨收**（只入簿不撮合），大价格一动不动，玩家不知道
+          // 会开在哪——所以虚拟成交价必须顶到报价卡最上面，与网页版 auction-strip 同口径。
+          '<div class="auction-bar" id="auctionBar" hidden>' +
+            '<div class="ab-head">' +
+              '<span class="ab-tag" id="abTag">集合竞价</span>' +
+              '<span class="ab-clock num" id="abClock">--:--</span>' +
+              '<span class="ab-left num" id="abLeft"></span>' +
+            '</div>' +
+            '<div class="ab-mid">' +
+              '<span class="ab-label" id="abLabel">虚拟开盘</span>' +
+              '<b class="ab-price num" id="abPrice">--</b>' +
+              '<span class="ab-chg num" id="abChg"></span>' +
+            '</div>' +
+            '<div class="ab-note" id="abNote"></div>' +
+            '<i class="ab-prog" id="abProg"></i>' +
+          '</div>' +
           '<div class="quote-line">' +
             '<span class="quote-big num" id="qBig">—</span>' +
             '<span class="quote-chg num" id="qChg">—</span>' +
@@ -114,6 +133,10 @@
             '<span>' + (idx ? '总市值' : '市值') + '<b class="num" id="qCap">—</b></span>' +
           '</div>' +
         '</div>' +
+
+        // 停牌 / 休市提示放到报价卡正下方：原先挂在整页最末尾（消息卡之后），
+        // 玩家得往下滑才能看到——停牌与休市恰恰是最该第一眼看见的两件事
+        '<div id="haltBox"></div>' +
 
         (m ? archiveEntryHtml(m) : '') +
 
@@ -139,6 +162,13 @@
               '</div>'
             : '<div class="book-panel">' +
                 '<div class="book-panel-title">五档盘口</div>' +
+                // 竞价时盘口是「交叉的」，五档读起来像数据错——虚拟价压缩成两行小字
+                // 顶在档位上方，挂单时眼睛不用在盘口与顶部竞价条之间来回跳
+                '<div class="book-auction" id="bookAuction" hidden>' +
+                  '<span class="ba-label" id="baLabel">虚拟开盘</span>' +
+                  '<b class="ba-price num" id="baPrice">--</b>' +
+                  '<span class="ba-vol" id="baVol"></span>' +
+                '</div>' +
                 '<div class="book" id="bookBox"></div>' +
                 '<div class="book-sub">分时成交</div>' +
                 '<div class="panel-ticker" id="tickerBox"></div>' +
@@ -159,8 +189,6 @@
           '<div class="news-list" id="stockNews"></div>' +
           '<button class="news-more" id="stockNewsMore">更多消息 ›</button>' +
         '</div>' +
-
-        '<div id="haltBox"></div>' +
       '</div>' +
       (idx
         ? ''
@@ -257,6 +285,10 @@
       clearInterval(state.dmWatchTimer);
       state.dmWatchTimer = null;
     }
+    if (state.auTimer) {
+      clearInterval(state.auTimer);
+      state.auTimer = null;
+    }
   }
 
   /** 订阅帧 + 打弹幕观看心跳（60s 一次，与网页版同口径：没有它 watcher 过期后
@@ -266,6 +298,9 @@
     state.unsub = GS.core.subscribe(() => {
       tick();
     });
+    // 竞价倒计时按 500ms 平滑推进（帧是 700ms 一帧，只吃帧数字会一格一格跳）。
+    // 非竞价阶段 paintAuction 第一行就返回，不产生额外开销
+    state.auTimer = setInterval(paintAuction, 500);
     if (GS.core.isIndex(state.stockId)) return;
     const watchTick = () => {
       GS.api
@@ -1102,12 +1137,14 @@
     if (m.isIndex) {
       renderComponents(m);
       renderFlow(m);
+      renderAuction(st);
       renderHalt(st, m);
       renderNews();
       if (Date.now() - state.lastDraw > 500) draw();
       return;
     }
 
+    renderAuction(st);
     renderBook(m);
     renderFlow(m);
     renderTicker(m);
@@ -1129,6 +1166,138 @@
     GS.viewNews.renderRows($('stockNews'), opt);
   }
 
+  /* ------------------------------------------- 集合竞价（开盘 / 收盘） */
+
+  /** 游戏内时刻（自 00:00 的毫秒）→ HH:MM（顶栏 clock 同口径，不带秒） */
+  function fmtClock(ms) {
+    const v = ((num(ms) % 86400000) + 86400000) % 86400000;
+    const p = (n) => String(n).padStart(2, '0');
+    const h = Math.floor(v / 3600000);
+    const m = Math.floor((v - h * 3600000) / 60000);
+    return p(h) + ':' + p(m);
+  }
+
+  /**
+   * 竞价阶段剩余毫秒：优先 `phaseEndsAt − serverNow()`。
+   * 只吃 state 帧里的 phaseLeftMs 的话，倒计时会跟着 700ms 一帧的数字一格一格跳；
+   * 用服务端给的绝对结束时刻 + 本机流逝插值，500ms 定时器一刷就是平滑的。
+   */
+  function auctionLeft(d) {
+    const end = num(d && d.phaseEndsAt);
+    const byEnd = end > 0 ? end - GS.core.serverNow() : Infinity;
+    // 封顶到「帧里那一刻的剩余」：熄屏 / 切后台回来时本机流逝可能虚高，
+    // 不封顶会直接把倒计时压到 0，显示成「正在撮合」
+    return Math.max(0, Math.min(num(d && d.phaseLeftMs), byEnd));
+  }
+
+  /** 竞价展示的开关：停牌优先（停牌时价格本来就不该有虚拟价） */
+  function auctionShowing(st) {
+    const d = st && st.day;
+    return !!(d && d.enabled && d.auction && !(st.halt && st.halt.halted));
+  }
+
+  /** 只在个股页展示：指数快照没有自己的盘口（无 auction 字段），竞价信息退到 halt-tip */
+  function auctionTarget(st) {
+    const m = GS.core.market(state.stockId);
+    return auctionShowing(st) && m && !m.isIndex ? m : null;
+  }
+
+  /** 竞价条的显隐 + 开盘/收盘切换（结构只在 kind 变化时重建，其余帧只 patch 文本） */
+  function renderAuction(st) {
+    const bar = $('auctionBar');
+    if (!bar) return;
+    const m = auctionTarget(st);
+    const bookBox = $('bookAuction');
+    if (!m) {
+      if (!bar.hidden) bar.hidden = true;
+      if (bookBox && !bookBox.hidden) bookBox.hidden = true;
+      state.auSig = '';
+      return;
+    }
+    if (bar.hidden) bar.hidden = false;
+    const kind = (m.auction && m.auction.kind) || st.day.auction;
+    if (state.auSig !== kind) {
+      state.auSig = kind;
+      const isOpen = kind === 'open';
+      const tag = $('abTag');
+      const lbl = $('abLabel');
+      const bl = $('baLabel');
+      if (tag) tag.textContent = isOpen ? '开盘竞价' : '收盘竞价';
+      if (lbl) lbl.textContent = isOpen ? '虚拟开盘' : '虚拟收盘';
+      if (bl) bl.textContent = isOpen ? '虚拟开盘' : '虚拟收盘';
+      bar.dataset.kind = kind || '';
+    }
+    if (bookBox && bookBox.hidden) bookBox.hidden = false;
+    paintAuction();
+  }
+
+  function patchTxt(id, txt, klass) {
+    const el = $(id);
+    if (!el) return;
+    if (txt != null && el.textContent !== txt) el.textContent = txt;
+    if (klass != null && el.className !== klass) el.className = klass;
+  }
+
+  /**
+   * 竞价条的动态部分（每帧 + 每 500ms 定时器各跑一次）。
+   * 信息优先级：虚拟成交价 > 不可撤单倒计时 > 可成交量。
+   * 竞价簿允许买卖价交叉，所以「无交叉盘口」是正常状态而不是故障，文案要说清楚。
+   */
+  function paintAuction() {
+    const st = GS.core.S.state;
+    const bar = $('auctionBar');
+    if (!st || !bar || bar.hidden) return;
+    const m = auctionTarget(st);
+    if (!m) return;
+    const d = st.day;
+    const a = m.auction || {};
+    const isOpen = (a.kind || d.auction) === 'open';
+    const left = auctionLeft(d);
+    const drift = Math.max(0, num(d.phaseLeftMs) - left); // 帧内已经流逝的墙钟毫秒
+    // 游戏内时钟跟着同一份流逝走（各阶段压缩比不同，用 phaseGameMs/phaseMs 换算）
+    const rate = num(d.phaseGameMs) / Math.max(1, num(d.phaseMs));
+    const clock = num(d.gameClockMs) + drift * (rate > 0 ? rate : 0);
+
+    // 剩余时间：开盘竞价接「开盘集中撮合」，收盘竞价接「收盘撮合」（= 当天收盘价）
+    patchTxt('abLeft', (left <= 0 ? '正在撮合' : fmtLeft(left) + '后' + (isOpen ? '开盘' : '收盘')), 'ab-left num');
+    patchTxt('abClock', fmtClock(clock), 'ab-clock num');
+
+    const price = a.price == null ? null : num(a.price);
+    const pc = num(m.prevClose);
+    if (price == null) {
+      patchTxt('abPrice', '--', 'ab-price num dim');
+      patchTxt('abChg', '盘口未交叉', 'ab-chg num dim');
+    } else {
+      const diff = price - pc;
+      const pct = pc ? (diff / pc) * 100 : 0;
+      patchTxt('abPrice', fmtP(price), 'ab-price num ' + cls(diff));
+      patchTxt('abChg', fmtPct(pct), 'ab-chg num ' + cls(diff));
+    }
+
+    // 不可撤单窗口：真实市场 09:20 / 14:57 那条硬线。撤单失败前先让玩家看见
+    const locked = !!(a.locked || d.locked);
+    const unlockLeft = Math.max(0, num(d.unlockLeftMs) - drift);
+    const volTxt = price == null ? '暂无可成交量' : '可成交 ' + fmtQty(a.volume) + ' 股';
+    let tail;
+    if (locked) tail = '已进入不可撤单窗口';
+    else if (num(d.unlockLeftMs) > 0) tail = '距不可撤单 ' + fmtLeft(unlockLeft);
+    else tail = isOpen ? '阶段结束集中撮合' : '阶段结束定收盘价';
+    patchTxt('abNote', volTxt + ' · ' + tail, 'ab-note' + (locked ? ' locked' : ''));
+
+    // 阶段进度条（CSSOM：CSP 禁内联 style 属性）
+    const prog = $('abProg');
+    if (prog) {
+      const ms = Math.max(1, num(d.phaseMs));
+      const pct = Math.max(0, Math.min(100, ((ms - left) / ms) * 100));
+      prog.style.width = pct.toFixed(1) + '%';
+    }
+
+    // 盘口上方的两行紧凑版：挂单时眼睛不用回到报价卡
+    patchTxt('baPrice', price == null ? '--' : fmtP(price),
+      'ba-price num ' + (price == null ? 'dim' : cls(price - pc)));
+    patchTxt('baVol', price == null ? '无交叉' : '量 ' + fmtAmt(a.volume), 'ba-vol');
+  }
+
   function renderBook(m) {
     const box = $('bookBox');
     if (!box) return;
@@ -1146,7 +1315,9 @@
       return (
         '<div class="book-row">' +
           '<span class="book-bar ' + (side === 'ask' ? 'up' : 'down') + '" data-w="' + pct + '"></span>' +
-          '<span class="lab">' + (side === 'ask' ? '卖' : '买') + (5 - i) + '</span>' +
+          // 卖侧入参已 reverse（上→下 5→1），买侧保持服务端原序（买1 在最上），
+          // 所以档位号要分侧算：卖 5-i，买 i+1
+          '<span class="lab">' + (side === 'ask' ? '卖' : '买') + (side === 'ask' ? 5 - i : i + 1) + '</span>' +
           '<span class="px ' + tone + '">' + fmtP(r.price) + '</span>' +
           '<span class="qt">' + fmtQty(q) + '</span>' +
         '</div>'
@@ -1271,19 +1442,37 @@
     if (!box) return;
     const halt = st.halt;
     const day = st.day;
+    const idx = !!(m && m.isIndex);
     let html = '';
     if (halt && halt.halted) {
       html =
-        '<div class="halt-tip">⛔ 已停牌：' + esc(halt.reason || '运维暂停交易') +
-        (halt.until ? '，预计 ' + fmtTime(halt.until) + ' 恢复' : '') + '</div>';
+        '<div class="halt-tip halted">⛔ <b>已停牌</b> · ' + esc(halt.reason || '运维暂停交易') +
+        (halt.until ? '，预计 ' + fmtTime(halt.until) + ' 恢复' : '') +
+        '<span class="ht-sub">停牌期间不撮合、不能下单</span></div>';
     } else if (day && !day.trading) {
+      // 午休与夜间是两种完全不同的「休市」：一个 40 秒后继续交易，一个结算完才开新的一天。
+      // 原先共用一句「休市期间不能下单」，玩家分不清是午休还是已经收盘
+      const night = day.phase === 'night';
+      const left = num(day.phaseLeftMs);
       html =
-        '<div class="halt-tip">🕐 当前 ' + esc(day.label || '休市') +
-        '，' + fmtLeft(day.phaseLeftMs) + '后进入下一阶段。' +
-        (m && m.isIndex ? '休市期间大盘走势不再刷新。' : '休市期间不能下单。') + '</div>';
-    } else if (day && day.auction) {
-      html = '<div class="halt-tip">📣 ' + esc(day.label || '集合竞价') + ' 进行中，' +
-        fmtLeft(day.phaseLeftMs) + '后开盘。</div>';
+        '<div class="halt-tip closed ' + (night ? 'night' : 'lunch') + '">' +
+        (night ? '🌙 ' : '🕐 ') +
+        '<b>' + esc(day.label || (night ? '已收盘结算' : '休市')) + '</b>' +
+        '<span class="ht-sub">' +
+        (night
+          ? '未成交委托已失效' + (left > 0 ? '，' + fmtLeft(left) + '后开盘集合竞价' : '，即将开盘集合竞价')
+          : '暂停下单与撮合' + (left > 0 ? '，' + fmtLeft(left) + '后恢复交易' : '，即将恢复交易')) +
+        '</span></div>';
+    } else if (idx && day && day.auction) {
+      // 指数没有自己的盘口（快照里没有 auction 字段），拿不到虚拟价——只报阶段与倒计时。
+      // 个股页的竞价信息在报价卡顶部的竞价条里，这里不再重复
+      const left = num(day.phaseLeftMs);
+      html =
+        '<div class="halt-tip auction">📣 <b>' + esc(day.label || '集合竞价') + '</b>' +
+        '<span class="ht-sub">' +
+        (left > 0 ? fmtLeft(left) + '后' + (day.auction === 'open' ? '开盘' : '收盘') + '集中撮合'
+          : '正在集中撮合') +
+        ' · 成分股按匹配价定价</span></div>';
     }
     if (box.dataset.last !== html) {
       box.dataset.last = html;
@@ -1361,6 +1550,20 @@
     return Math.floor(v / Math.max(price, 0.01));
   }
 
+  /**
+   * 竞价阶段的下单提示。竞价只入簿不撮合，玩家最容易犯的两个错：
+   * ① 以为「下单即成交」——成交其实在阶段末尾按最大成交量价一次性撮合；
+   * ② 拖到最后一刻想撤——最后 10 秒（真实市场 09:20 / 14:57 那条硬线）撤不掉。
+   */
+  function auctionTip(st, m) {
+    const d = st && st.day;
+    if (!d || !d.enabled || !d.auction || !m || m.isIndex || !m.auction) return '';
+    const kind = m.auction.kind === 'open' ? '开盘' : '收盘';
+    return d.locked
+      ? kind + '集合竞价 · 已进入不可撤单窗口，现在下的单不可撤'
+      : kind + '集合竞价 · 先入簿，阶段结束时按最大成交量价集中撮合';
+  }
+
   function openOrder(action) {
     const m = GS.core.market(state.stockId);
     if (!m) return;
@@ -1372,10 +1575,15 @@
     const lot = num(m.lotSize) || 100;
     let side = action === 'buy_open' || action === 'buy_close' ? 'buy' : 'sell';
     let cur = action;
-    let price = num(m.last);
+    // 竞价阶段 last 还是昨收（只入簿不撮合），拿它当默认价等于让玩家对着「昨收」下单；
+    // 有虚拟成交价就先用它，没有（盘口未交叉）才退回最新价
+    const au = m.auction && m.auction.price != null ? m.auction : null;
+    const auTip = auctionTip(st, m);
+    let price = au ? num(au.price) : num(m.last);
     let qty = lot;
 
     const html =
+      (auTip ? '<div class="ord-auction">📣 ' + esc(auTip) + '</div>' : '') +
       '<div class="order-side" id="sideRow">' +
         '<button data-act="buy_open">买入开多</button>' +
         '<button data-act="sell_close">卖出平多</button>' +
@@ -1388,7 +1596,7 @@
         '<button data-step="price" data-dir="1">+</button>' +
       '</div>' +
       '<div class="chip-row" id="priceChips">' +
-        '<button class="chip" data-px="last">最新</button>' +
+        '<button class="chip" data-px="last">' + (au ? '虚拟价' : '最新') + '</button>' +
         '<button class="chip" data-px="bid">买一</button>' +
         '<button class="chip" data-px="ask">卖一</button>' +
       '</div>' +
@@ -1461,7 +1669,7 @@
         GS.core.on(body, '#priceChips button', 'click', (e, t) => {
           const k = t.dataset.px;
           const d = (m.depth || {});
-          let v = num(m.last);
+          let v = au ? num(au.price) : num(m.last);
           if (k === 'bid' && d.bids && d.bids[0]) v = num(d.bids[0].price);
           if (k === 'ask' && d.asks && d.asks[0]) v = num(d.asks[0].price);
           pIn.value = fmtP(v);
@@ -1493,7 +1701,9 @@
                     ? filled >= num(o.qty)
                       ? '全部成交'
                       : '成交 ' + fmtQty(filled) + '/' + fmtQty(o.qty) + ' 股'
-                    : '已挂单';
+                    : au
+                      ? '已进竞价簿，阶段末集中撮合'
+                      : '已挂单';
                 GS.core.toast(ACTION_LABEL[cur] + ' ' + txt, 'ok');
                 GS.core.closeSheet();
                 return;

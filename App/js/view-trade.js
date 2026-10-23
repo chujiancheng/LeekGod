@@ -201,6 +201,11 @@
     if (tab === 'order') {
       const live = a.orders || [];
       const liveIds = new Set(live.map((o) => o.id));
+      // 竞价锁定期（最后 10 秒）：撤单按钮直接置灰。点了才报错是最差的交互，
+      // 玩家会以为 App 坏了——服务端确实会拒，但界面应该先说实话
+      const day = st.day || {};
+      const auOn = !!(day.enabled && day.auction);
+      const auLocked = auOn && !!day.locked;
       const list = (a.orderHistory || [])
         .filter((o) => liveIds.has(o.id) || o.status !== 'live')
         .slice(0, 50);
@@ -216,14 +221,16 @@
               '<div class="list-main">' +
                 '<div class="list-t1">' + esc(GS.core.stockName(o.stockId)) +
                   ' <span class="tag ' + (isLive ? 'tag-gold' : '') + '">' +
-                  (isLive ? '挂单中' : esc(STATUS_LABEL[o.status] || o.status || '')) + '</span></div>' +
+                  (isLive ? (auOn ? '竞价挂单' : '挂单中') : esc(STATUS_LABEL[o.status] || o.status || '')) + '</span></div>' +
                 '<div class="list-t2">' + fmtTime(o.ts) + ' · ' +
                   esc(ACTION_LABEL[o.action] || o.action) + ' · ' + fmtP(o.price) + ' × ' +
                   fmtQty(o.qty) + '</div>' +
               '</div>' +
               '<div class="list-right">' +
                 (isLive
-                  ? '<button class="mini-btn" data-cancel="' + esc(o.id) + '">撤单</button>'
+                  ? auLocked
+                    ? '<button class="mini-btn" disabled>不可撤</button>'
+                    : '<button class="mini-btn" data-cancel="' + esc(o.id) + '">撤单</button>'
                   : '<div class="list-v2">成交 ' + fmtQty(o.filled) + '</div>') +
               '</div>' +
             '</div>'

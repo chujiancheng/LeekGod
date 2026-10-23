@@ -391,6 +391,20 @@ input::placeholder {
 .tag-good { color: var(--down); background: var(--down-soft); }
 .tag-bad { color: var(--up); background: var(--up-soft); }
 .tag-gold { color: var(--gold); background: var(--gold-soft); }
+/* 竞价态徽标：行情不动的那几分钟里，全站唯一在动的信号 */
+.tag.auction { color: var(--gold); background: var(--gold-soft); font-weight: 600; }
+
+/* 区块标题旁的小徽标（首页「全部标的」用） */
+.sec-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--gold);
+  background: var(--gold-soft);
+  border: 1px solid rgba(221, 149, 32, 0.35);
+}
 
 /* ---------- 我的券商卡：星级 / 拥挤度 / 特权清单 / 转户 / 免息券 ---------- */
 
@@ -637,6 +651,12 @@ input::placeholder {
   font-size: 11px;
   color: var(--txt-3);
   margin-top: 1px;
+}
+
+/* 集合竞价阶段：顶栏副标题高亮，切到任何 tab 都能看出「现在在竞价」 */
+.head-sub.auction {
+  color: var(--gold);
+  font-weight: 600;
 }
 
 .head-live {
@@ -1270,6 +1290,14 @@ input::placeholder {
 .pill.down { color: #fff; background: var(--down); }
 .pill.flat { color: var(--txt-2); background: #e9ecf1; }
 
+/* 竞价中的「虚拟涨跌幅」：还没成交，别用实心色块冒充成交价 */
+.pill.ghost {
+  color: var(--txt-2);
+  background: #fff;
+  border: 1px dashed var(--line-2);
+  font-weight: 600;
+}
+
 /* ---------------------------------------------------------------- 个股详情 */
 
 .quote-head {
@@ -1285,6 +1313,148 @@ input::placeholder {
   display: flex;
   align-items: flex-end;
   gap: 12px;
+}
+
+/* ---------- 集合竞价条（开盘 = 金色 / 收盘 = 蓝色） ----------
+   竞价阶段只入簿不撮合，大价格还是昨收、一动不动，玩家只能靠这条判断
+   「现在在竞价、会开在哪、还剩多久撤不掉」。放在报价卡最上面，不进二级页的折叠区 */
+.auction-bar {
+  position: relative;
+  overflow: hidden;
+  margin: 0 0 10px;
+  padding: 9px 11px 10px;
+  border-radius: 11px;
+  background: linear-gradient(180deg, #fff9ea, #fffdf8);
+  border: 1px solid rgba(221, 149, 32, 0.32);
+}
+
+.auction-bar[data-kind='close'] {
+  background: linear-gradient(180deg, #eef4ff, #f8fbff);
+  border-color: rgba(60, 124, 255, 0.3);
+}
+
+.ab-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.ab-tag {
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #fff;
+  background: linear-gradient(135deg, #f0b23c, #dd9520);
+}
+
+.auction-bar[data-kind='close'] .ab-tag {
+  background: linear-gradient(135deg, #5b93ff, #3c7cff);
+}
+
+.ab-clock {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--txt-3);
+}
+
+.ab-left {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gold);
+}
+
+.auction-bar[data-kind='close'] .ab-left {
+  color: var(--blue);
+}
+
+.ab-mid {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 4px;
+}
+
+.ab-label {
+  font-size: 11px;
+  color: var(--txt-3);
+}
+
+/* 颜色交给 .up/.down（相对昨收），这里不写 color，否则会盖掉涨跌配色 */
+.ab-price {
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.5px;
+}
+
+.ab-chg {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ab-note {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--txt-2);
+}
+
+/* 不可撤单窗口：这条线之后撤单会被服务端拒掉，界面必须比服务端更早说实话 */
+.ab-note.locked {
+  color: var(--up);
+  font-weight: 600;
+}
+
+.ab-prog {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: block;
+  width: 0;
+  height: 3px;
+  background: linear-gradient(90deg, rgba(240, 178, 60, 0.8), #dd9520);
+  transition: width 0.5s linear;
+}
+
+.auction-bar[data-kind='close'] .ab-prog {
+  background: linear-gradient(90deg, rgba(60, 124, 255, 0.75), #3c7cff);
+}
+
+/* 盘口面板顶部的两行紧凑版（118px 宽，取舍后只留价与量） */
+.book-auction {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 4px;
+  margin: 0 6px 4px;
+  padding: 4px 6px 5px;
+  border-radius: 8px;
+  line-height: 1.25;
+  background: var(--gold-soft);
+  border: 1px solid rgba(221, 149, 32, 0.28);
+}
+
+.ba-label {
+  width: 100%;
+  font-size: 9.5px;
+  color: var(--gold);
+}
+
+.ba-price {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ba-vol {
+  font-size: 9.5px;
+  color: var(--txt-3);
+}
+
+.dim {
+  color: var(--txt-3);
 }
 
 .quote-big {
@@ -2205,6 +2375,18 @@ input::placeholder {
   margin-bottom: 14px;
 }
 
+/* 竞价阶段的下单提示：竞价只入簿、末段不可撤单，两件事都得在下单前说清楚 */
+.ord-auction {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #8a5a00;
+  background: #fff8e6;
+  border: 1px solid rgba(240, 178, 60, 0.42);
+}
+
 .order-side button {
   flex: 1;
   height: 42px;
@@ -2364,15 +2546,53 @@ input::placeholder {
   border: 1px solid rgba(240, 178, 60, 0.4);
 }
 
-/* 停牌 / 休市遮罩 */
+/* 停牌 / 休市提示（放在报价卡正下方，第一眼就能看到） */
 .halt-tip {
-  margin-top: 10px;
+  margin: 0 0 10px;
   padding: 9px 12px;
   border-radius: 11px;
   font-size: 12px;
+  line-height: 1.5;
   color: var(--txt-2);
   background: var(--bg-2);
-  border: 1px dashed var(--line-2);
+  border: 1px solid var(--line-2);
+}
+
+.halt-tip b {
+  color: var(--txt);
+  font-weight: 700;
+}
+
+.halt-tip .ht-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--txt-3);
+}
+
+/* 停牌：红色（真正不能交易、需要等运维） */
+.halt-tip.halted {
+  color: #a02b26;
+  background: #fdeeed;
+  border-color: rgba(232, 65, 60, 0.32);
+}
+
+/* 休市：中性灰；夜间结算比午休再淡一点 */
+.halt-tip.closed {
+  color: var(--txt-2);
+  background: var(--bg-2);
+  border-color: var(--line-2);
+}
+
+.halt-tip.closed.night {
+  background: #f2f4f9;
+}
+
+/* 指数页的竞价提示（个股页走报价卡里的竞价条） */
+.halt-tip.auction {
+  color: #8a5a00;
+  background: #fff8e6;
+  border-color: rgba(240, 178, 60, 0.42);
 }
 
 /* ---------------------------------------------------------------- 消息列表 */

@@ -83,6 +83,10 @@
     if (st.halt && st.halt.halted) parts.push('已停牌');
     const txt = parts.join(' · ');
     if (sub.textContent !== txt) sub.textContent = txt;
+    // 竞价阶段顶栏高亮：App 里只有这条常驻，玩家在任何一个 tab 都该一眼看出
+    // 「现在在集合竞价」（此时行情不动、下单只入簿，是最容易被误会成卡死的两分钟）
+    const au = !!(day.enabled && day.auction && !(st.halt && st.halt.halted));
+    if (sub.classList.contains('auction') !== au) sub.classList.toggle('auction', au);
   }
 
   /* -------------------------------------------------------------- tabbar */

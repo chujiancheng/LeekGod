@@ -44,6 +44,7 @@
         '<div class="hero-name">' +
           '<span id="idxName">全村希望</span>' +
           '<span class="tag" id="idxCode">999999</span>' +
+          '<span class="tag auction" id="idxPhaseTag" hidden>竞价中</span>' +
           '<span class="archive-tag hero-more">行情 ›</span>' +
         '</div>' +
         '<div class="hero-price"><b class="num" id="idxLast">—</b>' +
@@ -57,7 +58,7 @@
         '</div>' +
         '<img class="hero-mascot" id="heroMascot" alt="看板娘" hidden />' +
       '</div>' +
-      '<div class="sec-title">全部标的</div>' +
+      '<div class="sec-title">全部标的<span class="sec-badge" id="marketPhase" hidden></span></div>' +
       '<div class="card card-flat"><div class="stock-list" id="stockList"></div></div>' +
       '<div class="hint">点大盘卡看指数分时与成分股，点任意标的进入个股详情。左侧迷你走势来自全市场降采样，约 30 秒更新一次。</div>' +
       '<div class="sec-title">最新消息</div>' +
@@ -255,14 +256,37 @@
       set('idxTurn', fmtAmt(idx.turnover));
     }
 
+    // 集合竞价：全市场只入簿不撮合，last 还停在昨收——整个列表一动不动，看着像卡死。
+    // 有虚拟成交价就把它当「现价」显示，但明写「虚拟」二字，别让玩家以为已经成交
+    // （真实行情软件列表里的「匹配价」也是这个口径）
+    const d = st.day;
+    const auction = !!(d && d.enabled && d.auction && !(st.halt && st.halt.halted));
+    const badge = GS.core.$('marketPhase');
+    if (badge) {
+      badge.hidden = !auction;
+      if (auction) {
+        badge.textContent = d.auction === 'open' ? '开盘竞价中' : '收盘竞价中';
+        badge.className = 'sec-badge auction';
+      }
+    }
+    const idxTag = GS.core.$('idxPhaseTag');
+    if (idxTag) {
+      idxTag.hidden = !auction;
+      if (auction) idxTag.textContent = d.auction === 'open' ? '竞价中' : '收盘竞价';
+    }
+
     // 列表 patch
     markets.forEach((m) => {
       const r = refs.get(m.stockId);
       if (!r) return;
-      if (r.price) r.price.textContent = fmtP(m.last);
+      const a = auction && m.auction && m.auction.price != null ? m.auction : null;
+      const px = a ? num(a.price) : num(m.last);
+      const base = num(m.prevClose);
+      const pct = base ? ((px - base) / base) * 100 : 0;
+      if (r.price) r.price.textContent = fmtP(px);
       if (r.pill) {
-        r.pill.textContent = fmtPct(m.changePct);
-        r.pill.className = 'pill num ' + cls(m.change);
+        r.pill.textContent = a ? '虚拟 ' + fmtPct(pct) : fmtPct(m.changePct);
+        r.pill.className = 'pill num ' + cls(a ? pct : m.change) + (a ? ' ghost' : '');
       }
     });
 
