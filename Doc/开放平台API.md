@@ -2137,8 +2137,16 @@ gap = win - (long.qty + 在途买 - 在途卖)
 - **买卖不打架**：同一只票有在途买单时不发卖单（先撤），有在途卖单时不发买单。§6.13 说系统会撤掉你自己的旧挂单，但那是兜底，不该依赖。
 
 跑法：`python Server/examples/quant_rotation.py --key gs_xxx`（或 `-k`、或填文件顶部 `API_KEY`、或设环境变量；
-优先级见本节开头的参数表）；`TOP_N` / `POSITION_PCT` / `LOOKBACK` / `ENTRY_SCORE` 等调参项走环境变量，
-`--stocks 600001,600002` 可临时限定标的，文件头有全套默认值。**Key 写进代码后别再把这个文件提交到 git 或发给别人。**
+优先级见本节开头的参数表）。全部调参项都能从命令行传（参数名 = 环境变量名小写、下划线换连字符）：
+
+```bash
+python Server/examples/quant_rotation.py --top-n 3 --position-pct 0.5
+python Server/examples/quant_rotation.py --stocks 600001,600002 --stop-loss 0.015
+python Server/examples/quant_rotation.py --lookback 60 --entry-score 0.08 --live
+```
+
+`--stocks 600001,600002` 限定标的（不给就全市场 10 只都参与选股），文件头有全套默认值。
+**Key 写进代码后别再把这个文件提交到 git 或发给别人。**
 
 ### 11.2 `quant_ma.py` 的关键逻辑
 
@@ -2240,7 +2248,7 @@ if short_ma < anchor * (1 - TREND_BREAK_PCT):
 - **不本地记账**：可卖批次、成本、锁仓解禁时间全部读 `/account` 的 `positions[].long.lots[]`，
   重启、断线、部分成交之后都不会算错——网格最容易死在"自己记的仓位跟服务端对不上"上。
 - **格宽下限要 ≥ 3 倍买卖价差**：主动吃对手价成交（`touch_px`），价差是实打实的成本；
-  默认 `STEP_MIN=0.002`（0.2%），费率万分之一量级时一次往返还有肉。
+  默认已改成**固定 3% 一格**（`STEP_MIN = STEP_MAX = 0.03`），想回到自适应就把两者改回 `0.002` / `0.02`。
 - **在途单只留一张 + TTL 撤单**：账户冷却 0.5~3 秒，同一时刻挂两张单没意义；
   `ORDER_TTL_SEC`（默认 20 秒）没成交就撤，下一 tick 按新的中枢重算，避免"僵尸挂单"占着资金和 `sellable`。
 
@@ -2252,8 +2260,9 @@ python Server/examples/quant_grid.py --key gs_xxx --live     # 真下单
 python Server/examples/quant_grid.py --dry-run               # 强制只打印（压过 --live / DRY_RUN=0）
 ```
 
-调参走环境变量（`VOL_X` / `STEP_MIN` / `MAX_LEVELS` / `POSITION_CAP_PCT` / `TREND_BREAK_PCT` 等），
-文件头有全套默认值。**网格是震荡市策略：遇到单边趋势它一定跑输趋势策略**，趋势闸门只是止血，不是盈利来源。
+调参可以直接命令行传：`--step-min 0.004`、`--step-max 0.008`、`--vol-x 1.5`、`--max-levels 5`、`--hold-ticks 30`
+（参数名 = 环境变量名小写、下划线换连字符，命令行优先于环境变量），文件头有全套默认值。
+**网格是震荡市策略：遇到单边趋势它一定跑输趋势策略**，趋势闸门只是止血，不是盈利来源。
 
 ### 11.5 Windows 一键启动 `run-quant.bat`
 

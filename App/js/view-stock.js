@@ -21,6 +21,7 @@
     dmWatchTimer: null,
     lastDraw: 0,
     ctl: null, // 当前二级页控制器（左右翻票原地换内容用）
+    day: 0, // 最近看到的服务端交易日号（跨天清零 Cross-hair 用）
   };
 
   /** 首次进个股页弹一次的「左右滑」提示（本地只弹一次，换账号也不烦） */
@@ -1053,11 +1054,31 @@
 
   /* ---------------------------------------------------------------- 刷新 */
 
+  /**
+   * 跨交易日：清掉「昨天」的观看残留。
+   * 夜里停在个股页不动的情况很常见（App 熄屏挂一夜），这段时间没有任何人会重建页面，
+   * 而十字光标 state.cursor 是**点下标**，跨天后点集整个换过一批，它还指着昨天的那一根
+   * ——画出来的竖线停在图中间，tooltip 冒出的也是昨天的价格与时刻。所以换天就收起光标。
+   * 日线缓存自带 day 版本号（ensureBars），分时每帧按 dayStartAt 重裁，都不用管。
+   */
+  function onNewDay(st) {
+    const today = Number(st.day && st.day.day) || 0;
+    if (!today) return;
+    if (state.day && state.day !== today) {
+      state.cursor = -1;
+      const tip = $('chartTip');
+      if (tip) tip.hidden = true;
+    }
+    state.day = today;
+  }
+
   function tick() {
     const st = GS.core.S.state;
     if (!st) return;
     const m = GS.core.market(state.stockId);
     if (!m) return;
+
+    onNewDay(st);
 
     const set = (id, v, klass) => {
       const el = $(id);
@@ -1217,7 +1238,12 @@
   function renderTicker(m) {
     const box = $('tickerBox');
     if (!box) return;
-    const trades = (m.trades || []).slice(0, 14);
+    // 「分时成交」是当日口径：服务端已按 dayStartAt 裁过一道（见 Market.tapeToday），
+    // 这里再兜一次——旧服务端、或者 App 拿到的帧与 day 段不同步时，
+    // 面板会翻出昨天 14:5x 那批成交，玩家一眼看上去就是「昨天的分时成交没清」。
+    const since = Number(dayInfo() && dayInfo().dayStartAt) || 0;
+    const all = since ? (m.trades || []).filter((t) => num(t.ts || t.t) >= since) : m.trades || [];
+    const trades = all.slice(0, 14);
     if (!trades.length) {
       if (box.dataset.empty !== '1') {
         box.dataset.empty = '1';

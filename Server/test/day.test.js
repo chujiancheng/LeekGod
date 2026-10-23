@@ -918,5 +918,61 @@ console.log('\n[20] 反馈层：恐慌放大下跌、收力反弹（左肥尾的
   }
 }
 
+// ============================================================
+console.log('\n[21] 次日开盘的逐笔 tape：只发当日（面板不能翻出昨天的成交）');
+{
+  // 逐笔磁带是「最近 N 笔」的滚动窗口，日终结算**故意不清**它——夜间休市还要用它
+  // 显示刚收盘那一天的成交明细。代价是跨到第 2 天时磁带头部还是昨天的成交，
+  // 而 App/网页的「分时成交」面板直接渲染这份数组；今天成交条数还没爬满面板之前
+  // （开盘头几拍），玩家看到的全是昨天 14:5x 的价格与分钟数。所以下发前必须按
+  // dayStartAt 裁一刀（见 Market.tapeToday）。
+  const g = new Game();
+  for (const s of config.stocks) {
+    g.npcs.get(s.id).init(g.startedAt);
+    const mk = g.markets.get(s.id);
+    mk.priceHistory.push({ t: g.startedAt, price: mk.lastPrice });
+  }
+  g.index.update(g.markets, g.startedAt);
+  const mk0 = g.markets.get(ID);
+
+  const sinceOf = (now) => g.day.locate(now).dayStartAt;
+  const staleOf = (now) => mk0.snapshot(undefined, now).trades.filter((t) => t.t < sinceOf(now)).length;
+
+  // 第 1 天上午：连跑几帧攒一批当日成交
+  g.day.reanchor(Date.now() - P.morning);
+  for (let i = 0; i < 12; i += 1) g.tick();
+  const now1 = Date.now();
+  const tape1 = mk0.snapshot(undefined, now1).trades;
+  assert(tape1.length > 0, `第 1 天盘中有逐笔下发（${tape1.length} 条）`);
+  assert(staleOf(now1) === 0, '第 1 天：下发的逐笔全都属于今天');
+
+  // 夜间休市：当日（= 第 1 天）成交明细仍要能看到，不能被裁空
+  g.day.reanchor(Date.now() - P.night);
+  g.tick(); // 触发日终结算
+  const nowN = Date.now();
+  const tapeN = mk0.snapshot(undefined, nowN).trades;
+  assert(g.day.locate(nowN).phase.key === 'night', '已定位到夜间休市段');
+  assert(tapeN.length > 0, `夜间仍能下发「刚收盘这一天」的逐笔（${tapeN.length} 条）`);
+  assert(staleOf(nowN) === 0, '夜间：逐笔仍按当天口径下发');
+
+  // 第 2 天上午：跨天之后，昨天的成交一条都不许再出现
+  g.day.reanchor(Date.now() - P.dayMs - P.morning);
+  for (let i = 0; i < 12; i += 1) g.tick();
+  const now2 = Date.now();
+  const tape2 = mk0.snapshot(undefined, now2).trades;
+  assert(g.day.locate(now2).day === 2, `已跨到第 2 天（day=${g.day.locate(now2).day}）`);
+  assert(staleOf(now2) === 0, `第 2 天：下发逐笔里昨天的成交 ${staleOf(now2)} 条（期望 0）`);
+  // 磁带本体仍留着昨天的（只是不下发），所以这条只在「新成交已产生」时才有意义
+  assert(tape2.length > 0, `第 2 天盘中已有新逐笔（${tape2.length} 条）`);
+  assert(
+    tape2.every((t) => t.t >= sinceOf(now2)),
+    '第 2 天：下发的每一笔都发生在今天'
+  );
+  assert(
+    mk0.trades.length >= tape2.length,
+    '磁带本体没有作废：昨天的记录仍留在服务端（夜间展示要用），只是不再下发'
+  );
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed ? 1 : 0);

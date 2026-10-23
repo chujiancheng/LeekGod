@@ -2407,7 +2407,11 @@
     const m = curMarket();
     if (!m) return;
     const trades = m.trades || [];
-    const rows = trades.slice(0, 40).map((t) => {
+    // 逐笔是当日口径：服务端已按 dayStartAt 裁过（Market.tapeToday），这里再兜一刀——
+    // 旧服务端 / 帧与 day 段不同步时，面板会翻出昨天那批成交。
+    // 不能复用 minuteFrom()：切到「5 日」时它返回 4 天前的起点，会把前几天也算进来
+    const from = Number((dayInfo() || {}).dayStartAt) || 0;
+    const rows = (from ? trades.filter((t) => t.t >= from) : trades).slice(0, 40).map((t) => {
       const side = t.side === 'buy' ? 'B' : 'S';
       return `<div class="tape-row">
         <span class="time">${fmtTime(t.t)}</span>

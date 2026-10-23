@@ -1695,9 +1695,10 @@ class Game {
   }
 
   /** 全部标的的行情快照（10 只股票 + 指数）。每 tick 只算一次，给所有 SSE 连接共用 */
-  marketSnapshots() {
+  marketSnapshots(now) {
+    const at = now || Date.now();
     const out = [];
-    for (const stock of this.stocks) out.push(this.markets.get(stock.id).snapshot());
+    for (const stock of this.stocks) out.push(this.markets.get(stock.id).snapshot(undefined, at));
     return out;
   }
 

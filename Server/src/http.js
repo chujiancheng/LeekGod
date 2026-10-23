@@ -423,9 +423,10 @@ class SseHub {
     if (this.conns.size === 0) return;
     // 行情快照（10 只股票 + 指数）每条连接都一样，按 tick 只算一次；账户段仍按各自令牌单独拼。
     // 分时历史与股东榜都不进帧（体积太大），客户端按需拉 /api/history、/api/holders
-    const markets = this.game.marketSnapshots();
+    // 先取时钟：行情快照里的「当日逐笔」按它裁剪，公共段与各账户段必须同一个 now
+    const now = Date.now(); // 阶段切换边界不串帧
+    const markets = this.game.marketSnapshots(now);
     const index = this.game.index.snapshot();
-    const now = Date.now(); // 公共段与各账户段同一时钟，阶段切换边界不串帧
     // 帧拆两段（见 game.stateCommon / stateSelfFor）：公共段 ~70KB 每 tick 只序列化**一次**，
     // 通过多次 res.write 分块写到各连接（SSE 是字节流，分块与否客户端看到的字节完全一样），
     // 公共块字符串对象全连接复用；账户段（~17KB）按 token 去重后各账户一份。

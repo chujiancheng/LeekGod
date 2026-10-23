@@ -293,6 +293,40 @@ class Market {
     return dc.locate(now).phase.key === 'night';
   }
 
+  /**
+   * 本交易日的开工时刻（开盘竞价起点）——「当日口径」的唯一判据。
+   * 时钟没启用时返回 null：那时本来就没有「天」，tape 退化成一整段滚动窗口。
+   */
+  dayStartAt(now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return null;
+    return dc.locate(now).dayStartAt;
+  }
+
+  /**
+   * 给客户端的逐笔成交（App/Web 的「分时成交 · 逐笔」面板、开放平台 markets.trades 都吃它）。
+   *
+   * **必须是当日口径**。逐笔磁带是最近 N 笔的滚动窗口，**日终结算故意不清它**——
+   * 夜间休市期间玩家还要看到「刚收盘这一天」的成交明细（与 closedDay 那一套展示值同理）。
+   * 于是跨到第 N+1 天开盘时，磁带头部还是昨天 14:5x 那批成交：收到第 N+1 天的第一笔成交后，
+   * 昨天的记录被整批挤到后面，但在「今天成交条数还没爬满面板」的这段窗口里
+   * （开盘前几拍，App 面板 14 行），玩家看到的「分时成交」全是昨天的价格与分钟数。
+   * 所以下发前按 dayStartAt 裁一刀：新一天只发新一天的成交。夜间属于当天最后一个阶段，
+   * 因此夜间仍然完整看到当日成交，不需要像 closedDay 那样再定格一份。
+   */
+  tapeToday(now = Date.now(), limit = 30) {
+    const since = this.dayStartAt(now);
+    if (since == null) return this.trades.slice(0, limit);
+    const out = [];
+    for (const t of this.trades) {
+      // trades 是新→旧，一旦越过 dayStartAt 后面全是更早的，直接收工
+      if (t.t < since) break;
+      out.push(t);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   // ---------- 集合竞价 ----------
 
   /**
@@ -2066,8 +2100,8 @@ class Market {
     return { bids: agg(this.book.bids), asks: agg(this.book.asks) };
   }
 
-  /** 行情快照（给客户端） */
-  snapshot(depthLevels) {
+  /** 行情快照（给客户端）。`now` 由调用方统一下传，保证同一 tick 各处的「当日」边界一致 */
+  snapshot(depthLevels, now = Date.now()) {
     const levels = depthLevels || config.market.depthLevels;
     const seatCfg = (config.brokers && config.brokers.seat) || {};
     const depth = seatCfg.enabled
@@ -2108,7 +2142,8 @@ class Market {
       marketCap: this.stock.floatShares * this.lastPrice,
       issueCap: this.stock.floatShares * this.stock.initPrice,
       depth,
-      trades: this.trades.slice(0, 30),
+      // 逐笔成交只发当日（见 tapeToday）：跨到新一天开盘时不许再夹昨天的成交
+      trades: this.tapeToday(now, 30),
       band: this.band(),
       // 集合竞价阶段下发虚拟参考价（最大成交量价），客户端在盘口中显示为「虚拟开盘价」
       auction: this.auctionSnapshot(),
