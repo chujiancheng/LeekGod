@@ -166,6 +166,7 @@
         : '<div class="act-bar" id="actBar">' +
             '<button class="btn-buy" data-side="buy_open">买入</button>' +
             '<button class="btn-sell" data-side="sell_close">卖出</button>' +
+            '<button class="btn-flat" data-cond-open="1">条件单</button>' +
           '</div>') +
       '</div>'
     );
@@ -736,6 +737,11 @@
     GS.core.on(el, '[data-side]', 'click', (e, t) => {
       openOrder(t.dataset.side);
     });
+    // 条件单入口：休市也能建（服务端只在开市时段执行，建单不受限）
+    GS.core.on(el, '[data-cond-open]', 'click', () => {
+      if (GS.cond) GS.cond.openCreate(state.stockId);
+      else GS.core.toast('条件单模块未加载', 'err');
+    });
   }
 
   /* -------------------------------------------------------------- 日线 */
@@ -1265,7 +1271,8 @@
     const st = GS.core.S.state;
     const canTrade = GS.core.isTrading();
     const cd = num(st.cooldownLeft);
-    bar.querySelectorAll('button').forEach((b) => {
+    // 只动带 data-side 的按钮——act-bar 里还有「条件单」这类非交易按钮，不能被改文字
+    bar.querySelectorAll('button[data-side]').forEach((b) => {
       const side = b.dataset.side;
       const pos = GS.core.position(state.stockId);
       let ok = canTrade;

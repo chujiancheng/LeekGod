@@ -85,6 +85,8 @@
     transfer: (broker) => postJSON('/api/broker/transfer', { broker }),
     /** 用今天的免息券（融资/融券利息全免） */
     coupon: () => postJSON('/api/broker/coupon', {}),
+    /** 条件单（服务端自动化策略）：op = create / update / remove，列表走 state.account.auto */
+    auto: (body) => postJSON('/api/auto', body),
   };
 
   /* ------------------------------------------------------------ 分时缓存 */

@@ -37,9 +37,14 @@
         '<button data-tab="pos" class="on">持仓</button>' +
         '<button data-tab="order">委托<span id="ordBadge"></span></button>' +
         '<button data-tab="trade">成交</button>' +
+        '<button data-tab="cond">条件单<span id="condBadge"></span></button>' +
       '</div>' +
       '<div class="card card-flat" id="tradeList"></div>' +
       '<div id="tradeFoot"></div>';
+
+    // tab 是模块级状态（切走再回来不重置），重建骨架时按它还原高亮——
+    // 否则「在条件单页退出登录再进来」会显示持仓高亮 + 条件单列表
+    root.querySelectorAll('#tradeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
 
     GS.core.on(root, '#tradeSeg button', 'click', (e, t) => {
       tab = t.dataset.tab;
@@ -63,6 +68,12 @@
         .cancel(id)
         .then((r) => GS.core.toast(r && r.ok ? '已撤单' : (r && r.error) || '撤单失败', r && r.ok ? 'ok' : 'err'))
         .catch(() => GS.core.toast('网络异常', 'err'));
+    });
+
+    // 条件单：行内启停 / 点行看详情（委托只绑一次，列表反复重绘不影响）
+    if (GS.cond) GS.cond.bind(root);
+    GS.core.on(root, '#condNew', 'click', () => {
+      if (GS.cond) GS.cond.openCreate();
     });
 
     built = true;
@@ -101,17 +112,49 @@
       badge.className = n ? 'tab-badge' : '';
     }
 
+    const cbadge = $('condBadge');
+    if (cbadge) {
+      const n = GS.cond ? GS.cond.activeCount() : 0;
+      cbadge.textContent = n ? String(n) : '';
+      cbadge.className = n ? 'tab-badge' : '';
+    }
+
     renderList();
   }
 
   function renderList() {
     const box = $('tradeList');
     if (!box) return;
+    // #tradeList 是四个 tab 共用的节点，条件单的内容签名挂在这上面：
+    // 切到别的 tab 必须清掉，否则切回条件单时「签名没变 → 跳过重写」，
+    // 屏幕上留着的还是持仓/委托/成交的内容（真 bug，截图验收才发现）。
+    if (tab !== 'cond') box.dataset.condSig = '';
     const st = GS.core.S.state;
     const a = st && st.account;
     if (!a) {
       box.innerHTML = '<div class="empty">未登录</div>';
       return;
+    }
+
+    // 条件单的「新建」入口挂在列表下方（持仓/委托/成交不需要）
+    const foot = $('tradeFoot');
+    if (foot) {
+      if (tab === 'cond' && GS.cond) {
+        const rows = GS.cond.list();
+        const maxN = num(st.rules && st.rules.auto && st.rules.auto.maxPerAccount) || 20;
+        // 同理：内容没变不重写，「新建」按钮正在被按时不能被换掉
+        const sig = rows.length + '/' + maxN + '/' + GS.cond.activeCount();
+        if (foot.dataset.condSig !== sig) {
+          foot.dataset.condSig = sig;
+          foot.innerHTML =
+            '<button class="btn-primary" id="condNew">＋ 新建条件单</button>' +
+            '<div class="hint">' + rows.length + '/' + maxN + ' 条 · ' +
+              GS.cond.activeCount() + ' 条运行中。服务端代执行，App 关掉也生效。</div>';
+        }
+      } else if (foot.innerHTML) {
+        foot.dataset.condSig = '';
+        foot.innerHTML = '';
+      }
     }
 
     if (tab === 'pos') {
@@ -187,6 +230,12 @@
           );
         })
         .join('');
+      return;
+    }
+
+    if (tab === 'cond') {
+      if (GS.cond) GS.cond.render(box);
+      else box.innerHTML = '<div class="empty">条件单模块未加载</div>';
       return;
     }
 

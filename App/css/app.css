@@ -2980,3 +2980,194 @@ input::placeholder {
   line-height: 20px;
   vertical-align: -3px;
 }
+
+/* ---------------------------------------------------------------- 条件单 */
+
+/* 列表第三行：最近一次动作（时间 + 文案单行省略，点整行进详情看全） */
+.list-t3 {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 个股页操作条：条件单入口不做主操作，按内容宽度收窄 */
+.act-bar .btn-flat {
+  flex: 0 0 78px;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+/* 新建弹层顶部说明 */
+.cd-tip {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: var(--gold-soft);
+  color: #8a5a10;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 类型选择：2×2 网格（4 个 chip 横排会挤成一字一行） */
+.cf-types {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cf-type {
+  padding: 10px 12px;
+  border-radius: 12px;
+  text-align: left;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+
+.cf-type b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--txt-2);
+}
+
+.cf-type i {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 1.4;
+  color: var(--txt-3);
+}
+
+.cf-type.on {
+  border-color: rgba(221, 149, 32, 0.55);
+  background: #fffaf0;
+}
+
+.cf-type.on b {
+  color: var(--gold);
+}
+
+/* 标的横滑条：10 只以内不必开原生 select */
+.cf-stocks {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 6px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.cf-stock {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--txt-2);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.cf-stock.on {
+  color: var(--gold);
+  border-color: rgba(221, 149, 32, 0.55);
+  background: #fffaf0;
+  font-weight: 600;
+}
+
+/* 参数行：label 左、输入右 */
+.cf {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 14px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+
+.cf > span {
+  font-size: 13px;
+  color: var(--txt-2);
+  flex-shrink: 0;
+  max-width: 52%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cf > input {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--txt);
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+}
+
+.cf > input::placeholder {
+  font-weight: 400;
+  font-size: 12.5px;
+  color: var(--txt-3);
+}
+
+/* 详情弹层 */
+.cd-head {
+  padding: 2px 0 10px;
+}
+
+.cd-name {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.cd-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--txt-3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cd-evt {
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+  color: var(--txt-2);
+  line-height: 1.5;
+}
+
+.cd-evt:last-of-type {
+  border-bottom: 0;
+}
+
+.cd-evt span {
+  margin-right: 8px;
+  color: var(--txt-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.cd-acts {
+  display: flex;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+
+.cd-acts .btn-flat {
+  height: 46px;
+}
+
+.btn-flat.is-danger {
+  color: #e33a34;
+  border-color: rgba(227, 58, 52, 0.35);
+  background: #fff6f5;
+}
