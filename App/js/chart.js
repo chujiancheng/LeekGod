@@ -276,6 +276,43 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // 竞价分界（画在行情线之下，网页版同口径）：
+    //   open  → 0 宽收口点，淡虚线（5 日视图里当交易日分隔）；
+    //   close → 尾盘三分钟淡金色带 + 起点虚线，标出「这段是集中撮合，不是横盘」
+    if (Array.isArray(o.marks) && o.marks.length) {
+      const bandBottom = volTop + volH + 5 + macdH;
+      for (const mk of o.marks) {
+        const mx = ((+mk.a - t0) / spanT) * w;
+        if (mk.kind === 'open') {
+          if (mx <= 1.5 || mx > w - 0.5) continue;
+          ctx.setLineDash([2, 3]);
+          ctx.strokeStyle = 'rgba(20,30,48,0.18)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(mx + 0.5, 0);
+          ctx.lineTo(mx + 0.5, bandBottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          continue;
+        }
+        const ex = ((+mk.a + (+mk.width || 0) - t0) / spanT) * w;
+        const l = Math.max(mx, 0);
+        const r = Math.min(ex, w);
+        if (r > l + 0.5) {
+          ctx.fillStyle = 'rgba(221,149,32,0.08)';
+          ctx.fillRect(l, 0, r - l, bandBottom);
+        }
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(221,149,32,0.6)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(mx + 0.5, 0);
+        ctx.lineTo(mx + 0.5, bandBottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     // 分时主线固定东财蓝，均价线橙色（按成交量加权的累计均价）
     const main = C.line;
     let sumPV = 0;

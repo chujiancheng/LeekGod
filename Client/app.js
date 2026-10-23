@@ -2154,9 +2154,12 @@
     // 集合竞价与休市期价格是冻住的（竞价只入簿、不撮合），这时不逐帧打点，
     // 整段塌成一个锚点——见 addFramePoint
     const freezeAt = frozenPhaseStart();
+    // 收盘竞价：分时不定格，按「虚拟收盘价（匹配价）」逐帧延伸（无交叉时退回最新价）
+    const closing = !freezeAt && s.day && s.day.auction === 'close';
     for (const m of marketList()) {
-      addFramePoint(histories, m.stockId, s.serverTime, m.last, m.volume, freezeAt);
-      addFramePoint(sparks, m.stockId, s.serverTime, m.last, m.volume, freezeAt);
+      const px = closing && m.auction && m.auction.price != null ? m.auction.price : m.last;
+      addFramePoint(histories, m.stockId, s.serverTime, px, m.volume, freezeAt);
+      addFramePoint(sparks, m.stockId, s.serverTime, px, m.volume, freezeAt);
     }
     if (s.index) addFramePoint(histories, s.index.stockId, s.serverTime, s.index.last, 0, freezeAt);
 
@@ -2249,11 +2252,13 @@
   // 这个锚点原地换价（线只跳一下，不拖尾巴），恢复交易后才重新生长。
   // 阶段与否一律吃服务端下发的 state.day，客户端不自己算阶段。
 
-  /** 定格期返回本阶段的**起点时刻**（分时锚点）；连续竞价/没有交易日时钟返回 null */
+  /** 定格期返回本阶段的**起点时刻**（分时锚点）；连续竞价/收盘竞价/没有交易日时钟返回 null。
+   *  收盘集合竞价依据同花顺口径**不定格**：这一天还没走完，14:57 起按虚拟收盘价（匹配价）
+   *  逐帧延伸，15:00 收盘价落定自然接到夜锚点——定格成直线会让尾盘竞价看起来像分时坏了。 */
   function frozenPhaseStart() {
     const d = dayInfo();
     if (!d) return null;
-    if (d.trading && !d.auction) return null;
+    if (d.trading && (!d.auction || d.auction === 'close')) return null;
     // phaseStartAt 没有直接下发：用「阶段末尾 − 阶段时长」反推，与 gameClockNow 同一套算法
     const end = Number(d.phaseEndsAt);
     const ms = Number(d.phaseMs);

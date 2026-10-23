@@ -148,18 +148,22 @@
     if (arr.length > HIST_MAX) arr.splice(0, arr.length - HIST_MAX);
   }
 
-  /* ------------------------------------------------ 分时定格（竞价/午休/夜间） */
+  /* ------------------------------------------------ 分时定格（开盘竞价/午休/夜间） */
 
   /**
-   * 与网页版同一套口径：只有连续竞价（trading 且非 auction）才让分时往后生长。
-   * 定格期整段只留阶段起点一个锚点，画面完全静止——否则休市期间照抄逐帧价格
-   * 会把线拉成越来越长的水平直线，x 轴跟着最新点一路右移，看起来像还在交易。
-   * 定格期返回本阶段**起点时刻**（phaseEndsAt − phaseMs 反推）；连续竞价返回 null。
+   * 与网页版同一套口径：休市期间（开盘竞价/午休/夜间）分时定格——整段只留阶段起点
+   * 一个锚点，画面完全静止。否则休市期间照抄逐帧价格会把线拉成越来越长的水平直线，
+   * x 轴跟着最新点一路右移，看起来像还在交易。
+   * 定格期返回本阶段**起点时刻**（phaseEndsAt − phaseMs 反推）；不定格返回 null。
+   *
+   * **收盘集合竞价不在此列**（同花顺口径）：这一天还没走完，分时线要保留并继续生长——
+   * 14:57 起按「虚拟收盘价（匹配价）」逐帧延伸，15:00 收盘价落定时自然接到夜锚点上。
+   * 定格成一条直线会让尾盘竞价看起来像「分时坏了」。
    */
   function frozenPhaseStart() {
     const d = S.state && S.state.day;
     if (!d) return null;
-    if (d.trading && !d.auction) return null;
+    if (d.trading && (!d.auction || d.auction === 'close')) return null;
     const end = Number(d.phaseEndsAt);
     const ms = Number(d.phaseMs);
     if (!Number.isFinite(end) || !Number.isFinite(ms) || ms <= 0) return null;
@@ -197,9 +201,12 @@
     if (!st || !Array.isArray(st.markets)) return;
     const t = Number(st.serverTime) || Date.now();
     const freezeAt = frozenPhaseStart();
+    // 收盘竞价：分时不定格，按「虚拟收盘价（匹配价）」逐帧延伸（无交叉时退回最新价）
+    const closing = !freezeAt && st.day && st.day.auction === 'close';
     for (const m of st.markets) {
-      addFramePoint(hist, m.stockId, t, m.last, m.volume, freezeAt);
-      addFramePoint(sparks, m.stockId, t, m.last, m.volume, freezeAt);
+      const px = closing && m.auction && m.auction.price != null ? m.auction.price : m.last;
+      addFramePoint(hist, m.stockId, t, px, m.volume, freezeAt);
+      addFramePoint(sparks, m.stockId, t, px, m.volume, freezeAt);
     }
     // 指数也记一条：服务端 /api/sparks 不含指数，首页 hero 的迷你走势全靠这里养
     if (st.index) {

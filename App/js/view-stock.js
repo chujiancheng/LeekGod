@@ -865,6 +865,46 @@
     return a == null ? t : a;
   }
 
+  /** 收盘集合竞价在当天轴坐标上的位置（start = 14:57 轴偏移，width = 3 分钟）；没有则 null */
+  function axisCloseAuctionSpan(phases) {
+    if (!Array.isArray(phases)) return null;
+    let acc = 0;
+    let span = null;
+    for (const p of phases) {
+      if (p && p.key === 'closeAuction') span = { start: acc, width: axisPhaseWidth(p) };
+      acc += axisPhaseWidth(p);
+    }
+    return span && span.width > 0 ? span : null;
+  }
+
+  /**
+   * 落在轴区间 [lo, hi] 里的「竞价分界」标记（网页版同口径，画图用）：
+   *   kind='open'  开盘集合竞价收口点（0 宽）——5 日视图里当交易日分隔虚线；
+   *   kind='close' 收盘集合竞价起点（14:57）——画淡金色带，标出「尾盘三分钟是集中撮合」。
+   */
+  function axisAuctionMarks(lo, hi) {
+    const d = dayInfo();
+    const phases = d && Array.isArray(d.phases) ? d.phases : null;
+    if (!phases || !Number.isFinite(lo) || !Number.isFinite(hi)) return [];
+    const dayW = axisDayWidth(phases);
+    if (!(dayW > 0)) return [];
+    const ca = axisCloseAuctionSpan(phases);
+    const todayNo = Number(d.day) || 1;
+    const out = [];
+    // 5 日视图的 lo 可以是负数（今天之前第 4 天），不能夹到 0，否则前几天的分界全丢
+    const k0 = Math.floor(lo / dayW);
+    const k1 = Math.floor((hi - 1) / dayW);
+    for (let k = k0; k <= k1; k += 1) {
+      if (todayNo + k < 1) continue; // 开局之前的天没有行情
+      const base = k * dayW;
+      if (base >= lo && base < hi) out.push({ kind: 'open', a: base, width: 0 });
+      if (ca && base + ca.start >= lo && base + ca.start < hi) {
+        out.push({ kind: 'close', a: base + ca.start, width: ca.width });
+      }
+    }
+    return out;
+  }
+
   /** 分时窗口实际覆盖的天数：「5 日」是上限，本局还没跑满 5 天时按已开天数收窄 */
   function minuteDays() {
     if (state.mode !== '5d') return 1;
@@ -1070,6 +1110,7 @@
           from: a0,
           to: endA,
           ticks,
+          marks: axisAuctionMarks(a0, endA),
           macdKey: state.stockId + '|' + state.mode,
         });
         return;
