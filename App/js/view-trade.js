@@ -259,7 +259,8 @@
           '<div class="list-row" data-goto="' + esc(t.stockId) + '">' +
             '<div class="list-main">' +
               '<div class="list-t1">' + esc(GS.core.stockName(t.stockId)) + '</div>' +
-              '<div class="list-t2">' + fmtTime(t.ts) + ' · ' +
+              // 成交记录的时间字段是 t（订单才是 ts），与个股页分时成交同口径
+              '<div class="list-t2">' + fmtTime(t.t || t.ts) + ' · ' +
                 esc(ACTION_LABEL[t.action] || t.action) + '</div>' +
             '</div>' +
             '<div class="list-right">' +
