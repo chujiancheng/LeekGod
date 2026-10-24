@@ -146,8 +146,11 @@ class Persister {
       `),
       loadDailyTurnover: db.prepare(`
         SELECT day, player_amt, npc_amt, player_fills, npc_fills, settled_at
-          FROM daily_turnover ORDER BY day DESC LIMIT ?
+          FROM daily_turnover ORDER BY day DESC LIMIT ? OFFSET ?
       `),
+      countDailyTurnover: db.prepare('SELECT COUNT(*) AS n FROM daily_turnover'),
+      // 只取交易日号（排行榜日选择下拉用，全量、很轻）
+      listDailyTurnoverDays: db.prepare('SELECT day FROM daily_turnover ORDER BY day DESC'),
       loadDailyPlayers: db.prepare(`
         SELECT account, amt, buy_amt, sell_amt, fills
           FROM daily_player_turnover WHERE day = ? ORDER BY amt DESC
@@ -281,9 +284,12 @@ class Persister {
     tx();
   }
 
-  /** 最近若干个交易日的成交统计（新→旧），供 /api/stats/turnover 的每日趋势 */
-  loadDailyTurnover(limit = 60) {
-    return this.st.loadDailyTurnover.all(limit).map((r) => ({
+  /**
+   * 分页取成交统计（新→旧），供 /api/stats/turnover 的每日趋势：
+   * 页大小由调用方定（当前 30），totalDays 供前端算总页数画分页器。
+   */
+  loadDailyTurnover(limit = 30, offset = 0) {
+    return this.st.loadDailyTurnover.all(limit, offset).map((r) => ({
       day: r.day,
       playerAmt: r.player_amt,
       npcAmt: r.npc_amt,
@@ -291,6 +297,16 @@ class Persister {
       npcFills: r.npc_fills,
       settledAt: r.settled_at,
     }));
+  }
+
+  /** 已收盘定格的交易日总数（每日趋势分页用） */
+  countDailyTurnover() {
+    return this.st.countDailyTurnover.get().n;
+  }
+
+  /** 全部已收盘的交易日号（新→旧），供排行榜的日选择下拉（不受每日趋势分页影响） */
+  loadDailyTurnoverDays() {
+    return this.st.listDailyTurnoverDays.all().map((r) => r.day);
   }
 
   /** 某个交易日的玩家成交排行（按成交金额降序） */

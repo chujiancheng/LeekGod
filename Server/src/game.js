@@ -1067,13 +1067,25 @@ class Game {
 
   /**
    * 成交统计页数据（GET /api/stats/turnover）：
-   * today = 当日实时聚合；days = 最近若干个交易日的收盘定格；
+   * today = 当日实时聚合；days = 已收盘定格的每日统计，按页返回（新→旧），
+   *   `page` 从 1 起，每页 daysPerPage 条，daysTotal/daysPages 供前端画分页器；
    * ranking = 玩家成交排行（默认当日实时，传 `day` 查历史日，取 daily_player_turnover）。
    */
-  turnoverStats(reqDay) {
+  turnoverStats(reqDay, reqPage) {
     const today = this.turnoverAgg();
-    const days = this.persist ? this.persist.loadDailyTurnover(60) : [];
+    // 每日趋势分页：每页 30 天，第 1 页就是最近 30 个收盘日，再往前翻页查
+    const PER_PAGE = 30;
+    let page = Math.floor(Number(reqPage) || 1);
+    if (!Number.isFinite(page) || page < 1) page = 1;
+    const daysTotal = this.persist ? this.persist.countDailyTurnover() : 0;
+    const daysPages = Math.max(1, Math.ceil(daysTotal / PER_PAGE));
+    if (page > daysPages) page = daysPages;
+    const days = this.persist
+      ? this.persist.loadDailyTurnover(PER_PAGE, (page - 1) * PER_PAGE)
+      : [];
     const wantDay = reqDay == null || reqDay === '' ? today.day : Number(reqDay);
+    // 日选择下拉用全量交易日号（很轻的一列 int），不受每日趋势分页影响
+    const allDays = this.persist ? this.persist.loadDailyTurnoverDays() : [];
     let ranking;
     if (!Number.isFinite(wantDay) || wantDay === today.day || !this.persist) {
       ranking = [...this.turnoverAccts.entries()].map(([name, r]) => ({
@@ -1095,7 +1107,19 @@ class Game {
       }));
     }
     ranking.sort((a, b) => b.amt - a.amt);
-    return { ok: true, t: Date.now(), today, rankDay: wantDay, days, ranking: ranking.slice(0, 100) };
+    return {
+      ok: true,
+      t: Date.now(),
+      today,
+      days,
+      daysPage: page,
+      daysPages,
+      daysTotal,
+      daysPerPage: PER_PAGE,
+      allDays,
+      rankDay: wantDay,
+      ranking: ranking.slice(0, 100),
+    };
   }
 
   /** 排行展示名：昵称优先，没开户/已删号的账号兜底显示账号本身 */

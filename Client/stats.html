@@ -43,16 +43,21 @@
       <div class="ov-note">口径：一笔成交按买卖两侧分别计入各自账户的阵营（与席位榜同口径），玩家与 NPC 对手成交时两边各计一次。</div>
     </section>
 
-    <!-- 每日趋势 -->
-    <section class="whale-card">
-      <div class="whale-top"><div class="whale-name">每日趋势</div><div class="whale-kv" id="daysHint"></div></div>
-      <div id="daysBox"></div>
-    </section>
-
     <!-- 玩家成交排行 -->
     <section class="whale-card">
       <div class="whale-top"><div class="whale-name" id="rankTitle">玩家成交排行 · 今日</div></div>
       <div id="rankBox"></div>
+    </section>
+
+    <!-- 每日趋势：今日实时行置顶 + 最近 30 个收盘日，更早的分页查 -->
+    <section class="whale-card">
+      <div class="whale-top"><div class="whale-name">每日趋势</div><div class="whale-kv" id="daysHint"></div></div>
+      <div id="daysBox"></div>
+      <div class="days-pager" id="daysPager" hidden>
+        <button type="button" id="daysPrev" class="pager-btn">‹ 上一页</button>
+        <span class="pager-label" id="daysPageLabel"></span>
+        <button type="button" id="daysNext" class="pager-btn">下一页 ›</button>
+      </div>
     </section>
   </main>
 

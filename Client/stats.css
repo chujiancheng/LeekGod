@@ -51,6 +51,41 @@
   color: var(--muted, #8a96a3);
 }
 
+/* 每日趋势：今日实时行高亮 */
+table.whale-table .row-today td {
+  color: var(--gold, #d4a017);
+}
+
+/* 每日趋势分页器：表格下方居中，与头部按钮同款描边 */
+.days-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.pager-btn {
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--gold, #d4a017) 40%, transparent);
+  background: transparent;
+  color: var(--ink, #e8eef5);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.pager-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pager-label {
+  font-size: 12.5px;
+  color: var(--muted, #8a96a3);
+  font-variant-numeric: tabular-nums;
+}
+
 /* 排行前三名给个名次色 */
 table.whale-table .rank-1 { color: var(--gold, #d4a017); font-weight: 700; }
 table.whale-table .rank-2 { color: #c8cdd4; font-weight: 700; }

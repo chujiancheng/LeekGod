@@ -775,7 +775,7 @@ function createServer(game, options) {
         if (rl.enabled && !limiters.holders.allow(ip)) {
           return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
         }
-        return json(res, 200, game.turnoverStats(url.searchParams.get('day')));
+        return json(res, 200, game.turnoverStats(url.searchParams.get('day'), url.searchParams.get('page')));
       }
 
       if (p === '/api/order' && req.method === 'POST') {
