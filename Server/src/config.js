@@ -1117,7 +1117,7 @@ const config = {
   market: {
     tradeTapeSize: 500, // 逐笔成交保留条数
     priceHistorySize: 10300, // 分时价格序列（tick 级，约 2 小时 @ 700ms）
-    dailyBarsKeep: 260, // 日线（K 线）保留根数：内存与存档同一个上限，约 45 小时的游戏时间
+    dailyBarsKeep: 1000, // 日线（K 线）保留根数：内存与存档同一个上限，约 173 小时的游戏时间
     depthLevels: 5, // 五档盘口
   },
 

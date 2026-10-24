@@ -10,6 +10,8 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 12：每日成交统计（daily_turnover / daily_player_turnover 两张新表，只加表；
+//     /stats.html 成交统计页用，写入见 persist.recordDailyTurnover / game.js）
 // 11：头像（accounts 加 avatar / broker_seen 两列，见 Doc/头像方案.md）
 // 10：夜间休市行情头按「刚收盘这一天」的定格值下发（market_state 加 closed_day）
 // 9：NPC 真实身份（accounts 加 home_stock；stock_ledger 加 origin_qty）
@@ -23,7 +25,7 @@ const { logger } = require('./logger');
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -167,6 +169,33 @@ CREATE INDEX IF NOT EXISTS idx_trades_t ON trades(t);
 CREATE TABLE IF NOT EXISTS sessions (
   token   TEXT PRIMARY KEY,
   account TEXT NOT NULL
+);
+
+-- 每日成交统计（/stats.html 成交统计页）：每个交易日收盘结算时定格一行。
+-- 口径与席位流水一致（§11.3）：一笔成交按买卖两侧分别计入各自账户的阵营——
+-- 玩家 vs NPC 的成交两边各记一次 amount，玩家 vs 玩家则在玩家侧计两次，
+-- 所以 player_amt + npc_amt ≥ 全市场成交额（market_state.turnover 跨股合计）。
+-- 当日的实时值在内存里（Market.dayPlayerAmt 等，见 market.js），收盘才定格到这里；
+-- trades 表只保留最近 10 分钟，历史日统计只能靠这张表
+CREATE TABLE IF NOT EXISTS daily_turnover (
+  day          INTEGER PRIMARY KEY,
+  player_amt   REAL NOT NULL DEFAULT 0,
+  npc_amt      REAL NOT NULL DEFAULT 0,
+  player_fills INTEGER NOT NULL DEFAULT 0,
+  npc_fills    INTEGER NOT NULL DEFAULT 0,
+  settled_at   INTEGER NOT NULL
+);
+
+-- 每日玩家成交排行（/stats.html）：每个交易日收盘定格一次，玩家 vs 玩家的成交
+-- 该玩家计两次（买侧一行、卖侧一行各记一次 amount），amt = buy_amt + sell_amt
+CREATE TABLE IF NOT EXISTS daily_player_turnover (
+  day     INTEGER NOT NULL,
+  account TEXT NOT NULL,
+  amt     REAL NOT NULL DEFAULT 0,
+  buy_amt  REAL NOT NULL DEFAULT 0,
+  sell_amt REAL NOT NULL DEFAULT 0,
+  fills   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, account)
 );
 
 -- 行情断点：重启后接着上一局走，而不是从开盘价重新开始
@@ -364,10 +393,37 @@ ALTER TABLE accounts ADD COLUMN avatar TEXT;
 ALTER TABLE accounts ADD COLUMN broker_seen TEXT;
 `;
 
+/**
+ * 版本 11 → 12 的**原地升级**：每日成交统计两张新表（/stats.html 成交统计页）。
+ *
+ * 只加表、不改既有列——老档在 `db.exec(DDL)` 时就已经按 IF NOT EXISTS 把新表
+ * 建出来了，这里再保留一份与 v7（api_keys）同款，纯粹是给「跳版本建出来的合成档」
+ * 挡一道，也把这次结构变化记进版本号。历史日数据从首日起算，升级当天没有昨日数据。
+ */
+const MIGRATION_12 = `
+CREATE TABLE IF NOT EXISTS daily_turnover (
+  day          INTEGER PRIMARY KEY,
+  player_amt   REAL NOT NULL DEFAULT 0,
+  npc_amt      REAL NOT NULL DEFAULT 0,
+  player_fills INTEGER NOT NULL DEFAULT 0,
+  npc_fills    INTEGER NOT NULL DEFAULT 0,
+  settled_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS daily_player_turnover (
+  day     INTEGER NOT NULL,
+  account TEXT NOT NULL,
+  amt     REAL NOT NULL DEFAULT 0,
+  buy_amt  REAL NOT NULL DEFAULT 0,
+  sell_amt REAL NOT NULL DEFAULT 0,
+  fills   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, account)
+);
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支。
 // **9 故意缺席**：NPC 改真名 + 允许跨股，老档的账户名既是主键又是流水引用，迁不动
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10, 11: MIGRATION_11 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10, 11: MIGRATION_11, 12: MIGRATION_12 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;

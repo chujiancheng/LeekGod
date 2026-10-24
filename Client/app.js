@@ -67,10 +67,10 @@
   const isKline = () => chartMode !== 'minute';
   // 日线抓多少根：日线一屏 120 根就够看；**周/月线是「多根并一根」，根数不够就并不出东西**
   //（周线 120 根只剩 17 根、月线只剩 4 根，MACD 与 MA10 全废）。所以进了 K 线模式按服务端
-  // 上限 260 抓（config.market.dailyBarsKeep），日线只画最近 120 根，免得 260 根挤成发丝。
+  // 上限抓（config.market.dailyBarsKeep，当前 1000），日线只画最近 120 根，免得根数多时挤成发丝。
   const DAILY_LIMIT_DAY = 120;
-  const DAILY_LIMIT_KLINE = 260;
-  // 日线**默认**一屏放多少根（不是数据上限）：260 根全铺开每根只有 2px，挤成发丝。
+  const DAILY_LIMIT_KLINE = 1000;
+  // 日线**默认**一屏放多少根（不是数据上限）：千根全铺开每根不足 1px，挤成发丝。
   // 放大/缩小走 kViews 的 count，最多能缩到全量（见 klineView）
   const DAY_SHOW_MAX = 120;
   // K 线视窗（滚轮缩放 + 拖动平移）：按模式各记一份，日/周/月切换互不影响。
@@ -1298,6 +1298,9 @@
     if (whalesBtn) whalesBtn.addEventListener('click', () => { location.href = '/whales.html'; });
     const portalBtn = $('portalBtn');
     if (portalBtn) portalBtn.addEventListener('click', () => { location.href = '/portal.html'; });
+    // 首页「成交统计」：跳统计页（公开只读，无需登录会话）
+    const statsBtn = $('statsBtn');
+    if (statsBtn) statsBtn.addEventListener('click', () => { location.href = '/stats.html'; });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       const overlay = $('comicOverlay');
@@ -6480,7 +6483,7 @@
 
   /**
    * 拉某只标的的已收盘日线（切到 K 线模式 / 换标的 / 跨天时各拉一次）。
-   * 按**当前模式**决定请求根数：日线 120，周/月线 260（服务端上限）。已经拉过够长的就不再拉；
+   * 按**当前模式**决定请求根数：日线 120，周/月线 1000（服务端上限）。已经拉过够长的就不再拉；
    * 服务端返回的根数达不到请求数说明库里就这么点（记 Infinity），不必为同一批数据再打一次。
    */
   function loadDaily(stockId) {
@@ -6528,7 +6531,7 @@
         live: true,
       });
     }
-    // 日线**不再截断**：能缩放到全量 260 根，截断就白拉了（一屏放多少根由 klineView 的
+    // 日线**不再截断**：能缩放到全量（当前上限 1000 根），截断就白拉了（一屏放多少根由 klineView 的
     // count 决定，默认最近 DAY_SHOW_MAX 根）。周/月线本来就要吃全量才能并出足够多的期
     return bars;
   }
@@ -6608,7 +6611,7 @@
     let offset = Math.round(st.offset) || 0;
     offset = Math.max(0, Math.min(offset, total - count));
     // 注意：**不把夹过的值写回 st**。st 记的是「玩家想要多少根」，不是「这只股票能给多少根」：
-    // 切开到一只只有 30 根日线的股票时 count 被夹到 30，写回的话切回 260 根的股票就只剩 30 根了
+    // 切开到一只只有 30 根日线的股票时 count 被夹到 30，写回的话切回千根的股票就只剩 30 根了
     const end = total - offset;
     return { start: end - count, end, count, total, offset, zoomed: count < total || offset > 0 };
   }
@@ -6734,7 +6737,7 @@
    *
    * 日线直接按根算。周/月线**在日线上平滑**：MA20(周) = 最近 100 个交易日的收盘均价
    *（即按交易日平滑的 100 日均线）。理由：周线 MA250 名义要 1750 个交易日、月线 MA120
-   * 要 3360 个，而服务端只存 260 根日线（dailyBarsKeep），严格并期永远算不出来；
+   * 要 3360 个，而服务端只存 1000 根日线（dailyBarsKeep），严格并期很长周期仍算不出来；
    * 展开成交易日算，价位仍落在价格带上，只是样本比名义周期短（note 写明实际窗口）。
    * 与严格并期（每期等权）的差别只在期内收盘分布不均时有微差，差得出来（>0.2%）
    * 或窗口被截短时标 `approx`，图例/光标写 `MA20≈`，不冒充精确值。
@@ -6792,7 +6795,7 @@
 
   /**
    * K 线的 MACD：直接现算，**不做缓存**。
-   * 分时那边要缓存是因为一条序列 10300 点、光标一动就全量重算；K 线最多 260 根，
+   * 分时那边要缓存是因为一条序列 10300 点、光标一动就全量重算；K 线最多千根，
    * 一次 O(n) 循环可以忽略。而「缓存键」这种东西在 K 线上反而不安全——键只能取到
    * 根数 / 首末值，中间某根被结算改写（或 dayBars 整体换掉）时根数与末根收盘都可能不变，
    * 于是读到上一次的 MACD。少一层缓存就少一类这种 bug。
@@ -6849,7 +6852,7 @@
     }
 
     // 时间刻度（纵线，日线标签用交易日号，周/月线用期号）。
-    // 密度按**可见宽度**定：放大到 15 根时 6 条刻度太稀，缩到 260 根时 6 条又太密
+    // 密度按**可见宽度**定：放大到 15 根时 6 条刻度太稀，缩到全量千根时 6 条又太密
     const plotW = W - L.PAD_L - L.PAD_R;
     const ticks = Math.max(2, Math.min(7, L.count, Math.floor(plotW / 72)));
     ctx.textAlign = 'center';

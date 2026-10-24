@@ -1696,6 +1696,16 @@ input::placeholder {
   padding-right: 14px;
 }
 
+/* 买卖着色：主动买（外盘）红、主动卖（内盘）绿。
+   .tick-qty 自带 color 会盖掉全局 .up/.down，这里必须显式按方向覆盖 */
+.tick-qty.up {
+  color: var(--up);
+}
+
+.tick-qty.down {
+  color: var(--down);
+}
+
 /* 右侧面板紧凑逐笔行 */
 .book-panel .tick-row {
   padding: 2.5px 6px;

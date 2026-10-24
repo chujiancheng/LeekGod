@@ -792,7 +792,7 @@
     state.barsFor = state.stockId;
     state.barsDay = dayKey;
     GS.api
-      .getJSON('/api/daily?stock=' + encodeURIComponent(state.stockId) + '&limit=260')
+      .getJSON('/api/daily?stock=' + encodeURIComponent(state.stockId) + '&limit=1000')
       .then((r) => {
         if (r && r.ok) {
           state.bars = r.bars || [];
@@ -1466,12 +1466,15 @@
     box.dataset.empty = '0';
     box.innerHTML = trades
       .map((t) => {
-        const dir = t.action === 'buy_open' || t.action === 'buy_close' ? 'up' : 'down';
+        // 逐笔磁带（Market.onTrade）只带 side（主动方向 buy=买盘主动 / sell=卖盘主动），
+        // 没有 action 字段——旧代码按 t.action 判方向永远不命中，整列被染成卖单色。
+        // A 股口径：主动买（外盘）染红、主动卖（内盘）染绿，价格与手数同步着色。
+        const dir = t.side === 'buy' ? 'up' : 'down';
         return (
           '<div class="tick-row">' +
             '<span class="tick-time">' + fmtHM(t.ts || t.t || 0) + '</span>' +
             '<span class="' + dir + '">' + fmtP(t.price) + '</span>' +
-            '<span class="tick-qty">' + fmtQty(t.qty) + '</span>' +
+            '<span class="tick-qty ' + dir + '">' + fmtQty(t.qty) + '</span>' +
           '</div>'
         );
       })

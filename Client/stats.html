@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>成交统计</title>
+  <link rel="icon" href="data:,">
+  <!-- 主题与交易端共用 localStorage：本页是独立文档（不引 app.js），自己还原一次
+       data-theme，否则在手机上选了浅色主题，进这页还是黑底。
+       必须外链（theme.js）：CSP 是 script-src 'self'，内联脚本会被静默拦截 -->
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/style.css">
+  <!-- 卡片 / 表格 / 窄屏折叠卡片这套通用版式与观测台同款，直接复用 whales.css，
+       本页自己的概览块与日选择器在 stats.css -->
+  <link rel="stylesheet" href="/whales.css">
+  <link rel="stylesheet" href="/stats.css">
+</head>
+<body class="whales-page stats-page">
+  <header class="whales-head">
+    <div>
+      <div class="whales-title">成交统计</div>
+      <div class="whales-sub" id="meta">读取中…</div>
+    </div>
+    <div class="whales-actions">
+      <select id="daySelect" class="day-select" title="选择排行的交易日">
+        <option value="">今日</option>
+      </select>
+      <button type="button" id="refreshBtn">刷新</button>
+      <a class="ghost-link" href="/">返回交易端</a>
+    </div>
+  </header>
+
+  <main class="whales-list">
+    <!-- 今日概览 -->
+    <section class="whale-card">
+      <div class="whale-top"><div class="whale-name" id="overviewTitle">今日概览</div></div>
+      <div class="ov-grid" id="overview">
+        <div class="ov-item"><div class="ov-label">玩家成交额</div><div class="ov-value" id="ovPlayer">--</div></div>
+        <div class="ov-item"><div class="ov-label">NPC 成交额</div><div class="ov-value" id="ovNpc">--</div></div>
+        <div class="ov-item"><div class="ov-label">玩家占比</div><div class="ov-value" id="ovShare">--</div></div>
+        <div class="ov-item"><div class="ov-label">总成交笔数</div><div class="ov-value" id="ovFills">--</div></div>
+      </div>
+      <div class="ov-note">口径：一笔成交按买卖两侧分别计入各自账户的阵营（与席位榜同口径），玩家与 NPC 对手成交时两边各计一次。</div>
+    </section>
+
+    <!-- 每日趋势 -->
+    <section class="whale-card">
+      <div class="whale-top"><div class="whale-name">每日趋势</div><div class="whale-kv" id="daysHint"></div></div>
+      <div id="daysBox"></div>
+    </section>
+
+    <!-- 玩家成交排行 -->
+    <section class="whale-card">
+      <div class="whale-top"><div class="whale-name" id="rankTitle">玩家成交排行 · 今日</div></div>
+      <div id="rankBox"></div>
+    </section>
+  </main>
+
+  <script src="/stats.js"></script>
+</body>
+</html>

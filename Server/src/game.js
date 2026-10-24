@@ -66,6 +66,14 @@ class Game {
     // 见 settleDay），0 只会出现在第 1 个交易日的盘中且被 ensureDaySettled 的闸门挡掉；
     // 用 -1 而不是 0 当哨兵，是为了让「没结过」与「结过第 0 天」这两种状态不会撞在一起
     this._lendSettled = -1;
+    // 每日成交统计（/stats.html 成交统计页）：当日「玩家/NPC 侧成交额」在
+    // Market.dayPlayerAmt 等字段（见 market.js execute，口径与席位流水一致——
+    // 买卖两侧各记一次 amount）；这里只收玩家排行的跨股明细一张 Map。
+    // 收盘定格进 daily_turnover / daily_player_turnover（writeTurnoverDay），
+    // 跨日翻页清零（rollTurnoverDay），当日实时值定期快照进 meta（saveTurnoverLive）
+    this.turnoverAccts = new Map(); // 账号 -> {amt, buyAmt, sellAmt, fills}
+    this._turnoverDay = 0; // 当前累计属于第几个交易日（0 = 时钟未启用 / 未开局）
+    this._turnoverWrittenDay = -1; // 已定格进 daily_turnover 的最大交易日号
     // 每只股票一套完全独立的市场与做市引擎：各自盘口、融券池、做市资金、趋势与情绪。
     // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
     this.markets = new Map();
@@ -95,6 +103,8 @@ class Game {
       // 聚合计账、冷却、选人、取文案全在 DanmakuSystem 里
       market.onPlayerAction = (acc, side, stockId, amount, qty, now, ctx) =>
         this.danmaku.onPlayerAction(acc, side, stockId, amount, qty, now, ctx);
+      // 每日成交统计（/stats.html）：market 只在玩家侧成交后报一声，聚合在这里
+      market.onTurnover = (acc, amount, isBuy) => this.onTurnoverFill(acc, amount, isBuy);
       this.markets.set(stock.id, market);
       const mgr = new NpcManager(market, null, this.store, { seqBase: npcSeq });
       mgr.game = this; // 跨股（P2）要访问其它 market / 账户权益
@@ -182,6 +192,11 @@ class Game {
     } else {
       this.startedAt = Date.now();
       this.day.reanchor(this.startedAt);
+      // 新局的成交统计从第 1 天重新累计（persist.startRound 已清过统计表，
+      // 这里对齐内存水位线；startRound 的表清理见 persist.js）
+      this._turnoverDay = this.day.ok ? 1 : 0;
+      this._turnoverWrittenDay = -1;
+      this.turnoverAccts.clear();
       const now = this.startedAt;
       // 新局的 NPC 名字从这个清空的去重集开始重新生成（名字是确定性的，只要建号顺序
       // 一致、起点一致，同一局里重启/重开得到的是同一套人；不 reset 会继承上一局的
@@ -531,6 +546,10 @@ class Game {
 
     // 自动交易策略恢复（依赖 store 里的账户已就位）
     this.auto.restore(snap.auto);
+
+    // 当日成交统计从 meta 快照恢复（在 catchUpDay 之前——若停机跨过了收盘，
+    // 补结算要用恢复出来的累计定格旧的一天，而不是写个 0 进去）
+    this.restoreTurnoverLive();
   }
 
   stop() {
@@ -560,6 +579,10 @@ class Game {
       this.onPhaseChange(prevDay, dayState, now);
     }
     this._dayState = dayState;
+    // 每日成交统计翻页：进入新交易日时先补定格旧一天（若漏结）再清零重计。
+    // 必须排在 ensureDaySettled 之前——补结算随后进来，定格判据（_turnoverWrittenDay）
+    // 才不会拿已清零的新数据覆盖旧的一天（见 rollTurnoverDay）
+    this.rollTurnoverDay(dayState);
     // 结算兜底：tick 跨过收盘竞价时（休眠唤醒、长 GC）onPhaseChange 看到的 prev
     // 不是 closeAuction，会漏结；这里每帧用「已收盘日」判据补一次
     this.ensureDaySettled(now);
@@ -732,6 +755,10 @@ class Game {
     // markets 含 10 只股票 + 指数，接口同构所以一起写
     this.persist?.commit({ now, markets: [...this.markets.values()], allAccounts });
 
+    // 当日成交统计快照进 meta（每 15 tick 查一次、有新成交才写）：
+    // 重启后当日累计从这恢复，不用等到收盘定格才有数
+    if (this.tickCount % 15 === 0) this.saveTurnoverLive();
+
     if (this.tickCount % HEAP_LOG_EVERY_TICKS === 0) {
       const hs = v8.getHeapStatistics();
       const mu = process.memoryUsage();
@@ -865,6 +892,11 @@ class Game {
       this.evaluateMilestones(now, completedDay);
       this._daySettled = completedDay;
     }
+    // 成交统计定格：一天一行（收盘与夜间两次 settleDay / 补结算都会走到这里，
+    // 用 _turnoverWrittenDay 去重，同一天不会重复定格也不会被清零值覆盖）
+    if (completedDay >= 1 && completedDay === this._turnoverDay && this._turnoverWrittenDay < completedDay) {
+      this.writeTurnoverDay(completedDay);
+    }
     if (opts.meta) this.persist?.setMeta('day_settled', String(this._daySettled));
     logger.info(
       `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：当日已定格成一根日线，` +
@@ -911,6 +943,165 @@ class Game {
   /** 语义同 ensureDaySettled（续跑入口保留旧名） */
   catchUpDay(now = Date.now()) {
     this.ensureDaySettled(now);
+  }
+
+  // ---------- 每日成交统计（/stats.html 成交统计页，表见 db.js daily_turnover） ----------
+
+  /** 玩家侧成交上报（Market.execute 经 onTurnover 钩子调，NPC 与 SYSTEM 不会进来） */
+  onTurnoverFill(acc, amount, isBuy) {
+    if (!acc || acc.isNPC || acc.name === 'SYSTEM') return;
+    const row = this.turnoverAccts.get(acc.name) || { amt: 0, buyAmt: 0, sellAmt: 0, fills: 0 };
+    row.amt += amount;
+    row.fills += 1;
+    if (isBuy) row.buyAmt += amount;
+    else row.sellAmt += amount;
+    this.turnoverAccts.set(acc.name, row);
+  }
+
+  /** 全市场聚合（各股 Market.dayPlayerAmt 等 → 一份当日实时值；指数没有统计字段，跳过） */
+  turnoverAgg() {
+    const agg = { day: this._turnoverDay || 0, playerAmt: 0, npcAmt: 0, playerFills: 0, npcFills: 0 };
+    for (const m of this.markets.values()) {
+      if (m.dayPlayerFills == null) continue; // 大盘指数：不可交易，不参与统计
+      agg.playerAmt += m.dayPlayerAmt;
+      agg.npcAmt += m.dayNpcAmt;
+      agg.playerFills += m.dayPlayerFills;
+      agg.npcFills += m.dayNpcFills;
+    }
+    agg.playerAmt = r2(agg.playerAmt);
+    agg.npcAmt = r2(agg.npcAmt);
+    return agg;
+  }
+
+  /**
+   * 定格一个交易日的成交统计进 daily_turnover / daily_player_turnover。
+   * 收盘结算（Game.settleDay）与跨日翻页（rollTurnoverDay，兜崩溃漏结）都会调；
+   * `_turnoverWrittenDay` 去重——收盘与夜间两次 settleDay、补结算重复进来也只写一次，
+   * 翻页补写的是同一份内存值，与收盘定格逐位一致。
+   */
+  writeTurnoverDay(day) {
+    if (!this.persist || !(day >= 1)) return;
+    const agg = this.turnoverAgg();
+    this.persist.recordDailyTurnover(day, agg, this.turnoverAccts);
+    if (this._turnoverWrittenDay < day) this._turnoverWrittenDay = day;
+    logger.info(
+      `[我是股神] 第 ${day} 个交易日成交统计已定格：玩家 ¥${Math.round(agg.playerAmt)}（${agg.playerFills} 笔）` +
+        ` / NPC ¥${Math.round(agg.npcAmt)}（${agg.npcFills} 笔），上榜玩家 ${this.turnoverAccts.size} 人`
+    );
+  }
+
+  /**
+   * 每日成交统计跨日翻页（tick 内、ensureDaySettled 之前调）：
+   * 进入新交易日时，旧的一天若还没定格过（崩溃跨收盘等漏结场景）先补写，
+   * 再把各股累计与玩家排行清零重新累计。顺序不能换——翻页清零先于补结算，
+   * 补结算里的定格判据才不会拿已清零的新数据覆盖旧的一天。
+   */
+  rollTurnoverDay(dayState) {
+    if (!dayState || this._turnoverDay === dayState.day) return;
+    if (this._turnoverDay >= 1 && this._turnoverWrittenDay < this._turnoverDay) {
+      this.writeTurnoverDay(this._turnoverDay);
+    }
+    this._turnoverDay = dayState.day;
+    for (const m of this.markets.values()) {
+      if (m.resetDayTurnover) m.resetDayTurnover(); // 指数没有统计字段
+    }
+    this.turnoverAccts.clear();
+  }
+
+  /**
+   * 当日实时值快照进 meta（每 15 tick 查一次、有新成交才写）：
+   * 重启后当日累计从这恢复，不用等到收盘才有数。各股拆分 + 玩家排行合并值，
+   * JSON 只有几十行，meta 单行覆盖的写法扛得住。
+   */
+  saveTurnoverLive() {
+    if (!this.persist || !this._turnoverDay) return;
+    const agg = this.turnoverAgg();
+    const fills = agg.playerFills + agg.npcFills;
+    if (fills === this._turnoverSavedFills) return; // 没有新成交就不写
+    this._turnoverSavedFills = fills;
+    const stocks = {};
+    for (const m of this.markets.values()) {
+      if (m.dayPlayerFills == null) continue; // 指数没有统计字段
+      if (m.dayPlayerAmt || m.dayNpcAmt || m.dayPlayerFills || m.dayNpcFills) {
+        stocks[m.stockId] = [m.dayPlayerAmt, m.dayNpcAmt, m.dayPlayerFills, m.dayNpcFills];
+      }
+    }
+    const accts = {};
+    for (const [name, r] of this.turnoverAccts) {
+      accts[name] = [r2(r.amt), r2(r.buyAmt), r2(r.sellAmt), r.fills];
+    }
+    this.persist.setMeta('turnover_live', JSON.stringify({ day: this._turnoverDay, stocks, accts }));
+  }
+
+  /** 续跑恢复：把 meta 里的当日成交统计快照装回内存（applySnapshot 末尾调） */
+  restoreTurnoverLive() {
+    if (!this.persist) return;
+    const raw = this.persist.getMeta('turnover_live');
+    if (!raw) return;
+    let snap = null;
+    try {
+      snap = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!snap || !Number.isFinite(snap.day) || snap.day < 1) return;
+    this._turnoverDay = snap.day;
+    for (const [sid, arr] of Object.entries(snap.stocks || {})) {
+      const m = this.markets.get(sid);
+      if (!m || !Array.isArray(arr)) continue;
+      m.dayPlayerAmt = Number(arr[0]) || 0;
+      m.dayNpcAmt = Number(arr[1]) || 0;
+      m.dayPlayerFills = Number(arr[2]) || 0;
+      m.dayNpcFills = Number(arr[3]) || 0;
+    }
+    for (const [name, arr] of Object.entries(snap.accts || {})) {
+      if (!Array.isArray(arr)) continue;
+      this.turnoverAccts.set(name, {
+        amt: Number(arr[0]) || 0,
+        buyAmt: Number(arr[1]) || 0,
+        sellAmt: Number(arr[2]) || 0,
+        fills: Number(arr[3]) || 0,
+      });
+    }
+  }
+
+  /**
+   * 成交统计页数据（GET /api/stats/turnover）：
+   * today = 当日实时聚合；days = 最近若干个交易日的收盘定格；
+   * ranking = 玩家成交排行（默认当日实时，传 `day` 查历史日，取 daily_player_turnover）。
+   */
+  turnoverStats(reqDay) {
+    const today = this.turnoverAgg();
+    const days = this.persist ? this.persist.loadDailyTurnover(60) : [];
+    const wantDay = reqDay == null || reqDay === '' ? today.day : Number(reqDay);
+    let ranking;
+    if (!Number.isFinite(wantDay) || wantDay === today.day || !this.persist) {
+      ranking = [...this.turnoverAccts.entries()].map(([name, r]) => ({
+        name,
+        nick: this.nickOf(name),
+        amt: r2(r.amt),
+        buyAmt: r2(r.buyAmt),
+        sellAmt: r2(r.sellAmt),
+        fills: r.fills,
+      }));
+    } else {
+      ranking = this.persist.loadDailyPlayers(wantDay).map((r) => ({
+        name: r.account,
+        nick: this.nickOf(r.account),
+        amt: r.amt,
+        buyAmt: r.buy_amt,
+        sellAmt: r.sell_amt,
+        fills: r.fills,
+      }));
+    }
+    ranking.sort((a, b) => b.amt - a.amt);
+    return { ok: true, t: Date.now(), today, rankDay: wantDay, days, ranking: ranking.slice(0, 100) };
+  }
+
+  /** 排行展示名：昵称优先，没开户/已删号的账号兜底显示账号本身 */
+  nickOf(name) {
+    const acc = this.store.get(name);
+    return acc ? acc.nick || acc.name : name;
   }
 
   // ---------- 彩蛋（里程碑，见 Doc/彩蛋玩法方案.md） ----------

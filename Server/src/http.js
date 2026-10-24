@@ -45,6 +45,12 @@ const STATIC_FILES = {
   '/whales.html': { file: 'whales.html', type: 'text/html; charset=utf-8' },
   '/whales.js': { file: 'whales.js', type: 'application/javascript; charset=utf-8' },
   '/whales.css': { file: 'whales.css', type: 'text/css; charset=utf-8' },
+  // 独立页（stats/whales）共用的主题还原外链脚本：CSP script-src 'self' 不放内联
+  '/theme.js': { file: 'theme.js', type: 'application/javascript; charset=utf-8' },
+  // 成交统计页：每日玩家/NPC 成交额与玩家成交排行（公开只读，/api/stats/turnover 带限流）
+  '/stats.html': { file: 'stats.html', type: 'text/html; charset=utf-8' },
+  '/stats.js': { file: 'stats.js', type: 'application/javascript; charset=utf-8' },
+  '/stats.css': { file: 'stats.css', type: 'text/css; charset=utf-8' },
   // 开放平台：玩家自助签发 / 查看 / 撤销 API Key（/api/open/keys 需要会话令牌）
   '/portal.html': { file: 'portal.html', type: 'text/html; charset=utf-8' },
   '/portal.js': { file: 'portal.js', type: 'application/javascript; charset=utf-8' },
@@ -761,6 +767,15 @@ function createServer(game, options) {
         }
         const r = game.leaderboardPage(url.searchParams.get('offset'), url.searchParams.get('limit'));
         return json(res, 200, r);
+      }
+
+      // ---- 成交统计（公开只读）：每日玩家/NPC 成交额 + 玩家成交排行 ----
+      // 与席位榜/龙虎榜同口径的公开数据（昵称本就公开展示），只加一层限流
+      if (p === '/api/stats/turnover' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        return json(res, 200, game.turnoverStats(url.searchParams.get('day')));
       }
 
       if (p === '/api/order' && req.method === 'POST') {

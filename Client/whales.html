@@ -6,13 +6,9 @@
   <title>AI 主力观测台</title>
   <link rel="icon" href="data:,">
   <!-- 主题与交易端共用 localStorage：本页是独立文档（不引 app.js），自己还原一次
-       data-theme，否则在手机上选了浅色主题，进这页还是黑底 -->
-  <script>
-    try {
-      var theme = localStorage.getItem('gushen_theme');
-      if (theme) document.documentElement.dataset.theme = theme;
-    } catch (e) { /* 隐私模式等场景忽略 */ }
-  </script>
+       data-theme，否则在手机上选了浅色主题，进这页还是黑底。
+       必须外链（theme.js）：CSP 是 script-src 'self'，内联脚本会被静默拦截 -->
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/whales.css">
 </head>

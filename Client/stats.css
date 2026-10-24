@@ -1,0 +1,63 @@
+/* 成交统计页自己的增量样式：通用版式（页面骨架/卡片/表格/窄屏折叠）复用 whales.css */
+
+/* 排行日选择器：与头部按钮同款描边 */
+.day-select {
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--gold, #d4a017) 40%, transparent);
+  background: transparent;
+  color: var(--ink, #e8eef5);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  max-width: 46vw;
+}
+
+.day-select option {
+  background: var(--panel, #121a22);
+  color: var(--ink, #e8eef5);
+}
+
+/* 今日概览：四块数值一行铺开，窄屏折两行 */
+.ov-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+
+.ov-item {
+  border: 1px solid color-mix(in srgb, var(--line, #2a3540) 80%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--panel-2, #171d2b) 45%, transparent);
+}
+
+.ov-label {
+  font-size: 11.5px;
+  color: var(--muted, #8a96a3);
+}
+
+.ov-value {
+  margin-top: 4px;
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ov-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted, #8a96a3);
+}
+
+/* 排行前三名给个名次色 */
+table.whale-table .rank-1 { color: var(--gold, #d4a017); font-weight: 700; }
+table.whale-table .rank-2 { color: #c8cdd4; font-weight: 700; }
+table.whale-table .rank-3 { color: #cd8a53; font-weight: 700; }
+
+@media (max-width: 640px) {
+  .ov-grid { grid-template-columns: repeat(2, 1fr); }
+  .ov-value { font-size: 15px; }
+  .day-select { flex: 1 1 0; min-height: 36px; border-radius: 9px; }
+}

@@ -126,6 +126,34 @@ class Persister {
       delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
       setMeta: db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)'),
       getMeta: db.prepare('SELECT value FROM meta WHERE key = ?'),
+      delMeta: db.prepare('DELETE FROM meta WHERE key = ?'),
+      // 每日成交统计（/stats.html）：收盘结算定格一行 + 当日玩家排行整批重写
+      upsertDailyTurnover: db.prepare(`
+        INSERT INTO daily_turnover (day, player_amt, npc_amt, player_fills, npc_fills, settled_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(day) DO UPDATE SET
+          player_amt = excluded.player_amt, npc_amt = excluded.npc_amt,
+          player_fills = excluded.player_fills, npc_fills = excluded.npc_fills,
+          settled_at = excluded.settled_at
+      `),
+      delDailyPlayers: db.prepare('DELETE FROM daily_player_turnover WHERE day = ?'),
+      insDailyPlayer: db.prepare(`
+        INSERT INTO daily_player_turnover (day, account, amt, buy_amt, sell_amt, fills)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(day, account) DO UPDATE SET
+          amt = excluded.amt, buy_amt = excluded.buy_amt,
+          sell_amt = excluded.sell_amt, fills = excluded.fills
+      `),
+      loadDailyTurnover: db.prepare(`
+        SELECT day, player_amt, npc_amt, player_fills, npc_fills, settled_at
+          FROM daily_turnover ORDER BY day DESC LIMIT ?
+      `),
+      loadDailyPlayers: db.prepare(`
+        SELECT account, amt, buy_amt, sell_amt, fills
+          FROM daily_player_turnover WHERE day = ? ORDER BY amt DESC
+      `),
+      clearDailyTurnover: db.prepare('DELETE FROM daily_turnover'),
+      clearDailyPlayers: db.prepare('DELETE FROM daily_player_turnover'),
       insAuto: db.prepare(`
         INSERT INTO auto_strategies (id, account, stock_id, type, enabled, done, params, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -227,12 +255,60 @@ class Persister {
     this.st.setMeta.run(String(key), String(value));
   }
 
+  /** 删一条 meta（不存在时静默） */
+  delMeta(key) {
+    this.st.delMeta.run(String(key));
+  }
+
+  /**
+   * 定格一个交易日的成交统计（/stats.html，聚合来自 Game.writeTurnoverDay）。
+   * 当日玩家排行整批重写（先删后插）：收盘后这一天的数据不再变化，重写幂等，
+   * 崩溃补结算时重复写也只会得到同一份值。
+   * @param {number} day 交易日号
+   * @param {{playerAmt:number, npcAmt:number, playerFills:number, npcFills:number}} agg 全市场聚合
+   * @param {Map<string,{amt:number,buyAmt:number,sellAmt:number,fills:number}>} accts 玩家排行
+   */
+  recordDailyTurnover(day, agg, accts) {
+    const tx = this.db.transaction(() => {
+      this.st.upsertDailyTurnover.run(
+        day, agg.playerAmt, agg.npcAmt, agg.playerFills, agg.npcFills, Date.now()
+      );
+      this.st.delDailyPlayers.run(day);
+      for (const [name, r] of accts) {
+        this.st.insDailyPlayer.run(day, name, r.amt, r.buyAmt, r.sellAmt, r.fills);
+      }
+    });
+    tx();
+  }
+
+  /** 最近若干个交易日的成交统计（新→旧），供 /api/stats/turnover 的每日趋势 */
+  loadDailyTurnover(limit = 60) {
+    return this.st.loadDailyTurnover.all(limit).map((r) => ({
+      day: r.day,
+      playerAmt: r.player_amt,
+      npcAmt: r.npc_amt,
+      playerFills: r.player_fills,
+      npcFills: r.npc_fills,
+      settledAt: r.settled_at,
+    }));
+  }
+
+  /** 某个交易日的玩家成交排行（按成交金额降序） */
+  loadDailyPlayers(day) {
+    return this.st.loadDailyPlayers.all(day);
+  }
+
   /**
    * 新开一局：记下开局时间并清掉上一局的行情断点，行情由首个 tick 的 commit 写入。
    * 多股票下 prices/market_state 每只股票各一行，按 stock_id 区分，不需要按股票清表。
    */
   startRound(startedAt) {
     this.st.setMeta.run('round_started_at', String(startedAt));
+    // 新一局的交易日号从 1 重新数起，上一局的成交统计必须清掉，
+    // 否则新一局第 1 天的收盘定格会与旧局的第 1 天撞主键
+    this.st.clearDailyTurnover.run();
+    this.st.clearDailyPlayers.run();
+    this.st.delMeta.run('turnover_live');
   }
 
   /**

@@ -100,6 +100,17 @@ class Market {
     // 再放大该股散户 NPC 的跟风强度。没有东风客户交易时恒为 0，行为与引入券商之前一致
     this.dongfengTurnover = 0;
     this.dongfengHeat = 0;
+    // 每日成交统计（/stats.html 成交统计页）：本股当日「玩家侧 / NPC 侧」成交额与笔数。
+    // 口径与席位流水一致——买卖两侧分别计入各自账户的阵营，所以玩家 vs NPC 的成交
+    // 两边各记一次 amount，player_amt + npc_amt ≥ 全市场成交额。日终由 Game 定格进
+    // daily_turnover 表并在跨日翻页时清零（resetDayTurnover，见 game.js rollTurnoverDay）
+    this.dayPlayerAmt = 0;
+    this.dayNpcAmt = 0;
+    this.dayPlayerFills = 0;
+    this.dayNpcFills = 0;
+    // 玩家排行的单股明细不经本市场：Game 在构造时注入 onTurnover 钩子，跨股聚合到
+    // Game.turnoverAccts（一张 Map 出当日全市场玩家排行，重启恢复也只回填一份）
+    this.onTurnover = null;
     // 由 Game 注入的持久化器；未注入时纯内存运行（测试脚本就是这样）
     this.journal = null;
     // 跨股票取价：风控要按**整个账户**算权益，就得知道账户在其它股票上的持仓值多少。
@@ -562,6 +573,14 @@ class Market {
       }
     }
     return { prevClose: this.prevClose, canceled };
+  }
+
+  /** 每日成交统计跨日翻页清零（由 Game.rollTurnoverDay 调，见 game.js） */
+  resetDayTurnover() {
+    this.dayPlayerAmt = 0;
+    this.dayNpcAmt = 0;
+    this.dayPlayerFills = 0;
+    this.dayNpcFills = 0;
   }
 
   /**
@@ -1394,6 +1413,26 @@ class Market {
     // 否则热度会由 NPC 自己凭空烧起来，与"本券商客户把论坛吵热"的设定不符）
     for (const o of [buyOrder, sellOrder]) {
       if (!o.account.isNPC && o.account.broker === 'dongfeng') this.dongfengTurnover += amount;
+    }
+    // 每日成交统计（/stats.html）：与席位流水同口径，买卖两侧各记一次 amount。
+    // SYSTEM 兜底账户 isNPC=true，自动落进 NPC 侧（它本来就是「非玩家」对手盘）
+    if (buyOrder.account.isNPC) {
+      this.dayNpcAmt += amount;
+      this.dayNpcFills += 1;
+    } else {
+      this.dayPlayerAmt += amount;
+      this.dayPlayerFills += 1;
+    }
+    if (sellOrder.account.isNPC) {
+      this.dayNpcAmt += amount;
+      this.dayNpcFills += 1;
+    } else {
+      this.dayPlayerAmt += amount;
+      this.dayPlayerFills += 1;
+    }
+    if (this.onTurnover) {
+      if (!buyOrder.account.isNPC) this.onTurnover(buyOrder.account, amount, true);
+      if (!sellOrder.account.isNPC) this.onTurnover(sellOrder.account, amount, false);
     }
 
     this.onTrade(price, qty, aggressorSide, now, buyBroker, sellBroker);

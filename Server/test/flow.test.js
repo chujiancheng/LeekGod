@@ -235,8 +235,8 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
 
 console.log('\n[7] 存档版本：v8 及更早一律拒启（9 的迁移缺席），v9 老档原地升到当前版本');
 {
-  // 跟着 SCHEMA_VERSION 走，别再写死数字：11 = 头像（accounts.avatar / broker_seen）
-  assert(SCHEMA_VERSION === 11, `存档表结构版本为 11（实际 ${SCHEMA_VERSION}）`);
+  // 跟着 SCHEMA_VERSION 走，别再写死数字：12 = 每日成交统计两张新表（/stats.html）
+  assert(SCHEMA_VERSION === 12, `存档表结构版本为 12（实际 ${SCHEMA_VERSION}）`);
   const FILE = path.join(os.tmpdir(), `gushen-flow-old-${process.pid}.db`);
   for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
   const db = new Database(FILE);
@@ -276,7 +276,7 @@ console.log('\n[7] 存档版本：v8 及更早一律拒启（9 的迁移缺席�
   assert(v9cols.includes('closed_day'), '版本 9 → 10 补出了 market_state.closed_day 列');
   const ver = db10.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
   // 这一条跟着 SCHEMA_VERSION 走：9 会逐级迁到当前版本（10 起是 closed_day，11 起是头像两列）
-  assert(Number(ver.value) === 11, `升级后版本号写成当前版本 11（实际 ${ver.value}）`);
+  assert(Number(ver.value) === 12, `升级后版本号写成当前版本 12（实际 ${ver.value}）`);
   const v9acc = db10.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
   assert(
     v9acc.includes('avatar') && v9acc.includes('broker_seen'),
