@@ -157,6 +157,27 @@ class Persister {
       `),
       clearDailyTurnover: db.prepare('DELETE FROM daily_turnover'),
       clearDailyPlayers: db.prepare('DELETE FROM daily_player_turnover'),
+      // 每日收盘资产快照（主页「资产轨迹」卡）：一天一批整写（先删后插，幂等）
+      upsertDailyAsset: db.prepare(`
+        INSERT INTO daily_assets (day, account, cash, order_frozen, long_value, short_margin,
+                                  short_mv, debt, lend_debt, equity, settled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(day, account) DO UPDATE SET
+          cash = excluded.cash, order_frozen = excluded.order_frozen,
+          long_value = excluded.long_value, short_margin = excluded.short_margin,
+          short_mv = excluded.short_mv, debt = excluded.debt,
+          lend_debt = excluded.lend_debt, equity = excluded.equity,
+          settled_at = excluded.settled_at
+      `),
+      delDailyAssets: db.prepare('DELETE FROM daily_assets WHERE day = ?'),
+      loadAssetHistory: db.prepare(`
+        SELECT day, cash, order_frozen, long_value, short_margin, short_mv, debt, lend_debt,
+               equity, settled_at
+          FROM daily_assets WHERE account = ? ORDER BY day DESC LIMIT ?
+      `),
+      clearDailyAssets: db.prepare('DELETE FROM daily_assets'),
+      // 已定格到第几个交易日（续跑时把内存水位线对齐到它，见 Game.applySnapshot）
+      maxDailyAssetDay: db.prepare('SELECT MAX(day) AS d FROM daily_assets'),
       insAuto: db.prepare(`
         INSERT INTO auto_strategies (id, account, stock_id, type, enabled, done, params, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -315,6 +336,53 @@ class Persister {
   }
 
   /**
+   * 定格一个交易日的全部玩家资产快照（Game.writeAssetDay 调，一天一批）。
+   * 与成交排行同款整批重写：先删后插，收盘后这一天的数据不再变化，
+   * 补结算重复写也只会得到同一份值。rows 见 game.writeAssetDay。
+   */
+  recordDailyAssets(day, rows) {
+    const st = this.st;
+    const tx = this.db.transaction(() => {
+      st.delDailyAssets.run(day);
+      for (const r of rows) {
+        st.upsertDailyAsset.run(
+          day, r.account, r.cash, r.orderFrozen, r.longValue, r.shortMargin,
+          r.shortMv, r.debt, r.lendDebt, r.equity, Date.now()
+        );
+      }
+    });
+    tx();
+  }
+
+  /** 某玩家的收盘资产轨迹（新→旧，limit 上限由调用方夹），前端画折线用 */
+  loadAssetHistory(account, limit = 60) {
+    return this.st.loadAssetHistory.all(account, limit).map((r) => ({
+      day: r.day,
+      cash: r.cash,
+      orderFrozen: r.order_frozen,
+      longValue: r.long_value,
+      shortMargin: r.short_margin,
+      shortMv: r.short_mv,
+      debt: r.debt,
+      lendDebt: r.lend_debt,
+      equity: r.equity,
+      settledAt: r.settled_at,
+    }));
+  }
+
+  /**
+   * 已定格到第几个交易日（0 = 还没定格过任何一天）。
+   * 续跑时用它对齐 `Game._assetsWrittenDay`：这个水位线**不能**像 `_turnoverWrittenDay`
+   * 那样靠 meta 存——库里的行本身就是答案，而且它必须挺过夜间重启（退回 -1 会让
+   * 「跨日翻页补写」把已定格的收盘值覆盖成次日盘初的值）。
+   */
+  maxAssetDay() {
+    const row = this.st.maxDailyAssetDay.get();
+    const d = row && row.d;
+    return Number.isFinite(d) && d > 0 ? d : 0;
+  }
+
+  /**
    * 新开一局：记下开局时间并清掉上一局的行情断点，行情由首个 tick 的 commit 写入。
    * 多股票下 prices/market_state 每只股票各一行，按 stock_id 区分，不需要按股票清表。
    */
@@ -324,6 +392,8 @@ class Persister {
     // 否则新一局第 1 天的收盘定格会与旧局的第 1 天撞主键
     this.st.clearDailyTurnover.run();
     this.st.clearDailyPlayers.run();
+    // 资产轨迹同理：交易日号从 1 重新数起，上一局的收盘快照不清会撞 (day, account) 主键
+    this.st.clearDailyAssets.run();
     this.st.delMeta.run('turnover_live');
   }
 

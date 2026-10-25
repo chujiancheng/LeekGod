@@ -50,6 +50,9 @@
   // 玩家持仓弹窗（排行 → 「持仓」）：按需拉，不进每帧 state
   let rankPosAccount = ''; // 当前弹窗看的是哪个账号
   let rankPosData = null;
+  // 资产轨迹（主页卡）：每日收盘资产快照 + 当日盘中点（/api/account/assets）。
+  // 按需拉 + 60 秒节流——收盘一天才定格一次，没必要跟着 SSE 每帧刷新
+  let assetTrail = { rows: [], live: null, fetchedAt: 0, renderKey: '' };
   // 股东榜改为按需拉取（10 只股票全推会把每帧撑爆）：进 tab / 切股票时拉，前台 5 秒刷新
   let holdersData = null; // /api/holders 的最近一次响应
   let holdersStockId = '';
@@ -336,6 +339,8 @@
     if (next !== me) {
       resetEggStream();
       resetDanmakuStream(); // 弹幕水位同理：换号不换水位，新号的弹幕会被旧 id 挡住
+      // 资产轨迹跟着账号走：换号后必须强制重拉，否则会画出上一个号的曲线
+      assetTrail = { rows: [], live: null, fetchedAt: 0, renderKey: '' };
     }
     me = next;
     myNick = nick || next;
@@ -4999,6 +5004,146 @@
     });
   }
 
+  // ---------- 资产轨迹（主页卡，服务端每交易日收盘定格一行 daily_assets） ----------
+
+  // 正常刷新间隔：收盘一天才定格一次，没必要跟着 SSE 每帧拉
+  const ASSET_TRAIL_TTL = 60000;
+  // 失败后的重试间隔。**不能**像别的接口那样直接归零：renderHome 每帧（1Hz）都会进来，
+  // 归零等于断网时每帧发一次请求，自己打自己
+  const ASSET_TRAIL_RETRY = 20000;
+
+  /**
+   * 拉 /api/account/assets（只回本人）。换号时 `setIdentity` 会把 `fetchedAt` 归零，
+   * 所以换号后下一帧就会重拉。
+   */
+  async function loadAssetTrail() {
+    if (!token) return;
+    const now = Date.now();
+    if (now - assetTrail.fetchedAt < ASSET_TRAIL_TTL) return;
+    assetTrail.fetchedAt = now;
+    try {
+      const r = await (await apiGet('/api/account/assets?limit=60')).json();
+      if (r && r.ok) {
+        assetTrail.rows = Array.isArray(r.rows) ? r.rows : [];
+        assetTrail.live = r.live || null;
+        assetTrail.renderKey = ''; // 数据变了，允许下一帧重画
+        renderAssetTrail();
+      }
+      // !r.ok（未登录 / 会话过期）保持 60 秒间隔：那是有定论的失败，快重试没有意义
+    } catch {
+      // 网络抖动：20 秒后再试，别把 60 秒节流卡死在失败态
+      assetTrail.fetchedAt = Date.now() - (ASSET_TRAIL_TTL - ASSET_TRAIL_RETRY);
+    }
+  }
+
+  /**
+   * 「资产轨迹」卡：收盘权益折线 + 当日盘中点。renderHome 每帧都会进来，
+   * 靠 renderKey 去重——数据没变就不碰 DOM（每帧重写 innerHTML 会让这张卡一直重排）。
+   * 三个状态各有各的 key：空态 / 单点态 / 折线态，切状态自然重画。
+   * 颜色沿区间涨跌取主题红/绿（红涨绿跌）；SVG 上色全走 presentation 属性，
+   * CSP 不拦属性只拦内联 style。
+   */
+  function renderAssetTrail() {
+    const box = $('assetTrail');
+    if (!box) return;
+    const sub = $('assetTrailSub');
+    // 服务端给的是新→旧，翻成旧→新；当日盘中点（live）排最后
+    const pts = [];
+    for (let i = assetTrail.rows.length - 1; i >= 0; i--) {
+      const r = assetTrail.rows[i];
+      if (r && Number.isFinite(r.equity)) pts.push({ day: r.day, equity: r.equity, live: false });
+    }
+    const livePt = assetTrail.live;
+    if (livePt && Number.isFinite(livePt.equity) && !pts.some((p) => p.day === livePt.day)) {
+      // 服务端已按「库里有没有这天的行」判过重，这里再挡一道：旧版服务端（或夜间重启
+      // 那类边界）会同时给同日收盘行与盘中点，画出来是同日两个点
+      pts.push({ day: livePt.day, equity: livePt.equity, live: true });
+    }
+    // 画布宽度按卡片**实际像素**取（`.asset-trail` 左右各有 12px padding，要扣掉）。
+    // 写死 560 再靠 preserveAspectRatio="none" 拉到满宽，会按比例把圆点压成椭圆、
+    // 线宽横竖不一致。面板隐藏时 clientWidth 为 0，用 560 兜底——显示后宽度变了，
+    // key 里带着 W 会自然重画
+    const measured = Math.round((box.clientWidth || 0) - 24);
+    const W = measured >= 200 ? measured : 560;
+
+    if (!pts.length) {
+      const key = 'empty|' + W;
+      if (key === assetTrail.renderKey) return;
+      assetTrail.renderKey = key;
+      box.innerHTML = '<div class="trail-empty">首个交易日收盘后开始记录</div>';
+      if (sub) sub.textContent = '';
+      return;
+    }
+
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const closed = pts.length - (last.live ? 1 : 0); // 收盘点数（盘中点不算）
+    const key = W + '|' + pts.map((p) => p.day + ':' + p.equity).join('|');
+    if (key === assetTrail.renderKey) return;
+    assetTrail.renderKey = key;
+
+    const chg = last.equity - first.equity;
+    const chgPct = first.equity !== 0 ? (chg / Math.abs(first.equity)) * 100 : 0;
+    const color = chg > 0 ? themeC.red : chg < 0 ? themeC.green : themeC.muted;
+
+    if (pts.length < 2) {
+      // 只有一格：先给数不给线。**刚开盘还没收盘时这一格是盘中点**，
+      // 不能一律写成「已记录 1 个收盘」——第 1 天早上就是这么显示的
+      box.innerHTML = first.live
+        ? '<div class="trail-empty">今日盘中权益 <b>¥' + fmtMoney(first.equity) + '</b>，首个收盘后开始画轨迹</div>'
+        : '<div class="trail-empty">已记录 1 个收盘 · 权益 <b>¥' + fmtMoney(first.equity) + '</b>，继续攒轨迹中</div>';
+      if (sub) {
+        sub.textContent = first.live
+          ? `第 ${first.day} 天 · 盘中`
+          : `第 ${first.day} 天收盘`;
+      }
+      return;
+    }
+
+    if (sub) {
+      // 「盘中」而不是「实时」：这个点是 60 秒节流拉回来的，最多滞后一分钟
+      sub.innerHTML =
+        `第 ${esc(first.day)} → 第 ${esc(last.day)} 天 · ${closed} 个收盘` +
+        (last.live ? ' · 盘中' : '') +
+        ` · 区间 <b class="${cls(chg)}">${chg > 0 ? '+' : ''}${chgPct.toFixed(2)}%</b>`;
+    }
+
+    const H = 128;
+    const PAD = 12;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of pts) {
+      if (p.equity < lo) lo = p.equity;
+      if (p.equity > hi) hi = p.equity;
+    }
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const x = (i) => (PAD + (i / (pts.length - 1)) * (W - PAD * 2)).toFixed(1);
+    const y = (v) => (PAD + ((hi - v) / (hi - lo)) * (H - PAD * 2)).toFixed(1);
+    const line = pts.map((p, i) => x(i) + ',' + y(p.equity)).join(' ');
+    const area = x(0) + ',' + (H - PAD) + ' ' + line + ' ' + x(pts.length - 1) + ',' + (H - PAD);
+    // 起点虚线基准：一眼看出「从起点到现在」的方向
+    const baseY = y(first.equity);
+    const dots = pts
+      .map((p, i) => {
+        const label = p.live ? '今日盘中' : `第 ${p.day} 天收盘`;
+        return (
+          `<circle cx="${x(i)}" cy="${y(p.equity)}" r="${p.live ? 3.5 : 2.5}"` +
+          ` fill="${p.live ? color : 'none'}" stroke="${color}" stroke-width="1.5">` +
+          `<title>${label} · ¥${fmtMoney(p.equity)}</title></circle>`
+        );
+      })
+      .join('');
+    box.innerHTML =
+      `<svg class="trail-svg" viewBox="0 0 ${W} ${H}">` +
+      `<polygon points="${area}" fill="${color}" fill-opacity="0.10"/>` +
+      `<line x1="${x(0)}" y1="${baseY}" x2="${x(pts.length - 1)}" y2="${baseY}"` +
+      ` stroke="${themeC.muted}" stroke-width="1" stroke-dasharray="3 4" stroke-opacity="0.5"/>` +
+      `<polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"` +
+      ` stroke-linejoin="round" stroke-linecap="round"/>` +
+      dots +
+      `</svg>`;
+  }
+
   function renderHome() {
     const a = state && state.account;
     if (!a) return;
@@ -5022,6 +5167,9 @@
     renderIndexCard();
     renderMyBroker();
     renderEggCard();
+    // 资产轨迹：先用缓存画（renderKey 去重），节流窗口过了才真正发请求
+    renderAssetTrail();
+    loadAssetTrail();
 
     // 市场概览：全部按市场维度统计，与任何单只股票解耦
     let up = 0;

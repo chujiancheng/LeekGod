@@ -778,6 +778,19 @@ function createServer(game, options) {
         return json(res, 200, game.turnoverStats(url.searchParams.get('day'), url.searchParams.get('page')));
       }
 
+      // ---- 资产轨迹：本账户的每日收盘资产快照 + 当日实时点（主页「资产轨迹」卡）----
+      // 只回自己的（token 鉴权）：持仓构成对别人是隐私，不做公开查询
+      if (p === '/api/account/assets' && req.method === 'GET') {
+        if (rl.enabled && !limiters.holders.allow(ip)) {
+          return json(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+        }
+        const r = game.assetHistoryFor(
+          bearerToken(req) || url.searchParams.get('token') || '',
+          url.searchParams.get('limit')
+        );
+        return json(res, r.ok ? 200 : 401, r);
+      }
+
       if (p === '/api/order' && req.method === 'POST') {
         if (!guardWrite(req, res, ip, limiters.order)) return;
         const body = await readBody(req);

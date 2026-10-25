@@ -270,6 +270,15 @@ src = src.replace(
     comicGoText: () => $('comicGoBtn').textContent,
     renderHolders, setHolders: (d) => { holdersData = d; holdersStockId = d.stockId; },
     renderHome,
+    // 资产轨迹（主页卡）：注入一份快照 → renderAssetTrail → 断言 SVG / 文案 / 去重
+    renderAssetTrail,
+    loadAssetTrail,
+    setAssetTrail: (rows, live) => {
+      assetTrail = { rows: rows || [], live: live || null, fetchedAt: 0, renderKey: '' };
+    },
+    assetTrailKey: () => assetTrail.renderKey,
+    assetTrailHtml: () => $('assetTrail').innerHTML,
+    assetTrailSub: () => $('assetTrailSub').innerHTML || $('assetTrailSub').textContent,
     // 排行 → 玩家持仓弹窗
     openPlayerPositions, closePlayerPositions, renderPlayerPositions,
     rankPosShown: () => !$('rankPosOverlay').classList.contains('hidden'),
@@ -3071,6 +3080,80 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     api.setState(emptyState);
     api.renderDepth();
     assert(api.el('asksBody').innerHTML.indexOf('当前无卖盘挂单') >= 0, '无卖盘时出说明行而不是 5 行 "--"');
+  }
+
+  // ---------- 资产轨迹（主页卡）：收盘折线 + 当日盘中点 ----------
+  {
+    const box = api.el('assetTrail');
+    const subEl = api.el('assetTrailSub');
+    const subText = () => subEl.innerHTML || subEl.textContent;
+    const dots = (html) => (html.match(/<circle /g) || []).length;
+
+    // 空态：还没收盘过
+    api.setAssetTrail([], null);
+    api.renderAssetTrail();
+    assert(box.innerHTML.indexOf('首个交易日收盘后开始记录') >= 0, '空态给说明而不是一块空卡');
+    assert(subText() === '', '空态副标题清空');
+
+    // 第 1 天早上只有一个盘中点：**不能**说成「已记录 1 个收盘」（那天还没收盘）
+    api.setAssetTrail([], { day: 1, equity: 1000000 });
+    api.renderAssetTrail();
+    assert(box.innerHTML.indexOf('今日盘中权益') >= 0, '只有盘中点时给「今日盘中权益」');
+    assert(box.innerHTML.indexOf('已记录 1 个收盘') < 0, '盘中点不冒充收盘点');
+    assert(box.innerHTML.indexOf('¥1,000,000.00') >= 0, '金额千分位两位小数');
+    assert(subText().indexOf('第 1 天 · 盘中') >= 0, `副标题写「第 1 天 · 盘中」（${subText()}）`);
+
+    // 只收盘一天：单点态（先给数不画线）
+    api.setAssetTrail([{ day: 1, equity: 1000000 }], null);
+    api.renderAssetTrail();
+    assert(box.innerHTML.indexOf('已记录 1 个收盘') >= 0, '只有收盘点时给「已记录 1 个收盘」');
+    assert(box.innerHTML.indexOf('<svg') < 0, '单点不画线');
+
+    // 三个收盘 + 当日盘中：折线 + 面积 + 空心收盘点 / 实心盘中点
+    const rows = [
+      { day: 3, equity: 1030000 },
+      { day: 2, equity: 1010000 },
+      { day: 1, equity: 1000000 },
+    ];
+    api.setAssetTrail(rows, { day: 4, equity: 1040000, live: true });
+    api.renderAssetTrail();
+    let html = box.innerHTML;
+    assert(html.indexOf('<polyline') >= 0 && html.indexOf('<polygon') >= 0, '多点画折线与面积');
+    assert(dots(html) === 4, `收盘 3 点 + 盘中 1 点共 4 个圆点（${dots(html)}）`);
+    assert(html.indexOf('stroke="#f0464b"') >= 0, '区间上涨用主题红（红涨绿跌）');
+    assert(html.indexOf('fill="#f0464b"') >= 0, '盘中点是实心的（收盘点空心）');
+    assert(html.indexOf('fill="none"') >= 0, '收盘点空心区分盘中点');
+    assert(subText().indexOf('3 个收盘') >= 0, `副标题数收盘点数，盘中不算（${subText()}）`);
+    assert(subText().indexOf('盘中') >= 0, '副标题标出还有当日盘中点');
+    assert(/class="up">\+4\.00%/.test(subText()), `区间涨幅按首尾算且带 up 类（${subText()}）`);
+    // 第 1 天（最左）在起点基准线上：从 100 万 → 104 万，起点虚线一眼可辨
+    assert(html.indexOf('stroke-dasharray="3 4"') >= 0, '画了起点基准虚线');
+
+    // 同日去重：服务端（或旧版服务端）同时给了第 4 天收盘行与盘中点 → 只画一个点
+    api.setAssetTrail([{ day: 4, equity: 1040000 }, { day: 3, equity: 1030000 }], {
+      day: 4,
+      equity: 1045000,
+      live: true,
+    });
+    api.renderAssetTrail();
+    html = box.innerHTML;
+    assert(dots(html) === 2, `同日两个点只留一个（${dots(html)}）`);
+    assert(html.indexOf('今日盘中') < 0, '同日不再画盘中点');
+
+    // 下跌区间：绿（红涨绿跌）
+    api.setAssetTrail([{ day: 2, equity: 900000 }, { day: 1, equity: 1000000 }], null);
+    api.renderAssetTrail();
+    html = box.innerHTML;
+    assert(html.indexOf('stroke="#1fb978"') >= 0, '区间下跌用主题绿');
+    assert(/class="down">-10\.00%/.test(subText()), `跌幅带 down 类（${subText()}）`);
+
+    // 数据没变就不碰 DOM：renderHome 每帧都会调，反复重写 innerHTML 会让这张卡一直重排
+    box.innerHTML = 'SENTINEL';
+    api.renderAssetTrail();
+    assert(box.innerHTML === 'SENTINEL', 'renderKey 去重：数据没变不重建 SVG');
+    api.setAssetTrail([{ day: 2, equity: 950000 }, { day: 1, equity: 1000000 }], null);
+    api.renderAssetTrail();
+    assert(box.innerHTML.indexOf('<svg') >= 0, '数据变了重新出图');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

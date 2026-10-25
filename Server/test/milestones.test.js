@@ -446,7 +446,7 @@ console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池
 console.log('\n[14] 存档版本 4 在 v9 起被明确拒启（NPC 改真名那一版没有迁移路径，必须删库重开）');
 {
   // 跟着 SCHEMA_VERSION 走：12 = 每日成交统计两张新表（/stats.html）
-  assert(SCHEMA_VERSION === 12, `当前版本是 12（${SCHEMA_VERSION}）`);
+  assert(SCHEMA_VERSION === 13, `当前版本是 13（${SCHEMA_VERSION}）`);
   const FILE = tmpFile('v4');
   rmDb(FILE);
   const db = new Database(FILE);

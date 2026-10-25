@@ -10,6 +10,8 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { logger } = require('./logger');
 
+// 13：每日收盘资产快照（daily_assets 新表，只加表；主页「资产轨迹」卡用，
+//     写入见 persist.recordDailyAssets / game.writeAssetDay）
 // 12：每日成交统计（daily_turnover / daily_player_turnover 两张新表，只加表；
 //     /stats.html 成交统计页用，写入见 persist.recordDailyTurnover / game.js）
 // 11：头像（accounts 加 avatar / broker_seen 两列，见 Doc/头像方案.md）
@@ -25,7 +27,7 @@ const { logger } = require('./logger');
 // 4：券商（accounts 加券商/转户/星级进度列，trades 加席位列）
 // 3：日线（daily_bars 表）+ 资金流向（market_state 的内外盘列）
 // 2：多股票（prices 主键加 stock_id、融券改按股票记账、自动策略绑定股票）
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -197,6 +199,33 @@ CREATE TABLE IF NOT EXISTS daily_player_turnover (
   fills   INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, account)
 );
+
+-- 每日收盘资产快照（主页「资产轨迹」卡）：每个交易日收盘结算时给**每个玩家**定格一行。
+-- 只记玩家（store.players()），NPC 那 3160 个账户不进来——轨迹是给人看的，全量落会
+-- 把表撑成每天几千行。权益口径与 evaluateMilestones / account.equity 同一处（equityOf），
+-- 前端不许自己重算。当日未收盘的实时点由 /api/account/assets 现算下发（live 标记），
+-- 不落这张表。
+-- **构成项必须能拼回 equity**（= cash + order_frozen + long_value + short_margin
+--   − short_mv − debt − lend_debt，与 stores.Account.equity 同一公式）：
+--   order_frozen 平时是 0（夜间结算前挂单已作废退回），但崩溃补结算在次日清晨跑、
+--   那时委托还挂着，缺它就不能把「冻结中」算进去；空头玩家的 short_mv 与融券欠息
+--   lend_debt 只少不少——只存 short_margin 会让构成项凭空多出一块。
+CREATE TABLE IF NOT EXISTS daily_assets (
+  day          INTEGER NOT NULL,
+  account      TEXT NOT NULL,
+  cash         REAL NOT NULL DEFAULT 0,
+  order_frozen REAL NOT NULL DEFAULT 0,
+  long_value   REAL NOT NULL DEFAULT 0,
+  short_margin REAL NOT NULL DEFAULT 0,
+  short_mv     REAL NOT NULL DEFAULT 0,
+  debt         REAL NOT NULL DEFAULT 0,
+  lend_debt    REAL NOT NULL DEFAULT 0,
+  equity       REAL NOT NULL DEFAULT 0,
+  settled_at   INTEGER NOT NULL,
+  PRIMARY KEY (day, account)
+);
+-- 轨迹查询按账户取一列时间序列，加 (account, day) 索引免得全表扫
+CREATE INDEX IF NOT EXISTS idx_daily_assets_account ON daily_assets(account, day);
 
 -- 行情断点：重启后接着上一局走，而不是从开盘价重新开始
 CREATE TABLE IF NOT EXISTS market_state (
@@ -420,10 +449,35 @@ CREATE TABLE IF NOT EXISTS daily_player_turnover (
 );
 `;
 
+/**
+ * 版本 12 → 13 的**原地升级**：每日收盘资产快照一张新表（主页「资产轨迹」卡）。
+ *
+ * 与 v12（成交统计）同款——只加表、不改既有列，老档在 `db.exec(DDL)` 时就已经
+ * 把新表建出来了，这里保留一份是给「跳版本建出来的合成档」挡一道，也把这次结构
+ * 变化记进版本号。历史轨迹从升级后的首次收盘开始记，升级当天没有昨天的点。
+ */
+const MIGRATION_13 = `
+CREATE TABLE IF NOT EXISTS daily_assets (
+  day          INTEGER NOT NULL,
+  account      TEXT NOT NULL,
+  cash         REAL NOT NULL DEFAULT 0,
+  order_frozen REAL NOT NULL DEFAULT 0,
+  long_value   REAL NOT NULL DEFAULT 0,
+  short_margin REAL NOT NULL DEFAULT 0,
+  short_mv     REAL NOT NULL DEFAULT 0,
+  debt         REAL NOT NULL DEFAULT 0,
+  lend_debt    REAL NOT NULL DEFAULT 0,
+  equity       REAL NOT NULL DEFAULT 0,
+  settled_at   INTEGER NOT NULL,
+  PRIMARY KEY (day, account)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_assets_account ON daily_assets(account, day);
+`;
+
 // 版本 n → n+1 的原地升级语句。没有对应语句说明那次改动 ALTER 补不出来（换过主键 /
 // 加过非空列），只能删档开新局——见 openDatabase 里的拒绝启动分支。
 // **9 故意缺席**：NPC 改真名 + 允许跨股，老档的账户名既是主键又是流水引用，迁不动
-const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10, 11: MIGRATION_11, 12: MIGRATION_12 };
+const MIGRATIONS = { 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 10: MIGRATION_10, 11: MIGRATION_11, 12: MIGRATION_12, 13: MIGRATION_13 };
 
 // 能原地升级到当前版本的最老版本；更老的档直接拒启（prices 换过主键、融券搬过表）
 const MIN_MIGRATABLE = 3;

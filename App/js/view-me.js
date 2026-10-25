@@ -8,6 +8,14 @@
 
   let built = false;
 
+  // 资产轨迹（/api/account/assets，只回本人）：服务端每交易日收盘定格一行 daily_assets。
+  // 60 秒节流——收盘一天才定格一次，没必要跟着 SSE 每帧拉；失败 20 秒后重试
+  // （归零会变成每帧一次请求，断网时自己打自己）
+  const TRAIL_TTL = 60000;
+  const TRAIL_RETRY = 20000;
+  let trail = { acct: '', rows: [], live: null, fetchedAt: 0, key: '' };
+  const trailFresh = (acct) => ({ acct: acct, rows: [], live: null, fetchedAt: 0, key: '' });
+
   function build(root) {
     root.innerHTML =
       '<div class="me-hero" id="meHero">' +
@@ -23,6 +31,12 @@
           '<div class="realm-bar-top"><span id="realmNow">—</span><span id="realmNext">—</span></div>' +
           '<div class="bar"><i id="realmBar"></i></div>' +
         '</div>' +
+      '</div>' +
+      // 资产轨迹：收盘权益折线 + 当日盘中点（数据来自 daily_assets，服务端只回本人）
+      '<div class="card" id="meTrailCard">' +
+        '<div class="card-head"><span class="card-title">资产轨迹</span>' +
+          '<span class="card-more" id="meTrailSub"></span></div>' +
+        '<div class="trail-box" id="meTrail"><div class="trail-empty">首个交易日收盘后开始记录</div></div>' +
       '</div>' +
       '<div id="meBroker"></div>' +
       '<div class="menu" id="meMenu"></div>' +
@@ -95,8 +109,130 @@
       bar.style.width = pct + '%';
     }
 
+    renderTrail();
+    loadTrail();
     renderBroker(a);
     renderMenu(st, a);
+  }
+
+  /* ------------------------------------------------------------ 资产轨迹 */
+
+  /** 主题色读计算样式：SVG 只能吃具体色值，var() 在 presentation 属性里不生效 */
+  function cssColor(name, fallback) {
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      return String(v || '').trim() || fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  /**
+   * 「资产轨迹」卡：收盘权益折线 + 当日盘中点。update 每帧都会进来，
+   * 靠 key（各点 day:equity + 画布宽度）去重——数据没变就不碰 DOM。
+   * 上色全走 SVG presentation 属性（CSP 不开内联 style），颜色随区间涨跌（红涨绿跌）。
+   */
+  function renderTrail() {
+    const box = $('meTrail');
+    if (!box) return;
+    const sub = $('meTrailSub');
+    // 服务端给的是新→旧，翻成旧→新；当日盘中点排最后
+    const pts = [];
+    for (let i = trail.rows.length - 1; i >= 0; i--) {
+      const r = trail.rows[i];
+      if (r && Number.isFinite(r.equity)) pts.push({ day: r.day, equity: r.equity, live: false });
+    }
+    // 服务端已按「库里有没有这天的行」判过重，这里再挡一道：同一天两个点画出来是错的
+    if (trail.live && Number.isFinite(trail.live.equity) && !pts.some((p) => p.day === trail.live.day)) {
+      pts.push({ day: trail.live.day, equity: trail.live.equity, live: true });
+    }
+    // 宽度按卡片实际像素进 viewBox（横向拉伸会把圆点压成椭圆）；面板隐藏时给个兜底宽度
+    const W = Math.round(box.clientWidth || 0) || 320;
+
+    if (!pts.length) {
+      if (trail.key === 'empty|' + W) return;
+      trail.key = 'empty|' + W;
+      box.innerHTML = '<div class="trail-empty">首个交易日收盘后开始记录</div>';
+      if (sub) sub.textContent = '';
+      return;
+    }
+
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const key = W + '|' + pts.map((p) => p.day + ':' + p.equity).join('|');
+    if (key === trail.key) return;
+    trail.key = key;
+
+    const chg = last.equity - first.equity;
+    const chgPct = first.equity !== 0 ? (chg / Math.abs(first.equity)) * 100 : 0;
+    const tint = chg > 0
+      ? cssColor('--up', '#e8413c')
+      : chg < 0
+        ? cssColor('--down', '#0aa06e')
+        : cssColor('--txt-3', '#99a2ad');
+    const tone = chg > 0 ? 'up' : chg < 0 ? 'down' : '';
+
+    if (sub) {
+      // 「盘中」不写「实时」：这个点是 60 秒节流拉回来的
+      sub.innerHTML = pts.length > 1
+        ? '第 ' + esc(first.day) + '→' + esc(last.day) + ' 天' + (last.live ? ' · 盘中' : '') +
+          ' · <b class="' + tone + '">' + (chg > 0 ? '+' : '') + chgPct.toFixed(2) + '%</b>'
+        : '第 ' + esc(first.day) + ' 天' + (first.live ? ' · 盘中' : ' 收盘');
+    }
+
+    if (pts.length < 2) {
+      // 只有一格：先给数不给线。刚开盘（还没收盘）时这一格是盘中点，别写成「已记录 1 个收盘」
+      box.innerHTML = '<div class="trail-empty">' + (first.live ? '今日盘中权益 ' : '已记录 1 个收盘 · 权益 ') +
+        '<b>¥' + fmtMoney(first.equity) + '</b></div>';
+      return;
+    }
+
+    const H = 56;
+    const PAD = 6;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of pts) {
+      if (p.equity < lo) lo = p.equity;
+      if (p.equity > hi) hi = p.equity;
+    }
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const x = (i) => (PAD + (i / (pts.length - 1)) * (W - PAD * 2)).toFixed(1);
+    const y = (v) => (PAD + ((hi - v) / (hi - lo)) * (H - PAD * 2)).toFixed(1);
+    const line = pts.map((p, i) => x(i) + ',' + y(p.equity)).join(' ');
+    const area = x(0) + ',' + (H - PAD) + ' ' + line + ' ' + x(pts.length - 1) + ',' + (H - PAD);
+    const baseY = y(first.equity);
+    const dots = pts.map((p, i) =>
+      '<circle cx="' + x(i) + '" cy="' + y(p.equity) + '" r="' + (p.live ? 2.6 : 1.8) + '"' +
+      ' fill="' + (p.live ? tint : 'none') + '" stroke="' + tint + '" stroke-width="1.3"></circle>'
+    ).join('');
+    box.innerHTML =
+      '<svg class="trail-svg" viewBox="0 0 ' + W + ' ' + H + '">' +
+      '<polygon points="' + area + '" fill="' + tint + '" fill-opacity="0.10"></polygon>' +
+      '<line x1="' + x(0) + '" y1="' + baseY + '" x2="' + x(pts.length - 1) + '" y2="' + baseY +
+      '" stroke="' + tint + '" stroke-width="0.8" stroke-dasharray="3 4" stroke-opacity="0.35"></line>' +
+      '<polyline points="' + line + '" fill="none" stroke="' + tint + '" stroke-width="1.4"' +
+      ' stroke-linejoin="round" stroke-linecap="round"></polyline>' + dots + '</svg>';
+  }
+
+  function loadTrail() {
+    const acct = GS.core.S.account || '';
+    if (!GS.core.S.token) return;
+    // 换号后必须先清掉上一个号的轨迹，否则会画出别人的曲线
+    if (trail.acct !== acct) trail = trailFresh(acct);
+    const now = Date.now();
+    if (now - trail.fetchedAt < TRAIL_TTL) return;
+    trail.fetchedAt = now;
+    GS.api.getJSON('/api/account/assets?limit=60')
+      .then((r) => {
+        if (!r || !r.ok) return;
+        trail.rows = Array.isArray(r.rows) ? r.rows : [];
+        trail.live = r.live || null;
+        trail.key = '';
+        renderTrail();
+      })
+      .catch(() => {
+        trail.fetchedAt = Date.now() - (TRAIL_TTL - TRAIL_RETRY);
+      });
   }
 
   /* ------------------------------------------------------------ 券商 */
@@ -739,5 +875,15 @@
     GS.app.showLogin('');
   }
 
-  GS.viewMe = { id: 'me', title: '我的', update, openDeposit, openAvatar, reset() { built = false; } };
+  GS.viewMe = {
+    id: 'me',
+    title: '我的',
+    update,
+    openDeposit,
+    openAvatar,
+    reset() {
+      built = false;
+      trail = trailFresh('');
+    },
+  };
 })(window.GS);

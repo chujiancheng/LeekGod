@@ -282,6 +282,12 @@
           </div>
         </section>
 
+        <!-- 资产轨迹：每个交易日收盘定格的总权益折线 + 当日盘中点（/api/account/assets，只回本人） -->
+        <section class="panel home-card span-3" id="assetTrailCard">
+          <div class="panel-title"><span>资产轨迹</span><span class="panel-sub" id="assetTrailSub"></span></div>
+          <div class="asset-trail" id="assetTrail"><div class="trail-empty">首个交易日收盘后开始记录</div></div>
+        </section>
+
         <section class="panel home-card span-3">
           <div class="panel-title"><span>最新消息</span><span class="panel-sub" id="homeNewsSub"></span></div>
           <ul class="news-list home-news wide" id="homeNews"><li class="empty">暂无消息</li></ul>

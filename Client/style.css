@@ -1337,6 +1337,26 @@ input { font: inherit; color: inherit; }
 .home-card { min-height: 176px; }
 .home-card.span-2 { grid-column: span 2; }
 .home-card.span-3 { grid-column: span 3; }
+
+/* 资产轨迹（主页）：收盘权益折线 + 当日盘中点。SVG 走 presentation 属性上色
+   （stroke/fill 是属性不是 style，CSP 不拦），折线颜色随区间涨跌取主题红/绿 */
+.asset-trail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 12px 10px;
+}
+.trail-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.trail-svg { width: 100%; height: 128px; display: block; }
 .card-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .home-card .grid-table th { top: 0; }
 .home-card .grid-table td { padding: 6px 12px; }

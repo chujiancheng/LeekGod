@@ -74,6 +74,10 @@ class Game {
     this.turnoverAccts = new Map(); // 账号 -> {amt, buyAmt, sellAmt, fills}
     this._turnoverDay = 0; // 当前累计属于第几个交易日（0 = 时钟未启用 / 未开局）
     this._turnoverWrittenDay = -1; // 已定格进 daily_turnover 的最大交易日号
+    // 每日收盘资产快照（主页「资产轨迹」卡）：已定格进 daily_assets 的最大交易日号。
+    // 与 _turnoverWrittenDay 同一套去重思路——收盘与夜间两次 settleDay、补结算都会
+    // 走到定格判据，靠它保证同一天只写一次
+    this._assetsWrittenDay = -1;
     // 每只股票一套完全独立的市场与做市引擎：各自盘口、融券池、做市资金、趋势与情绪。
     // 玩家账户跨这些市场共享现金、持仓按股票分账（Account.longs/shorts 就是 Map<stockId>）。
     this.markets = new Map();
@@ -196,6 +200,7 @@ class Game {
       // 这里对齐内存水位线；startRound 的表清理见 persist.js）
       this._turnoverDay = this.day.ok ? 1 : 0;
       this._turnoverWrittenDay = -1;
+      this._assetsWrittenDay = -1;
       this.turnoverAccts.clear();
       const now = this.startedAt;
       // 新局的 NPC 名字从这个清空的去重集开始重新生成（名字是确定性的，只要建号顺序
@@ -550,6 +555,13 @@ class Game {
     // 当日成交统计从 meta 快照恢复（在 catchUpDay 之前——若停机跨过了收盘，
     // 补结算要用恢复出来的累计定格旧的一天，而不是写个 0 进去）
     this.restoreTurnoverLive();
+
+    // 资产快照水位线（`_assetsWrittenDay`）**以库为准**，不从 meta 恢复：
+    // 它记的是「第几天已经定格过」，而 daily_assets 里那个 MAX(day) 就是答案。
+    // 不这么做的话夜间重启会把它退回 -1，于是第二天开盘的跨日翻页会认为「昨天没定格」，
+    // 拿次日盘初的账户值把昨天那份收盘快照整批覆盖掉（同一套判据在成交统计上无害——
+    // 它补写的是内存累计值——但资产快照读的是实时账户，覆盖就是错的）。
+    this._assetsWrittenDay = this.persist ? this.persist.maxAssetDay() : -1;
   }
 
   stop() {
@@ -897,6 +909,16 @@ class Game {
     if (completedDay >= 1 && completedDay === this._turnoverDay && this._turnoverWrittenDay < completedDay) {
       this.writeTurnoverDay(completedDay);
     }
+    // 玩家资产快照定格（daily_assets，主页「资产轨迹」卡的数据源）。
+    // 判据比成交统计少一条 `completedDay === _turnoverDay`：那条是为「内存累计属于哪一天」
+    // 服务的，而资产快照读的是账户实时值，与累计无关。反过来，带上它会漏一天——
+    // 白天一笔都没成交就崩了（meta 的 turnover_live 还停在前一天），重启补结算时
+    // `_turnoverDay` 落后一天，判据不成立，那一天在轨迹上就永远缺一格。
+    // 排在成交统计旁边：此刻各股 settleDay 已把委托作废、冻结退回，equityOf 读到的是
+    // 这一天的收盘终值（补结算走次日盘初，取到的就是那个时点的值，见 rollTurnoverDay）
+    if (completedDay >= 1 && this._assetsWrittenDay < completedDay) {
+      this.writeAssetDay(completedDay);
+    }
     if (opts.meta) this.persist?.setMeta('day_settled', String(this._daySettled));
     logger.info(
       `[我是股神] 第 ${this._daySettled || (st ? st.day : '?')} 个交易日收盘结算：当日已定格成一根日线，` +
@@ -1001,6 +1023,12 @@ class Game {
     if (this._turnoverDay >= 1 && this._turnoverWrittenDay < this._turnoverDay) {
       this.writeTurnoverDay(this._turnoverDay);
     }
+    // 资产快照的崩溃漏结兜底：与成交统计同款——旧的一天没定格过就先补一行。
+    // 补写的资产值是「翻页这一刻」的账户值（次日盘初），不是理论收盘值，
+    // 但漏结本来就没有更好的取数时机，有一个点总比轨迹断一天强
+    if (this._turnoverDay >= 1 && this._assetsWrittenDay < this._turnoverDay) {
+      this.writeAssetDay(this._turnoverDay);
+    }
     this._turnoverDay = dayState.day;
     for (const m of this.markets.values()) {
       if (m.resetDayTurnover) m.resetDayTurnover(); // 指数没有统计字段
@@ -1033,6 +1061,48 @@ class Game {
     this.persist.setMeta('turnover_live', JSON.stringify({ day: this._turnoverDay, stocks, accts }));
   }
 
+  /**
+   * 一个账户此刻的资产构成点（`writeAssetDay` 的收盘行与 `/api/account/assets` 的
+   * live 点共用同一份口径，别在两处各写一遍）。
+   *
+   * **恒等式**：cash + orderFrozen + longValue + shortMargin − shortMv − debt − lendDebt
+   * = equity，与 `store.Account.equity` 是同一个公式（构成项能拼回总量，资产构成条
+   * 才画得对）。夜间结算时挂单已作废退回（orderFrozen = 0），但**补结算走的是次日清晨**，
+   * 那时委托还挂着——所以冻结也要存，不能默认是 0；空头市值与欠息同理，只存
+   * `shortMargin` 会让空头玩家的构成项凭空多出一块。
+   */
+  assetPointOf(acc) {
+    const priceOf = (sid) => this.priceOf(sid);
+    return {
+      cash: r2(acc.cash),
+      orderFrozen: r2(acc.orderFrozen),
+      longValue: r2(acc.totalLongValue(priceOf)),
+      shortMargin: r2(acc.shortMargin),
+      shortMv: r2(acc.totalShortMV(priceOf)),
+      debt: r2(acc.totalFinanceDebt()),
+      lendDebt: r2(acc.totalLendInterestDebt()),
+      equity: r2(this.equityOf(acc)),
+    };
+  }
+
+  /**
+   * 定格一个交易日的玩家资产快照进 daily_assets（主页「资产轨迹」卡）。
+   * 只遍历玩家（store.players()）——轨迹是给人看的，3160 个 NPC 账户不落表。
+   * 权益与彩蛋/境界用同一个 equityOf，前端不许自己重算；
+   * 现金/冻结/持仓市值/空头保证金/空头市值/融资负债/融券欠息是拆开下发的构成项，
+   * 资产构成条直接吃（见 assetPointOf 的恒等式）。
+   * `_assetsWrittenDay` 去重：收盘与夜间两次 settleDay、补结算重复进来只写一次。
+   */
+  writeAssetDay(day) {
+    if (!this.persist || !(day >= 1)) return;
+    const rows = this.store.players().map((acc) => ({ account: acc.name, ...this.assetPointOf(acc) }));
+    this.persist.recordDailyAssets(day, rows);
+    if (this._assetsWrittenDay < day) this._assetsWrittenDay = day;
+    logger.info(
+      `[我是股神] 第 ${day} 个交易日玩家资产快照已定格：${rows.length} 名玩家（轨迹数据 daily_assets）`
+    );
+  }
+
   /** 续跑恢复：把 meta 里的当日成交统计快照装回内存（applySnapshot 末尾调） */
   restoreTurnoverLive() {
     if (!this.persist) return;
@@ -1063,6 +1133,35 @@ class Game {
         fills: Number(arr[3]) || 0,
       });
     }
+  }
+
+  /**
+   * 资产轨迹（GET /api/account/assets，主页「资产轨迹」卡）：
+   * rows = 已收盘定格的每日快照（新→旧，默认 60 天）；live = 当日未收盘的实时点
+   * （当日已经定格进 rows 时不给——那就是刚写进去的那一行，重复给会让图上冒出两个同日点）。
+   * 只回本账户（token 鉴权），别人的轨迹不给——持仓构成是隐私，持仓概况那条
+   * `/api/player/positions` 的 404 红线同理。
+   */
+  assetHistoryFor(token, rawLimit) {
+    const acc = this.accountFor(token);
+    if (!acc) return { ok: false, error: '请先登录' };
+    let limit = Math.floor(Number(rawLimit) || 60);
+    if (!Number.isFinite(limit) || limit < 1) limit = 60;
+    if (limit > 200) limit = 200;
+    const rows = this.persist ? this.persist.loadAssetHistory(acc.name, limit) : [];
+    let live = null;
+    if (this.day.ok) {
+      const st = this.day.locate(Date.now());
+      // 「当日是否已定格」**以库里那行为准，不能只看 `_assetsWrittenDay`**：水位线是
+      // 内存值、不落盘，夜间重启后会退回 -1，而那一行还在库里——只看水位线就会在
+      // 同一天的收盘行之外再给一个 live 点，前端画出来是同日两个点（2026-10-25 实测）。
+      // 白天不可能有当日行（settleDay 只写「已收盘」的那天），所以这里不需要再判阶段。
+      const alreadyWritten = rows.some((r) => r.day === st.day);
+      if (!alreadyWritten) {
+        live = { day: st.day, ...this.assetPointOf(acc), live: true };
+      }
+    }
+    return { ok: true, rows, live };
   }
 
   /**
