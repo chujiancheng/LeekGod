@@ -178,6 +178,8 @@ src = src.replace(
     axisPhases, axisCloseAuctionSpan, axisAuctionMarks,
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
+    // 五档：卖侧档数不足 5 档时上方补空行（卖1 必须在最后一行）
+    renderDepth, curMarket,
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall, renderLending,
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
@@ -3004,6 +3006,71 @@ console.log('\n[17] 账号与昵称分家：账号登录 → 开户（昵称 + �
     assert(api.rankPageOf().offset === 13 && api.rankPageOf().total === 25, '服务端回的 offset/total 原样收下');
     assert(api.el('rankBody').innerHTML.indexOf('翻页10') >= 0, '拉回来就重画表体（不必等下一帧）');
     resetFetch();
+  }
+
+  // ============================================================
+  console.log('\n[28] 五档渲染：卖侧档数不足 5 档时上方补空行，最优卖价永远落在卖1');
+  {
+    // 复刻 2026-10-25 大来集团涨停盘口（昨收 9.36 × 1.3 = 12.17 顶格）：
+    // 卖方只剩涨停价一个价位，买盘五档齐全。修复前卖1 会被画到「卖5」。
+    const limitUpState = mkState({ enabled: false, trading: true }, null);
+    limitUpState.markets[0].prevClose = 9.36;
+    limitUpState.markets[0].last = 12.17;
+    limitUpState.markets[0].change = 2.81;
+    limitUpState.markets[0].changePct = 30.02;
+    limitUpState.markets[0].depth = {
+      asks: [{ price: 12.17, qty: 565800 }],
+      bids: [
+        { price: 12.16, qty: 18400 },
+        { price: 12.15, qty: 25800 },
+        { price: 12.14, qty: 13300 },
+        { price: 12.13, qty: 2000 },
+        { price: 12.12, qty: 2000 },
+      ],
+    };
+    api.setState(limitUpState);
+    api.renderDepth();
+    let asks = api.el('asksBody').innerHTML;
+    assert(/<td class="lv">卖1<\/td><td class="px">12\.17</.test(asks), '卖1 = 涨停价 12.17（修复前在卖5）');
+    assert(/<td class="lv">卖5<\/td><td class="px">--<\/td><td class="qty">--<\/td>/.test(asks), '缺失的高档位在上方补 "--"');
+    assert(asks.indexOf('卖5') < asks.indexOf('卖1'), '行序仍是 卖5 在上、卖1 在下');
+    assert((asks.match(/<td class="lv">卖\d<\/td>/g) || []).length === 5, '永远渲染满 5 行');
+    assert(/<td class="lv">买1<\/td><td class="px">12\.16</.test(api.el('bidsBody').innerHTML), '买侧不受影响：买1 = 12.16');
+
+    // 3 档：卖3~卖1 有价，卖5、卖4 补空行
+    const threeAskState = mkState({ enabled: false, trading: true }, null);
+    threeAskState.markets[0].depth = {
+      asks: [
+        { price: 12.17, qty: 100 },
+        { price: 12.18, qty: 200 },
+        { price: 12.19, qty: 300 },
+      ],
+      bids: [],
+    };
+    api.setState(threeAskState);
+    api.renderDepth();
+    asks = api.el('asksBody').innerHTML;
+    assert(/卖5[\s\S]*--[\s\S]*卖4[\s\S]*--[\s\S]*卖3[\s\S]*12\.19[\s\S]*卖2[\s\S]*12\.18[\s\S]*卖1[\s\S]*12\.17/.test(asks),
+      '3 档时 卖3=12.19 / 卖2=12.18 / 卖1=12.17，上方两行补空');
+
+    // 满 5 档：行为不变
+    const fullState = mkState({ enabled: false, trading: true }, null);
+    fullState.markets[0].depth = {
+      asks: [12.17, 12.18, 12.19, 12.2, 12.21].map((price, i) => ({ price, qty: 1000 + i })),
+      bids: [],
+    };
+    api.setState(fullState);
+    api.renderDepth();
+    asks = api.el('asksBody').innerHTML;
+    assert(/卖5<\/td><td class="px">12\.21</.test(asks) && /卖1<\/td><td class="px">12\.17</.test(asks),
+      '满 5 档时 卖5=12.21 … 卖1=12.17（原行为不变）');
+
+    // 整侧无挂单：保持一行说明（不走 5 行 "--" 占位）
+    const emptyState = mkState({ enabled: false, trading: true }, null);
+    emptyState.markets[0].depth = { asks: [], bids: [] };
+    api.setState(emptyState);
+    api.renderDepth();
+    assert(api.el('asksBody').innerHTML.indexOf('当前无卖盘挂单') >= 0, '无卖盘时出说明行而不是 5 行 "--"');
   }
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

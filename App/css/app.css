@@ -1662,6 +1662,16 @@ input::placeholder {
   white-space: nowrap;
 }
 
+/* 整侧无挂单的提示行（五档卖/买盘空时的「暂无卖盘/买盘」） */
+.book-empty {
+  margin: 2px 6px;
+  padding: 4px 0;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--txt-3);
+  letter-spacing: 1px;
+}
+
 /* 逐笔（个股页右侧面板内的紧凑版） */
 .panel-ticker {
   display: flex;

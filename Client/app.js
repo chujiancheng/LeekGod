@@ -2374,8 +2374,14 @@
     // 整侧没有挂单时渲染一行说明，而不是五行 "--"：五行空占位看起来像渲染坏了，
     // 玩家分不清是"没人挂"还是"页面出错"（服务端买盘空档实测占连续竞价的 7.8%，
     // 属于会经常遇到的正常状态，必须能被正确读懂）
+    // 档数不足 5 档时必须**上方**补空行：卖侧是 reverse 后按固定 5-i 从上往下铺，
+    // 直接铺会把最优卖价（卖1）画到"卖5"那一行——涨停/跌停只剩单边一个价位时必现
+    //（2026-10-25 大来集团涨停实测：卖5 12.17 / 56.58万，卖1~卖4 全 "--"）
+    const askPad = Math.max(0, 5 - asks.length);
     $('asksBody').innerHTML = asks.length
-      ? Array.from({ length: 5 }, (_, i) => depthRow('卖', 5 - i, asks[i], 'ask')).join('')
+      ? Array.from({ length: 5 }, (_, i) =>
+          depthRow('卖', 5 - i, i < askPad ? null : asks[i - askPad], 'ask')
+        ).join('')
       : emptyDepth('ask');
     $('bidsBody').innerHTML = bids.length
       ? Array.from({ length: 5 }, (_, i) => depthRow('买', i + 1, bids[i], 'bid')).join('')

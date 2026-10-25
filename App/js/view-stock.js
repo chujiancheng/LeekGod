@@ -1365,13 +1365,27 @@
       );
     };
 
-    // 卖盘从上到下 5→1，买盘 1→5
-    const asksHtml = asks
-      .slice()
-      .reverse()
-      .map((r, i) => rowHtml(r, i, 'ask'))
-      .join('');
-    const bidsHtml = bids.map((r, i) => rowHtml(r, i, 'bid')).join('');
+    // 卖盘从上到下 5→1，买盘 1→5。
+    // 档数不足 5 档时必须**上方**补空行：直接按 5-i 从上往下铺，会把最优卖价（卖1）
+    // 画到"卖5"那一行——涨停/跌停只剩单边一个价位时必现
+    //（2026-10-25 大来集团涨停实测：卖5 12.17 / 56.58万，卖1~卖4 全 "--"）
+    const emptyAskRow = (lv) =>
+      '<div class="book-row"><span class="lab">卖' + lv + '</span><span class="px">--</span><span class="qt">--</span></div>';
+    const reversedAsks = asks.slice().reverse();
+    const askPad = Math.max(0, 5 - asks.length);
+    // 整侧无挂单时渲染一行提示，而不是什么都不画：与 Web 端「当前无挂单」说明行同口径
+    //（面板只有 118px 宽，放不下长文案，用短版「暂无卖盘/买盘」），玩家分得清
+    // 是"真没人挂"还是"渲染坏了"
+    const emptySideHtml = (side) =>
+      '<div class="book-empty">' + (side === 'ask' ? '暂无卖盘' : '暂无买盘') + '</div>';
+    const asksHtml = asks.length
+      ? Array.from({ length: 5 }, (_, i) =>
+          i < askPad ? emptyAskRow(5 - i) : rowHtml(reversedAsks[i - askPad], i, 'ask')
+        ).join('')
+      : emptySideHtml('ask');
+    const bidsHtml = bids.length
+      ? bids.map((r, i) => rowHtml(r, i, 'bid')).join('')
+      : emptySideHtml('bid');
 
     box.innerHTML =
       asksHtml +
