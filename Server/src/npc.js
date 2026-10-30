@@ -526,6 +526,22 @@ class NpcManager {
     }
     m.aucTag = null;
     if (!m.ownResting.length) return true;
+    // 买盘侧空着、自己又挂得出买单 → 立刻补，不等随机门。与投资者版 shouldRequote
+    // 的旁路同源：崩盘日卖压把做市商的买单吃光后，手上还挂着卖单（ownResting 非空）
+    // 就要等 requoteRate 的随机门，平均 2~4 tick 才补回买盘——6 家轮流卡门，
+    // 买侧五档就整段空给玩家看（2026-10-30 腾迅控股实测：全天「买盘深度不足」抢救
+    // 2.5 万次、深度在 0~39 手横跳，玩家截屏里五档只剩卖盘 +「暂无买盘」）。
+    // 买侧全空时自己不可能还有活买单（活买单必然在簿上），所以不用再查 ownResting；
+    // 容量顶满（longCapMult 封顶）的做市商挂不出买单，跳过它，免得白撤白挂一轮空转。
+    // ⚠️ 放行后 requoteMaker 是双边撤挂，卖单会跟着一起重挂——有意为之（双边同时
+    // 重挂价差更整齐），同投资者版的处理。
+    if (
+      this.market.book.bids.length === 0 &&
+      m.acc.cash >= this.market.lastPrice * this.stock.lotSize &&
+      this.longCapacity(m) >= this.stock.lotSize
+    ) {
+      return true;
+    }
     // 价格动了就跟：不做无意义的撤挂（6 家 × 6 单，每 tick 全撤也是笔开销）
     const drift = m.lastQuotePx > 0 ? Math.abs(this.market.lastPrice / m.lastQuotePx - 1) : 1;
     if (drift > 0.0008) return true;

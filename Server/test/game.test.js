@@ -873,5 +873,51 @@ console.log('\n[18] 玩家榜分页 leaderboardPage（/api/leaderboard）');
   assert(capped.limit === 50, `单页上限 50 行（${capped.limit}）`);
 }
 
+// ---- 做市商买侧空档旁路（2026-10-30）：买盘整侧空时无视随机门立即补报 ----
+// 背景：崩盘日卖压把做市商买单吃光后，手上还挂着卖单（ownResting 非空）就要等
+// requoteRate 随机门，6 家轮流卡门 → 买侧五档整段空给玩家看（腾迅控股实测）。
+{
+  const mgr = g.npcs.get(stock.id);
+  const now = Date.now();
+  const lot = stock.lotSize;
+  const mk = mgr.makers.find(
+    (m) => m.acc.cash >= mgr.market.lastPrice * lot && mgr.longCapacity(m) >= lot
+  );
+  assert(!!mk, '存在有现金、有容量、能挂买盘的做市商');
+  if (mk) {
+    const savedResting = mk.ownResting;
+    const savedRequoteIn = mk.requoteIn;
+    const bidsLen = mgr.market.book.bids.length;
+    // 造「买侧全空 + 手上有挂单 + 随机门冷却中」的崩盘瞬间状态
+    mgr.market.book.bids.length = 0;
+    mk.ownResting = [{ status: 'live', action: ACTIONS.SELL_CLOSE }]; // 活卖单占位
+    mk.requoteIn = 5;
+    assert(
+      mgr.shouldRequoteMaker(mk, now) === true,
+      '买侧全空时做市商无视随机门与冷却，立即重报价'
+    );
+    // 现金不够一手时不能放行（挂不出买单，放行只是白撤白挂一轮空转）
+    const savedCash = mk.acc.cash;
+    mk.acc.cash = mgr.market.lastPrice * lot - 1;
+    assert(
+      mgr.shouldRequoteMaker(mk, now) === false,
+      '现金不够一手时不走旁路（否则空转重报）'
+    );
+    // 容量顶满（longCapMult 封顶）时同样不放行
+    mk.acc.cash = savedCash;
+    const origLong = mgr.longCapacity;
+    mgr.longCapacity = () => 0;
+    assert(
+      mgr.shouldRequoteMaker(mk, now) === false,
+      '库存顶满挂不出买盘时不走旁路'
+    );
+    mgr.longCapacity = origLong;
+    // 还原，不影响后续用例
+    mk.ownResting = savedResting;
+    mk.requoteIn = savedRequoteIn;
+    mgr.market.book.bids.length = bidsLen;
+  }
+}
+
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed > 0 ? 1 : 0);
