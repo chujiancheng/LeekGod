@@ -233,7 +233,7 @@ equity = cash
 
 ```
 这把 Key 只显示这一次
-gs_3f2a9c1e_Bt8xQ2mN7vR4kL9pS1wY6zA0cE5hJ3dF
+gs_xxxxxxxx_（32 位私钥，只显示这一次）
 [复制 Key]  [我已保存]
 ```
 
@@ -2228,20 +2228,36 @@ python Server/examples/quant_template.py --key gs_xxx --live   # 确认信号合
 #    √HOLD_TICKS 是因为买入后有 rules.lockMs 锁仓，锁仓期内的"格子"根本卖不出去
 step = max(STEP_MIN, min(STEP_MAX, VOL_X * stdev(ret) * math.sqrt(HOLD_TICKS)))
 
-# 2) 中枢 + 格子：买点永远挂在"中枢下面第 N 格"，并且必须比上一笔买入价再低一格
-level = anchor * (1 - (held_lots + 1) * step)
-if lots:
-    level = min(level, max(l["price"] for l in lots) * (1 - step))
+# 2) 枢轴跟着**成交价**走，一格一格往下（不是会追着价格跑的滚动均价！）
+#    有仓 → 枢轴 = 最近一次买入的成交价（读 /account 的 long.lots[]，服务端权威值）
+#    空仓 → 枢轴 = 本局最高价（最近 HIST_TICKS≈900 个 tick 内取 max）
+base  = max([pivot] + [l["price"] for l in lots])
+level = base * (1 - step)          # --anchor-lock 时改回 anchor * (1 - (held+1) * step)
 
 # 3) 止盈不猜目标价，成对平仓：账户里最老的一批可卖持仓涨到 cost × (1 + step) 就卖
 oldest = min(sellable_lots, key=lambda l: l["ts"])      # FIFO，跟服务端一致
 if price >= oldest["price"] * (1 + step):
     sell(qty=min(oldest["qty"], pos["long"]["sellable"]))
 
-# 4) 趋势闸门：短均线跌破中枢 0.6% 就停止加仓（网格最怕单边下跌，一边跌一边接刀）
-if short_ma < anchor * (1 - TREND_BREAK_PCT):
+# 4) 趋势闸门：短均线跌破枢轴 TREND_BREAK_PCT 就停止**加仓**（首格放行，否则永远开不了仓）
+if held > 0 and short_ma < pivot * (1 - TREND_BREAK_PCT):
     return None
 ```
+
+> **踩过的坑（2026-10-26）**：早期版本用"最近 240 个 tick 的**均价**"当枢轴，结果一整天不成交——
+> 均价被最新 tick 拖着往下走，缓跌时买点永远比价格低一格，缺口峰值只有 `跌幅速率 × 半个窗口`
+> （实测 2.0%），永远到不了 3% 的触发线。同一个毛病还有两个变体：窗口太短（高点滑出窗口）
+> 和把趋势闸门套在首格上（空仓时没有成本可比，一挡就再也进不去）。
+> 判断依据：看日志里 `枢轴` 与 `价` 的差，始终贴着 0~2% 就说明枢轴在追价。
+>
+> **静默闸门是第二个坑（同日）**：上面几条闸门全是 `return None`，一行日志都不留。玩家第一格买到
+> 5000 股 @ 14.56 之后价格跌到 12.4（−15%），买点 14.12 早就跌破、资金 97 万也够，却再也不下单——
+> 真凶是趋势闸门（短均线 12.38 < 枢轴 14.56 下方 0.6%），日志里毫无痕迹，只能靠猜。
+> 现在 `decide()` 把拦截原因写进模块级 `BLOCK`，主循环按「原因变化」打一行
+> `未触发：趋势闸门（短均线 12.38 < 门槛 14.47（枢轴 14.56 下方 15.0%，允许 0.6%；--trend-break-pct 可放宽））`，
+> 状态行也会附一次。**任何"条件满足却不下单"的排查，第一步都该让闸门自己说话。**
+> 注意 `decide()` 读的是模块级 `prices` 环形缓冲（不是入参），离线回放必须先把价格灌进 `prices`，
+> 否则趋势闸门会因"样本不足"被静默跳过，测出来的结论正好相反。
 
 三个值得抄的工程点：
 
@@ -2251,6 +2267,10 @@ if short_ma < anchor * (1 - TREND_BREAK_PCT):
   默认已改成**固定 3% 一格**（`STEP_MIN = STEP_MAX = 0.03`），想回到自适应就把两者改回 `0.002` / `0.02`。
 - **在途单只留一张 + TTL 撤单**：账户冷却 0.5~3 秒，同一时刻挂两张单没意义；
   `ORDER_TTL_SEC`（默认 20 秒）没成交就撤，下一 tick 按新的中枢重算，避免"僵尸挂单"占着资金和 `sellable`。
+- **仓位上限按本票算**：`POSITION_CAP_PCT` 比的是「本票持仓市值 + 本单」vs `equity × pct`，
+  不是账户总 `longValue`——账户里通常还压着别的票，用全账户口径会让网格被永久判超限、一笔都买不进。
+- **买单成交后等账户回填**：下单成功后 3 秒内不决策（`pending_until`），等 `/account` 把新批次写进
+  `lots[]`，否则枢轴还停在"最高价"，同一格会被买两次。
 
 跑法：同另外三个示例，`--key` / `--stock` 命令行传参，或填文件顶部常量。
 

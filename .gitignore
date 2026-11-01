@@ -25,6 +25,8 @@ output/
 
 # 带 Key 的本地批处理副本（run-quant.bat 本身入库，run-quant-ma.bat 之类自己存的别入库）
 Server/examples/run-quant-*.bat
+# 网格专用启动器：带明文 Key，本地专用
+Server/examples/run-grid.bat
 
 # 带真实 Key 的本地示例脚本：examples/ 整体不入库（远端只放 API_KEY = "" 的空壳），
 # 三个已跟踪的 .py 靠 skip-worktree 挡着，未跟踪的 quant_grid.py 交给这里挡。
