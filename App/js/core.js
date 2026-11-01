@@ -324,6 +324,8 @@ window.GS = window.GS || {};
         closeSheet();
       },
     };
+    // closeSheet 收尾时会调 ctl.onClose；opt.onClose 必须挂上来才生效
+    if (opt.onClose) ctl.onClose = opt.onClose;
     curSheet = ctl;
 
     mask.onclick = () => closeSheet();

@@ -2530,6 +2530,10 @@ input::placeholder {
   background: #fffaf0;
 }
 
+.chip:disabled {
+  opacity: 0.4;
+}
+
 /* ---------------------------------------------------------------- toast */
 
 .toast-wrap {

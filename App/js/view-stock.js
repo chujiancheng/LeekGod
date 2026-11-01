@@ -1634,10 +1634,20 @@
     let side = action === 'buy_open' || action === 'buy_close' ? 'buy' : 'sell';
     let cur = action;
     // 竞价阶段 last 还是昨收（只入簿不撮合），拿它当默认价等于让玩家对着「昨收」下单；
-    // 有虚拟成交价就先用它，没有（盘口未交叉）才退回最新价
+    // 有虚拟成交价就先用它，没有才退回盘口。常规阶段默认填**对手价**（买入吃卖一、
+    // 卖出打买一），跟真实交易 App 一致——对「最新价」挂单大概率排不上队。
     const au = m.auction && m.auction.price != null ? m.auction : null;
     const auTip = auctionTip(st, m);
-    let price = au ? num(au.price) : num(m.last);
+    const d0 = m.depth || {};
+    const opp =
+      side === 'buy'
+        ? d0.asks && d0.asks[0]
+          ? num(d0.asks[0].price)
+          : num(m.last)
+        : d0.bids && d0.bids[0]
+          ? num(d0.bids[0].price)
+          : num(m.last);
+    let price = au ? num(au.price) : opp;
     let qty = lot;
 
     const html =
@@ -1654,9 +1664,9 @@
         '<button data-step="price" data-dir="1">+</button>' +
       '</div>' +
       '<div class="chip-row" id="priceChips">' +
-        '<button class="chip" data-px="last">' + (au ? '虚拟价' : '最新') + '</button>' +
-        '<button class="chip" data-px="bid">买一</button>' +
-        '<button class="chip" data-px="ask">卖一</button>' +
+        '<button class="chip" data-px="last" id="chipLast"></button>' +
+        '<button class="chip" data-px="bid" id="chipBid"></button>' +
+        '<button class="chip" data-px="ask" id="chipAsk"></button>' +
       '</div>' +
       '<div class="sec-title">数量</div>' +
       '<div class="stepper">' +
@@ -1683,6 +1693,41 @@
         const pIn = body.querySelector('#ordPrice');
         const qIn = body.querySelector('#ordQty');
         const btn = body.querySelector('#ordBtn');
+        const chipEls = {
+          last: body.querySelector('#chipLast'),
+          bid: body.querySelector('#chipBid'),
+          ask: body.querySelector('#chipAsk'),
+        };
+        // data-px -> 该来源当前价；null = 盘口没有这一档
+        let pxMap = { last: price, bid: null, ask: null };
+
+        /**
+         * 行情必须**每次点击/每帧**现取：SSE 每帧整体替换 S.state，
+         * openOrder 开弹层时抓的 m 是死快照，depth/last 全冻结在打开那一刻。
+         */
+        const liveMarket = () => GS.core.market(state.stockId) || m;
+
+        function refreshChips() {
+          const live = liveMarket();
+          const au = live.auction && live.auction.price != null ? live.auction : null;
+          const d = live.depth || {};
+          pxMap = {
+            last: au ? num(au.price) : num(live.last),
+            bid: d.bids && d.bids[0] ? num(d.bids[0].price) : null,
+            ask: d.asks && d.asks[0] ? num(d.asks[0].price) : null,
+          };
+          const label = { last: au ? '虚拟价' : '最新', bid: '买一', ask: '卖一' };
+          const cur = fmtP(pIn.value);
+          for (const k of ['last', 'bid', 'ask']) {
+            const el = chipEls[k];
+            if (!el) continue;
+            const v = pxMap[k];
+            el.textContent = v == null ? label[k] : label[k] + ' ' + fmtP(v);
+            el.disabled = v == null;
+            // 与输入框同价的来源高亮，玩家一眼看清自己挂的是哪一档
+            el.className = v != null && fmtP(v) === cur ? 'chip on' : 'chip';
+          }
+        }
 
         const sync = () => {
           price = Math.max(0.01, num(pIn.value));
@@ -1707,6 +1752,7 @@
             qty > mx
               ? '超出可下单数量（最大 ' + fmtQty(mx) + ' 股）'
               : '整手交易，每手 ' + lot + ' 股；下单后有冷却时间';
+          refreshChips();
         };
 
         GS.core.on(body, '#sideRow button', 'click', (e, t) => {
@@ -1725,11 +1771,8 @@
         });
 
         GS.core.on(body, '#priceChips button', 'click', (e, t) => {
-          const k = t.dataset.px;
-          const d = (m.depth || {});
-          let v = au ? num(au.price) : num(m.last);
-          if (k === 'bid' && d.bids && d.bids[0]) v = num(d.bids[0].price);
-          if (k === 'ask' && d.asks && d.asks[0]) v = num(d.asks[0].price);
+          const v = pxMap[t.dataset.px];
+          if (v == null) return;
           pIn.value = fmtP(v);
           sync();
         });
@@ -1744,6 +1787,10 @@
 
         pIn.addEventListener('input', sync);
         qIn.addEventListener('input', sync);
+
+        // 弹层开着期间跟着行情帧刷新三个价签；关层取消订阅（closeSheet 会调 ctl.onClose）
+        const unsub = GS.core.subscribe(refreshChips);
+        ctl.onClose = () => unsub();
 
         btn.onclick = () => {
           btn.disabled = true;
