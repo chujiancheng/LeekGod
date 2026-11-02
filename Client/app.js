@@ -2430,7 +2430,13 @@
     // 旧服务端 / 帧与 day 段不同步时，面板会翻出昨天那批成交。
     // 不能复用 minuteFrom()：切到「5 日」时它返回 4 天前的起点，会把前几天也算进来
     const from = Number((dayInfo() || {}).dayStartAt) || 0;
-    const rows = (from ? trades.filter((t) => t.t >= from) : trades).slice(0, 40).map((t) => {
+    // 服务端 trades 是新→旧（unshift 头插）；展示对齐东财逐笔：旧的在上、新的在最下面，
+    // 新成交从底部进来把旧行往上顶（用户 2026-11-02 对齐东财的要求）
+    const rows = (from ? trades.filter((t) => t.t >= from) : trades)
+      .slice(0, 40)
+      .slice()
+      .reverse()
+      .map((t) => {
       const side = t.side === 'buy' ? 'B' : 'S';
       return `<div class="tape-row">
         <span class="time">${fmtTime(t.t)}</span>
@@ -2441,7 +2447,15 @@
         <span>${seatHtml(t.sellBroker)}</span>
       </div>`;
     });
-    $('tape').innerHTML = rows.join('') || '<div class="tape-row"><span class="time">暂无成交</span></div>';
+    const tapeEl = $('tape');
+    // 新的在最下面，就得让视口钉在底部才看得见最新成交：只有用户本来停在底部
+    // （或首次渲染还没滚动位置）才自动滚到底，用户往上翻历史时不抢滚动条
+    const atBottom =
+      tapeEl.scrollHeight == null ||
+      tapeEl.scrollTop == null ||
+      tapeEl.scrollHeight - tapeEl.scrollTop - tapeEl.clientHeight < 24;
+    tapeEl.innerHTML = rows.join('') || '<div class="tape-row"><span class="time">暂无成交</span></div>';
+    if (atBottom && tapeEl.scrollHeight != null) tapeEl.scrollTop = tapeEl.scrollHeight;
   }
 
   // ---------- 资金指标条（内外盘 / 净流入） ----------

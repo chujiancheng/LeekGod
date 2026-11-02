@@ -179,7 +179,7 @@ src = src.replace(
     renderNews, newsRowsHtml,
     renderFlow, renderChartMode, onState,
     // 五档：卖侧档数不足 5 档时上方补空行（卖1 必须在最后一行）
-    renderDepth, curMarket,
+    renderDepth, curMarket, renderTape,
     renderBrokerWall, renderMyBroker, renderSeats, renderMarginCall, renderLending,
     renderBrokerWeeklyHint, seatHtml, newsHintsHtml, brokerCardHtml, fmtFeeRate, rankRowsHtml,
     pumpEggs, renderEggCard, showEggBanner, hideEggBanner, bindEggs, eggSeqStored,
@@ -1217,6 +1217,26 @@ console.log('\n[13] 席位：五档图标 / 逐笔席位 / 席位榜 / 龙虎榜
   api.setState(old);
   api.renderSeats();
   assert(api.el('seatBody').innerHTML.indexOf('暂无') >= 0, '老服务端（无 seats 段）不报错');
+}
+
+console.log('\n[13b] 逐笔顺序：对齐东财——旧的在上、新的在最下面');
+{
+  const st = mkState({ ...AUCTION_DAY, phase: 'morning', label: '上午连续竞价', auction: null }, null);
+  const now = Date.now();
+  // 服务端 trades 是新→旧（unshift 头插），这里按服务端口径造三笔
+  st.markets[0].trades = [
+    { t: now - 10000, price: 20.03, qty: 300, side: 'buy' },
+    { t: now - 20000, price: 20.02, qty: 200, side: 'sell' },
+    { t: now - 30000, price: 20.01, qty: 100, side: 'buy' },
+  ];
+  api.setState(st);
+  api.renderTape();
+  const html = api.el('tape').innerHTML;
+  const i1 = html.indexOf('20.01');
+  const i2 = html.indexOf('20.02');
+  const i3 = html.indexOf('20.03');
+  assert(i3 >= 0 && i2 >= 0 && i1 >= 0, '三笔逐笔都渲染出来了');
+  assert(i1 < i2 && i2 < i3, '时间自上而下递增，最新的排最下（20.01 → 20.03）');
 }
 
 console.log('\n[14] 追保预警与提前消息');

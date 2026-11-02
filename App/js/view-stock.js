@@ -1469,7 +1469,9 @@
     // 面板会翻出昨天 14:5x 那批成交，玩家一眼看上去就是「昨天的分时成交没清」。
     const since = Number(dayInfo() && dayInfo().dayStartAt) || 0;
     const all = since ? (m.trades || []).filter((t) => num(t.ts || t.t) >= since) : m.trades || [];
-    const trades = all.slice(0, 14);
+    // 服务端 trades 是新→旧；展示对齐东财逐笔：旧的在上、新的在最下面，
+    // 新成交从底部进来把旧行往上顶（用户 2026-11-02 对齐东财的要求）
+    const trades = all.slice(0, 14).slice().reverse();
     if (!trades.length) {
       if (box.dataset.empty !== '1') {
         box.dataset.empty = '1';
