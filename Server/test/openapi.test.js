@@ -51,11 +51,12 @@ const g = new Game({ persist });
 const STOCK = config.stocks[0];
 const BROKER = Object.keys(config.brokers.list)[0];
 
-// 与 game.test.js 同口径：不启 setInterval，手动建 NPC 池 + 锚到连续竞价段
-g.day.reanchor(Date.now() - 120000);
+// 与 game.test.js 同口径：不启 setInterval，手动建 NPC 池 + 锚到上午连续竞价段
+// （锚点由 day.phases 推导：竞价段已经压到 5 分钟，写死 2 分钟会落在集合竞价里）
+g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
 for (const s of config.stocks) {
   g.npcs.get(s.id).init(g.startedAt);
-  g.markets.get(s.id).priceHistory.push({ t: g.startedAt, price: g.markets.get(s.id).lastPrice });
+  g.markets.get(s.id).priceHistory.push({ t: g.startedAt, price: g.markets.get(s.id).lastPrice, vol: 0 });
 }
 g.index.update(g.markets, g.startedAt);
 

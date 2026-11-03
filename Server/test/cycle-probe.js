@@ -22,6 +22,8 @@ const DAYS = Number(process.argv[3] || 111);
 
 const TICK_MS = config.tickIntervalMs || 700;
 const DAY_MS = (config.day.phases || []).reduce((a, p) => a + p.ms, 0) || 620000;
+// 一天多少 tick：由配置现算（旧口径写死 886，一天改成 260 分钟后进度条会全错）
+const DAY_TICKS = Math.round(DAY_MS / TICK_MS);
 
 let clock = 1800000000000;
 Date.now = () => clock;
@@ -120,8 +122,8 @@ for (let s = 0; s < SEEDS; s++) {
   for (let i = 0; i < ticks; i++) {
     clock += TICK_MS;
     g.tick();
-    if (i > 0 && i % (886 * 10) === 0) {
-      console.log(`  [seed ${s}] ${Math.floor(i / 886)} / ${DAYS} 天 · 墙钟 ${((realNow() - wall0) / 1000).toFixed(0)}s`);
+    if (i > 0 && i % (DAY_TICKS * 10) === 0) {
+      console.log(`  [seed ${s}] ${Math.floor(i / DAY_TICKS)} / ${DAYS} 天 · 墙钟 ${((realNow() - wall0) / 1000).toFixed(0)}s`);
     }
   }
   g.stop?.();

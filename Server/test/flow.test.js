@@ -44,6 +44,11 @@ const ALL_IDS = [...config.stocks.map((s) => s.id), INDEX_ID];
 const P = (g) => g.markets.get(ID);
 const r2 = (v) => Math.round(v * 100) / 100;
 const near = (a, b, eps = 0.02) => Math.abs(a - b) < eps;
+/** 一天总长 / 夜间段长：由 day.phases 推导，别写死毫秒（tick 与阶段时长都会变） */
+const DAY_MS = config.day.phases.reduce((a, p) => a + p.ms, 0);
+const NIGHT_MS = config.day.phases[config.day.phases.length - 1].ms;
+/** 第 n 天「夜间已开始 10 秒」那个时刻——结算就发生在这附近 */
+const nightAtOf = (startAt, day = 1) => startAt + (day - 1) * DAY_MS + DAY_MS - NIGHT_MS + 10000;
 
 /** 孤立市场 + 两个荷包鼓鼓的账户（买卖两侧必须不同账户：同股多空互斥） */
 function fresh(dayCycle) {
@@ -133,7 +138,7 @@ console.log('\n[4] 大盘指数：资金流与日线 = 成分股合计');
 {
   const g = new Game();
   g.start();
-  g.day.reanchor(Date.now() - 120000); // 锚进上午连续竞价
+  g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000)); // 锚进上午连续竞价
   for (let i = 0; i < 3; i++) g.tick();
   const stocks = g.stocks.map((s) => g.markets.get(s.id));
   const sum = (fn) => stocks.reduce((s, m) => s + fn(m), 0);
@@ -146,7 +151,7 @@ console.log('\n[4] 大盘指数：资金流与日线 = 成分股合计');
 
   const st = g.day.locate(Date.now());
   // 结算发生在「收盘竞价 → 夜间」的那一刻：把时钟与分时末点都放在第 1 天夜间再结
-  const nightAt = g.day.startAt + (st.day - 1) * g.day.dayMs + 590000;
+  const nightAt = nightAtOf(g.day.startAt, st.day);
   for (const m of g.markets.values()) m.priceHistory.push({ t: nightAt, price: m.lastPrice, vol: m.volume });
   g.settleDay(nightAt, { meta: false });
   assert(g.index.dailyBars.length === 1 && g.index.dailyBars[0].day === st.day, '指数也定格一根日线');
@@ -171,7 +176,7 @@ console.log('\n[5] 落盘往返：当日内外盘与已收盘日线都能续上'
   const p1 = new Persister(FILE);
   const g1 = new Game({ persist: p1 });
   g1.start();
-  g1.day.reanchor(Date.now() - 120000);
+  g1.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   for (let i = 0; i < 3; i++) g1.tick();
   const before = {
     outerVol: P(g1).outerVol,
@@ -182,7 +187,7 @@ console.log('\n[5] 落盘往返：当日内外盘与已收盘日线都能续上'
   };
   assert(before.outerVol + before.innerVol > 0, `重启前当日有内外盘累计（${before.outerVol}/${before.innerVol}）`);
   const st = g1.day.locate(Date.now());
-  const nightAt = g1.day.startAt + (st.day - 1) * g1.day.dayMs + 590000;
+  const nightAt = nightAtOf(g1.day.startAt, st.day);
   for (const m of g1.markets.values()) m.priceHistory.push({ t: nightAt, price: m.lastPrice, vol: m.volume });
   g1.settleDay(nightAt, { meta: true });
   const barBefore = JSON.parse(JSON.stringify(P(g1).dailyBars));
@@ -211,13 +216,13 @@ console.log('\n[6] dailyFor：升序、条数上限、指数可用、未知标�
 {
   const g = new Game();
   g.start();
-  g.day.reanchor(Date.now() - 120000);
+  g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g.tick();
   // 连造 5 个交易日：每天先把分时末点挪进当天的夜间，再让时钟跨到次日结算
   // （真实流程就是「收盘竞价 → 夜间」那一刻结算，末点属于被结算的那一天）
   for (let d = 1; d <= 5; d++) {
     const base = g.day.startAt + (d - 1) * g.day.dayMs;
-    for (const m of g.markets.values()) m.priceHistory.push({ t: base + 590000, price: m.lastPrice, vol: m.volume });
+    for (const m of g.markets.values()) m.priceHistory.push({ t: nightAtOf(g.day.startAt, d), price: m.lastPrice, vol: m.volume });
     g.settleDay(base + g.day.dayMs + 1000, { day: d });
   }
   const r = g.dailyFor(ID);

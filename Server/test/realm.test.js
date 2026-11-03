@@ -22,6 +22,12 @@ const milestones = require('../src/milestones');
 const { Account } = require('../src/store');
 const { Game } = require('../src/game');
 
+/** 一天总长 / 夜间段长：由 day.phases 推导，别写死毫秒（阶段时长会随拟真度调整） */
+const DAY_MS = config.day.phases.reduce((a, p) => a + p.ms, 0);
+const NIGHT_MS = config.day.phases[config.day.phases.length - 1].ms;
+/** reanchor 的偏移量：让「现在」正好落在第 n 天的夜间（结算已发生的那一刻） */
+const nightAgo = (day = 1) => (day - 1) * DAY_MS + DAY_MS - NIGHT_MS + 10000;
+
 let passed = 0;
 let failed = 0;
 function assert(cond, msg) {
@@ -233,7 +239,7 @@ console.log('\n[8] Game 集成：收盘判定、口径一致、NPC 不参与、�
 let token = '';
 const g = new Game();
 {
-  g.day.reanchor(Date.now() - 590000); // 锚进第 1 天夜间 → 收盘结算会做掉第 1 天
+  g.day.reanchor(Date.now() - nightAgo(1)); // 锚进第 1 天夜间 → 收盘结算会做掉第 1 天
   const lr = g.onboard('realmTester', 'realmTester', 'zhaoshang');
   assert(lr.ok && !!lr.token, '登录成功');
   token = lr.token;
@@ -252,7 +258,7 @@ const g = new Game();
 
   // 第 2 天：权益 200 万 → 炼气八层，同一天命中 A01/A02/A03
   acc.cash = r2(acc.cash + 1000000);
-  g.day.reanchor(Date.now() - (620000 + 590000));
+  g.day.reanchor(Date.now() - nightAgo(2)); // 第 2 天夜间
   g.ensureDaySettled(Date.now());
   assert(acc.milestones.realmIdx === 8, `收盘权益 200 万 → 炼气八层（idx=${acc.milestones.realmIdx}）`);
   assert(acc.milestones.fired.join(',') === 'A01,A02,A03', '三档彩蛋全部记为 fired（成就一个不丢）');
@@ -326,7 +332,7 @@ console.log('\n[10] 服务端不该在 require 期外做全账户扫描（只判
   assert(src.indexOf('console.') < 0, '日志走 logger，不直接 console');
 
   const g2 = new Game();
-  g2.day.reanchor(Date.now() - 590000);
+  g2.day.reanchor(Date.now() - nightAgo(1));
   g2.onboard('realmTester2', 'realmTester2', 'zhaoshang');
   let touched = 0;
   const origTouch = g2.persist ? g2.persist.touch : null;

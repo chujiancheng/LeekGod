@@ -844,6 +844,14 @@
 
   /* -------------------------------------------------------------- 规则 */
 
+  /** 锁仓文案：与服务端 rules.lock 同口径（t0 / t1-open / t1），老服务端只给 lockMs 时退回秒数 */
+  function lockText(r) {
+    if (r.lock === 't0') return 'T+0';
+    if (r.lock === 't1-open') return 'T+1 · 次日 09:15';
+    if (r.lock === 't1') return 'T+1 · 次日 09:25';
+    return num(r.lockMs) ? (num(r.lockMs) / 1000).toFixed(0) + ' 秒' : '--';
+  }
+
   function openRules() {
     const st = GS.core.S.state;
     const r = st.rules || {};
@@ -853,7 +861,7 @@
       html:
         '<div class="field-line"><span>佣金费率</span><b>' + (num(r.feeRate) * 10000).toFixed(2) + '‱</b></div>' +
         '<div class="field-line"><span>下单冷却</span><b>' + (num(r.cooldownMs) / 1000).toFixed(1) + ' 秒</b></div>' +
-        '<div class="field-line"><span>T+ 锁仓</span><b>' + (num(r.lockMs) / 1000).toFixed(0) + ' 秒</b></div>' +
+        '<div class="field-line"><span>T+ 锁仓</span><b>' + lockText(r) + '</b></div>' +
         '<div class="field-line"><span>保证金比例</span><b>' + (num(r.marginRatio) * 100).toFixed(0) + '%</b></div>' +
         '<div class="field-line"><span>维持率</span><b>' + (num(r.maintenance) * 100).toFixed(0) + '%</b></div>' +
         '<div class="field-line"><span>涨跌停</span><b>±' +
@@ -861,7 +869,10 @@
         '<div class="field-line"><span>加钱上限</span><b>' + fmtAmt(dep.maxLifetime) + '</b></div>' +
         '<div class="hint hint-gap">' +
           '4 种动作：买入开多 / 卖出平多 / 卖出开空 / 买入平空，同一只股票多空互斥。' +
-          '下单冷却期间不能重复下单；成交后 T+ 锁仓期内不能卖出。' +
+          '下单冷却期间不能重复下单；' +
+          (r.lock === 't0'
+            ? '本券商 T+0，成交即可卖。'
+            : '本券商 T+1：当天买的当天不能卖，' + (r.lock === 't1-open' ? '次日 09:15 开盘竞价一开始就解锁。' : '要到次日 09:25 开盘集合竞价收完才解锁。')) +
         '</div>',
     });
   }

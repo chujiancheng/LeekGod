@@ -164,6 +164,46 @@ class Market {
   }
 
   /**
+   * 该账户的**锁仓判定口径**（成交 → 可卖）。
+   *
+   * 2026-11-02 起锁仓从「固定时长」变成「跨日政策」（见 config.trade.lock）：
+   *   - `t0`      → 返回 0，成交即可卖；
+   *   - `t1-open` → 锁到次一交易日**开盘集合竞价开始**（09:15，能在竞价里挂卖单）；
+   *   - `t1`      → 锁到次一交易日**开盘集合竞价结束**（09:25，开盘连续竞价才可卖）。
+   *
+   * 返回给 `Account.sellableLong/syncReserved/reserveLong` 的是**函数**而不是时长：
+   * 解锁时刻 = `dayCycle.locate(成交时刻).dayEndsAt + 偏移`，只依赖成交时间与时钟，
+   * 所以① 不新增存档字段、② 重启后自然成立、③ 跨日不需任何"解锁"动作。
+   *
+   * 没有交易日时钟（单测、`day.enabled=false`）或 NPC 时回落固定时长口径 `trade.lockMs`：
+   * NPC 是做市商，给它上 T+1 会让它当天买的库存当天卖不掉，盘口直接死给你看。
+   */
+  lockFnFor(account, now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return config.trade.lockMs;
+    if (!account || account.isNPC) return config.trade.lockMs;
+    const policy = this.brokerFor(account, now).lock || 't1';
+    if (policy === 't0') return 0;
+    const auctionMs = (dc.phases[0] && dc.phases[0].ms) || 0;
+    const offset = policy === 't1-open' ? 0 : auctionMs;
+    return (ts) => dc.locate(ts).dayEndsAt + offset;
+  }
+
+  /**
+   * 锁仓口径的中文说明，只用于**下单被拒时的提示文案**（与 lockFnFor 必须同源，
+   * 否则会出现「提示说明天、实际今天就能卖」）。
+   * 返回 null 表示该账户此刻没有锁仓约束（T+0 / 无钟模式另说）。
+   */
+  lockTextFor(account, now = Date.now()) {
+    const dc = this.dayCycle;
+    if (!dc || !dc.ok) return `${Math.round(config.trade.lockMs / 1000)} 秒锁仓中`;
+    if (!account || account.isNPC) return `${Math.round(config.trade.lockMs / 1000)} 秒锁仓中`;
+    const policy = this.brokerFor(account, now).lock || 't1';
+    if (policy === 't0') return null;
+    return policy === 't1-open' ? 'T+1 锁仓中，次日 09:15 解锁' : 'T+1 锁仓中，次日 09:25 解锁';
+  }
+
+  /**
    * 利息类变更通知存档器：**NPC 账户跳过**。
    *
    * 利息是每 tick 都在动的慢漂移，而每 tick 被标脏的账户几乎覆盖全部 NPC；
@@ -208,9 +248,9 @@ class Market {
     const lp = account.longs.get(sid);
     const sp = account.shorts.get(sid);
     if (!lp && !sp) return;
-    // 锁仓时长只有多头用得上：本股没有多头批次就不必去解析券商（NPC 成交极频繁）
-    const lockMs = lp ? this.brokerFor(account, now).lockMs : 0;
-    account.syncReserved(sid, lockMs, now);
+    // 锁仓口径只有多头用得上：本股没有多头批次就不必去解析券商（NPC 成交极频繁）
+    const unlock = lp ? this.lockFnFor(account, now) : 0;
+    account.syncReserved(sid, unlock, now);
   }
 
   /**
@@ -725,7 +765,7 @@ class Market {
     qty = Math.floor(Number(qty));
     if (!Number.isFinite(qty) || qty <= 0) return { ok: false, error: '数量无效' };
     if (qty % lot !== 0) return { ok: false, error: `挂借数量必须为 ${lot} 股的整数倍` };
-    const free = account.freeSellableLong(this.stockId, now, this.brokerFor(account, now).lockMs);
+    const free = account.freeSellableLong(this.stockId, now, this.lockFnFor(account, now));
     if (qty > free) return { ok: false, error: `可挂借不足，当前可挂借 ${free} 股` };
     const led = account.ledgerOf(this.stockId);
     led.lendOffered = (led.lendOffered || 0) + qty;
@@ -927,8 +967,11 @@ class Market {
 
   // ---------- 融资利息 ----------
 
-  /** 当前融资分钟利率（小数）：s = 全市场负债 / (负债 + 可动用现金)，现金越紧利率越高 */
-  financeMinuteRate() {
+  /**
+   * 当前融资**日利率**（小数）：s = 全市场负债 / (负债 + 可动用现金)，现金越紧利率越高。
+   * 以日利率为准（见 config.margin.finance.dayRate 的说明），按 dayMs 摊到每 tick。
+   */
+  financeDayRate() {
     const cfg = config.margin.finance;
     if (!cfg || !cfg.enabled) return 0;
     let debt = 0;
@@ -939,7 +982,17 @@ class Market {
     }
     const denom = debt + cash;
     const s = denom > 0 ? debt / denom : 0;
-    return Math.min(cfg.baseMinuteRate * (1 + s * cfg.stressK), cfg.maxMinuteRate);
+    return Math.min(cfg.dayRate * (1 + s * cfg.stressK), cfg.maxDayRate);
+  }
+
+  /**
+   * 分钟利率 = 日利率 ÷ 一个游戏日的现实分钟数。
+   * 只用于给客户端做"每分钟大概烧多少钱"的实时预估（客户端按墙钟每分钟累加），
+   * **不要拿它去计息**——计息一律走 financeDayRate × tickMs/dayMs。
+   */
+  financeMinuteRate() {
+    const dayMs = this.dayMs > 0 ? this.dayMs : 620000;
+    return this.financeDayRate() * (60000 / dayMs);
   }
 
   /**
@@ -953,7 +1006,7 @@ class Market {
   accrueFinanceInterest(now = Date.now()) {
     const cfg = config.margin.finance;
     if (!cfg || !cfg.enabled) return;
-    const tickRate = this.financeMinuteRate() * (config.tickIntervalMs / 60000);
+    const tickRate = this.financeDayRate() * (config.tickIntervalMs / (this.dayMs || 620000));
     if (tickRate <= 0) return;
     const day = this.dayNumber(now);
     for (const acc of this._allAccountsForInterest()) {
@@ -964,14 +1017,24 @@ class Market {
       let total = 0;
       for (const lot of pos.lots) total += lot.debt || 0;
       if (total <= 0) continue;
-      const add = r2(total * tickRate);
-      if (add <= 0) continue;
+      // **这里绝不能逐 tick r2**（与做空计息同一条教训）：tick 3 秒、日息 0.1% 下，
+      // 单 tick 的利息可能远小于 0.01 元（1 万元负债约 0.0002 元），每次取整都会抹成 0，
+      // 一天 5200 个 tick 累计下来等于免息。尾数先攒在 `_finDust` 里，凑够一分钱才进负债。
+      const raw = total * tickRate;
+      if (raw <= 0) continue;
+      const led = acc.ledgerOf(this.stockId);
+      led.financeInterestAccrued = (led.financeInterestAccrued || 0) + raw;
+      acc._finDust = (acc._finDust || 0) + raw;
+      if (acc._finDust < 0.01) {
+        this.notifyInterest(acc);
+        continue;
+      }
+      const add = Math.floor(acc._finDust * 100) / 100;
+      acc._finDust -= add;
       for (const lot of pos.lots) {
         if (lot.debt > 0) lot.debt = r2(lot.debt + add * (lot.debt / total));
       }
       acc.realizedPnL = r2(acc.realizedPnL - add);
-      const led = acc.ledgerOf(this.stockId);
-      led.financeInterestAccrued = r2((led.financeInterestAccrued || 0) + add);
       this.notifyInterest(acc);
     }
   }
@@ -1119,13 +1182,17 @@ class Market {
       }
       case ACTIONS.SELL_CLOSE: {
         // 挂入融券池的券不能再卖：可卖 = freeSellableLong（可卖 − 已挂借）。
-        // 锁仓时长按**账户券商**取（滑泰 5 秒 / 天疯 8 秒 / 基准 10 秒）——
+        // 锁仓口径按**账户券商**取（滑泰 T+0 / 天疯次日 09:15 / 其余次日 09:25）——
         // 与下面那条提示文案、以及 reserveLong 必须同源，否则会出现
-        // 「提示说 5 秒、实际锁 10 秒」的自相矛盾
-        const sellable = account.freeSellableLong(this.stock.id, now, bk.lockMs);
+        // 「提示说明天、实际今天就能卖」的自相矛盾
+        const unlock = this.lockFnFor(account, now);
+        const sellable = account.freeSellableLong(this.stock.id, now, unlock);
         if (sellable < qty) {
           const locked = account.longQty(this.stock.id) - sellable;
-          precheck = sellable <= 0 && locked > 0 ? `可卖数量为 0（${bk.lockMs / 1000} 秒锁仓中或已挂借融券）` : `可卖数量不足，当前可卖 ${sellable} 股`;
+          const why = this.lockTextFor(account, now);
+          precheck = sellable <= 0 && locked > 0
+            ? (why ? `可卖数量为 0（${why}，或已挂借融券）` : '可卖数量为 0（已挂借融券）')
+            : `可卖数量不足，当前可卖 ${sellable} 股`;
           return { ok: false, error: precheck };
         }
         // 融资负债预检：深跌破位时卖出款可能盖不住将偿还的负债，此时要求现金补差。
@@ -1133,7 +1200,7 @@ class Market {
         // 必须先预览再预留：previewFinanceDebt 只看未预留批次，先 reserve 会把自己的
         // 预留段算成"他人占用"，预览金额直接归零（与 BUY_CLOSE 的保证金预览同一口径）
         const repayPreview = account.previewFinanceDebt(this.stock.id, qty);
-        if (!account.reserveLong(this.stock.id, qty, now, bk.lockMs)) {
+        if (!account.reserveLong(this.stock.id, qty, now, unlock)) {
           return { ok: false, error: '可卖数量不足' };
         }
         if (repayPreview > 0 && account.cash + price * qty < repayPreview + r2(price * qty * feeRate)) {
@@ -1190,13 +1257,24 @@ class Market {
         break;
       }
       case ACTIONS.BUY_CLOSE: {
-        if (account.coverableShort(this.stock.id) < qty) {
+        // 空头与多头对称地受锁仓约束（T+1）：当天开的空当天平不掉，否则
+        // "多头锁死、空头随便平"就是个只赚不赔的套利口子。滑泰 T+0 两家都不受限。
+        // 没有交易日时钟（单测 / 无钟模式）时退回「空头无锁」的老行为——那时不存在"次日"。
+        const hasClock = !!(this.dayCycle && this.dayCycle.ok);
+        const unlockShort = account.isNPC || !hasClock ? 0 : this.lockFnFor(account, now);
+        const coverable = account.coverableShort(this.stock.id, now, unlockShort);
+        if (coverable < qty) {
+          const lockedShort = account.coverableShort(this.stock.id) - coverable;
+          const why = this.lockTextFor(account, now);
+          if (lockedShort > 0 && coverable <= 0) {
+            return { ok: false, error: why ? `可平数量为 0（${why}）` : '空头持仓不足' };
+          }
           return { ok: false, error: '空头持仓不足' };
         }
         // 先预览再预留：preview 只看未预留批次，若先 reserve 会把本单自己的
         // 预留段也算成"他人占用"，预览金额直接归零
         const released = account.previewShortMargin(this.stock.id, qty);
-        if (!account.reserveShort(this.stock.id, qty)) {
+        if (!account.reserveShort(this.stock.id, qty, now, unlockShort)) {
           return { ok: false, error: '空头持仓不足' };
         }
         freeze = r2(price * qty * feeRate);
@@ -1679,7 +1757,7 @@ class Market {
       acc.cash = r2(acc.cash + proceeds - marginAdd - fee);
       acc.shortMargin = r2(acc.shortMargin + marginAdd);
       if (!isGhost) {
-        acc.shortPos(order.stockId).lots.push({ qty, price, margin: marginAdd, reserved: 0 });
+        acc.shortPos(order.stockId).lots.push({ qty, price, margin: marginAdd, ts: now, reserved: 0 });
         acc.realizedPnL = r2(acc.realizedPnL - fee);
         this.shortInterest += qty;
         // 借券开仓：释放下单占用、计入已借出（裸空后门不走池）

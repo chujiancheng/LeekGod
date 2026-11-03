@@ -260,8 +260,9 @@
 
     renderNews();
     draw();
-    // 拉分时（日线在 draw 里按需拉）
-    GS.api.loadHistory(state.stockId).then(() => draw());
+    // 拉分时（日线在 draw 里按需拉）。**按当前模式定窗口**：左右翻票会保留玩家选的
+    // 图表类型，翻到「五日」时只拉 1 天就画不出前 4 天（见 api.loadHistory 的 days）
+    GS.api.loadHistory(state.stockId, state.mode === '5d' ? 5 : 1).then(() => draw());
     startWatch();
 
     if (dir) playSlide(root, dir);
@@ -506,6 +507,12 @@
       state.cursor = -1;
       el.querySelectorAll('#chartTabs button').forEach((b) => b.classList.toggle('on', b === t));
       if (state.mode !== 'min' && state.mode !== '5d') ensureBars();
+      // 「五日」要比默认多 4 天的历史（默认只拉了今天，见 api.loadHistory）：
+      // 补拉一次再重画，否则切过去只画得出今天这一段
+      if (state.mode === '5d') {
+        GS.api.loadHistory(state.stockId, 5).then(() => draw());
+        return;
+      }
       draw();
     });
   }
@@ -1510,7 +1517,7 @@
         (halt.until ? '，预计 ' + fmtTime(halt.until) + ' 恢复' : '') +
         '<span class="ht-sub">停牌期间不撮合、不能下单</span></div>';
     } else if (day && !day.trading) {
-      // 午休与夜间是两种完全不同的「休市」：一个 40 秒后继续交易，一个结算完才开新的一天。
+      // 午休与夜间是两种完全不同的「休市」：一个几分钟后继续交易，一个结算完才开新的一天。
       // 原先共用一句「休市期间不能下单」，玩家分不清是午休还是已经收盘
       const night = day.phase === 'night';
       const left = num(day.phaseLeftMs);

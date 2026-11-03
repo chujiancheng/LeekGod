@@ -47,7 +47,11 @@ const config = {
     // 验收/调试仍必须用 PERSIST_FILE 显式指临时库，别碰正式档；想开新一局直接删掉这个文件。
     file: process.env.PERSIST_FILE || 'D:/GushenData/game.db',
     // 兜底全量扫描：每 tick 轮转写入 1/sweepTicks 的账户。
-    // 正常路径靠脏标记精确落盘，这里是防御"某条改钱路径漏标脏"的保险，设为 0 关闭
+    // 正常路径靠脏标记精确落盘，这里是防御"某条改钱路径漏标脏"的保险，设为 0 关闭。
+    // 300 个 tick = 15 分钟墙钟（tick 3s）。旧口径 300 tick = 3.5 分钟，日长改 1:1 后
+    // 轮一圈慢了 4.3 倍——但这是**保险**不是正确性窗口（真正的丢账窗口是单 tick），
+    // 而每 tick 的写入量是 ceil(账户数/sweepTicks)，调小会同比放大写放大，故不跟着改。
+    // 要改先看 D:/GushenData/game.db 的写入速率（正式档在机械盘上）。
     sweepTicks: 300,
     // 成交流水（trades）保留窗口，每 tick 按时间裁掉更早的行。
     // 这张表只有两处读取：每只股票恢复逐笔（最近 500 条）与玩家成交记录（最近 100 条），
@@ -55,27 +59,43 @@ const config = {
     tradeKeepMs: Number(process.env.TRADE_KEEP_MS || 10 * 60 * 1000),
   },
 
-  // 行情推进间隔（毫秒）
-  tickIntervalMs: 700,
+  // 行情推进间隔（毫秒）。
+  //
+  // 2026-11-02 起把「一天」改成**拟真口径**：交易时段与现实 1:1（见下方 day.phases），
+  // tick 从 0.7 秒改成 3 秒——这正是真实行情快照的频率（沪深 Level-1 每 3 秒一笔），
+  // 于是"玩家看到的刷新节奏 = 真实市场节奏"，整套盘口/冲击/成交密度的标定终于有了现实参照系。
+  // 一天 5200 tick（旧口径 886 tick）。**凡是按 tick 记的参数都必须跟着重标**：
+  //   · 时长类（阶段长度、计划存活、冷却、意图持续时间）  × 5.871  —— 保住「一天里发生几次」
+  //   · 强度类（每 tick 漂移、每 tick 噪声、每 tick 触发概率）÷ 5.871  —— 保住「一天的累计量」
+  //   · 噪声类按 √5.871（随机游走的方差随步数线性增长，不是线性）
+  // 下面各处的数字都已按这个规则改过，注释里标了原值与换算依据；改 tickIntervalMs
+  // 或 day.phases 之后**必须重跑** test/day-probe.js 与 test/npc-probe.js 复核。
+  tickIntervalMs: 3000,
 
   // 交易日时钟（见 src/daycycle.js）。
   // 引入「天」之后解锁的是整套日频机制：集合竞价、收盘价结算、隔夜跳空、涨跌停、委托当日作废。
-  // 时间轴刻意**不按真实时长等比压缩**：真实 A 股盘中 250 分钟压到 10 分钟是 25 倍，
-  // 等比压缩下收盘竞价只剩 7 秒、玩家来不及反应。竞价与尾盘是博弈密度最高的两段，
-  // 这里给它们超额配时（两段竞价合计 50 秒 = 一天的 8%，真实市场只占 5% 的时间却承担 80% 的博弈）。
-  // 一天 620 秒 ≈ 10 分 20 秒；`gameTime`/`gameMs` 把游戏内进度线性映射到真实时刻，
-  // 于是客户端顶栏能直接显示 09:15 / 14:57，玩家顺带学会真实规则。
+  //
+  // **2026-11-02 改版：交易时段与现实 1:1，只快进两段休市。**
+  // 旧口径把 250 分钟盘中压成 10 分 20 秒（25 倍），好处是节奏快，代价是 T+1、隔夜跳空、
+  // 盘后消息发酵全部失去真实含义（"隔一夜"只有 40 秒）。现在反其道：
+  //   - 09:30~11:30 / 13:00~14:57 就是实打实的 120 / 117 分钟，**看表即看盘**；
+  //   - 开盘竞价 10 分钟压到 5 分钟（玩家不必干等，仍保留 09:20 那条不可撤单硬线的一半）；
+  //   - 午休 90 分钟压到 5 分钟，夜间 18 小时压到 10 分钟（快进，UI 要有明示）。
+  // 合计 260 分钟 = 4 小时 20 分，可交易占 94%。改这里的 ms 会同时改变 tick 数与所有
+  // 按 tick 标定的日尺度参数，**必须重跑 day-probe / npc-probe**（见 Doc/项目知识.md §3.1）。
   day: {
     enabled: true,
     phases: [
-      // 开盘集合竞价：前 20 秒自由撤单 + 后 10 秒锁死（真实市场 09:20 那条硬线）
-      { key: 'auction', label: '开盘集合竞价', gameTime: '09:15', gameMs: 10 * 60000, ms: 30 * 1000, trading: true, auction: 'open', cancelLockMs: 10 * 1000 },
-      { key: 'morning', label: '上午连续竞价', gameTime: '09:30', gameMs: 120 * 60000, ms: 230 * 1000, trading: true },
-      { key: 'lunch', label: '午间休市', gameTime: '11:30', gameMs: 90 * 60000, ms: 40 * 1000, trading: false },
-      { key: 'afternoon', label: '下午连续竞价', gameTime: '13:00', gameMs: 117 * 60000, ms: 260 * 1000, trading: true },
-      // 收盘集合竞价：同样后 10 秒锁死，但只有 20 秒，张力最大
-      { key: 'closeAuction', label: '收盘集合竞价', gameTime: '14:57', gameMs: 3 * 60000, ms: 20 * 1000, trading: true, auction: 'close', cancelLockMs: 10 * 1000 },
-      { key: 'night', label: '休市结算', gameTime: '15:00', gameMs: 1095 * 60000, ms: 40 * 1000, trading: false },
+      // 开盘集合竞价：5 分钟实时映射 09:15→09:25，最后 2.5 分钟锁死（= 现实 09:20 那条线）
+      { key: 'auction', label: '开盘集合竞价', gameTime: '09:15', gameMs: 10 * 60000, ms: 5 * 60000, trading: true, auction: 'open', cancelLockMs: 150 * 1000 },
+      { key: 'morning', label: '上午连续竞价', gameTime: '09:30', gameMs: 120 * 60000, ms: 120 * 60000, trading: true },
+      { key: 'lunch', label: '午间休市', gameTime: '11:30', gameMs: 90 * 60000, ms: 5 * 60000, trading: false },
+      { key: 'afternoon', label: '下午连续竞价', gameTime: '13:00', gameMs: 117 * 60000, ms: 117 * 60000, trading: true },
+      // 收盘集合竞价：3 分钟实时映射 14:57→15:00，最后 1 分钟锁死（14:59 之后撤不掉）
+      { key: 'closeAuction', label: '收盘集合竞价', gameTime: '14:57', gameMs: 3 * 60000, ms: 3 * 60000, trading: true, auction: 'close', cancelLockMs: 60 * 1000 },
+      // 夜间：18 小时压到 10 分钟。**必须够长**——隔夜跳空、盘后公告、次日重新定价都在这里发生，
+      // 而且 `overnightDriftMul` 是按这段的 tick 数标定的（见 npc.overnightDriftMul）
+      { key: 'night', label: '休市结算', gameTime: '15:00', gameMs: 1095 * 60000, ms: 10 * 60000, trading: false },
     ],
   },
 
@@ -136,8 +156,21 @@ const config = {
   // 交易规则
   trade: {
     feeRate: 0.0001, // 手续费 万分之一
-    cooldownMs: 2000, // 同一玩家两次下单最小间隔
-    lockMs: 10 * 1000, // 买入锁仓时间（T+10秒）
+    // 同一玩家两次下单最小间隔（防连点/防脚本，与「一天多长」无关，故未随日历改动）。
+    // 注意它必须小于 tick（3 秒），否则玩家会在一个 tick 里堆多张单、撮合时序变得不可预期。
+    cooldownMs: 2000,
+    /**
+     * 买入锁仓口径（2026-11-02 起从「固定时长」改成「跨日政策」）：
+     *   t0        成交即可卖（滑泰专属特权：全服唯一的日内 T+0）
+     *   t1-open   锁到**次日开盘集合竞价开始**（09:15，能在竞价里挂卖单）
+     *   t1        锁到**次日开盘集合竞价结束**（09:25，开盘连续竞价才可卖）
+     * 语义是真实 A 股的 T+1——买在今天的仓位，最早明天才走。实现见 Market.lockFnFor：
+     * 解锁时刻由「成交时间 + 交易日时钟」算出来，是纯函数，不落库、重启后依然成立。
+     */
+    lock: 't1',
+    // 兜底时长：**只在没有交易日时钟时生效**（单元测试、day.enabled=false 的无钟模式）。
+    // 有钟时一律走上面的 lock 口径，这个字段与券商无关，不要拿它做差异化。
+    lockMs: 10 * 1000,
     maxDeviation: 0.5, // 玩家委托价相对最新价的最大偏离（送错价格保护）
     // 价格笼子：单笔成交价相对上一笔成交价的最大偏离。
     // 成交价取被动方挂单价，所以脱离盘口的挂单一旦被吃，就能把最新价一把拉走，
@@ -245,9 +278,16 @@ const config = {
     finance: {
       enabled: true,
       ratio: 0.5, // 开多自备比例（含手续费外的成交市值部分），1/杠杆倍数
-      baseMinuteRate: 0.0001, // 基础 0.01%/分钟（≈14.4%/日，与融券同档）
+      // **按游戏日计息**（2026-11-02 随一天长度改为 4 小时 20 分一起明确）：
+      // 旧口径是「0.0001/分钟 × 620 秒一天 ≈ 0.103% 每游戏日」，换算成日息就是 0.1%，
+      // 与融券日息 0.1%~0.4% 同档。改成按分钟硬收会让新的一天（260 现实分钟）
+      // 直接变成 2.6%/天，杠杆玩法当场报废——所以这里以**日利率**为准，按 dayMs 摊到 tick。
+      dayRate: 0.001, // 日息 0.1%
+      maxDayRate: 0.004, // 封顶 0.4%/日
       stressK: 3, // 现金耗尽时利率上浮到 base × 4
-      maxMinuteRate: 0.0004, // 封顶 0.04%/分钟
+      // 兼容字段：给客户端做"每分钟大概烧多少钱"的实时预估（按当前一天长度折出来的分钟息）
+      baseMinuteRate: 0.0001,
+      maxMinuteRate: 0.0004,
       // NPC 买入容量 = 全款容量 × 该系数：只有超出全款容量的部分才走融资单。
       // 1.2 ≈ 最多约 17% 名义是借入的——现金吃紧时才温和加杠杆，
       // 防止 NPC 在 2 倍口径下无节制融资、被利息持续烧掉权益
@@ -316,7 +356,7 @@ const config = {
         spread: [0.0005, 0.0015],
         requoteQty: [30000, 100000],
         aggressiveQty: [10000, 40000],
-        aggressiveRate: 0.16,
+        aggressiveRate: 0.011, // 原 0.16 → 0.027（÷5.871）→ 0.011（换手率收口到 ~5%）
         polarOrderScale: true, // 分歧度放大挂单/吃单（多空大战放量）
         openShortSentiment: -0.15,
       },
@@ -335,7 +375,7 @@ const config = {
         spread: [0.0008, 0.002],
         requoteQty: [8000, 30000],
         aggressiveQty: [3000, 15000],
-        aggressiveRate: 0.35,
+        aggressiveRate: 0.024, // 原 0.35（游资最急）；见 inst 那行的换算说明
         polarOrderScale: false,
         openShortSentiment: -0.12,
         quoteTilt: 0.35,
@@ -356,7 +396,7 @@ const config = {
         spread: [0.001, 0.0025],
         requoteQty: [3000, 12000],
         aggressiveQty: [1000, 5000],
-        aggressiveRate: 0.14,
+        aggressiveRate: 0.01, // 原 0.14
         polarOrderScale: false,
         openShortSentiment: -9,
         quoteTilt: 0.3,
@@ -377,7 +417,7 @@ const config = {
         spread: [0.001, 0.003],
         requoteQty: [800, 4000],
         aggressiveQty: [300, 1500],
-        aggressiveRate: 0.12,
+        aggressiveRate: 0.008, // 原 0.12
         polarOrderScale: false,
         openShortSentiment: -9,
         quoteTilt: 0.25,
@@ -397,7 +437,7 @@ const config = {
         spread: [0.001, 0.003],
         requoteQty: [100, 800],
         aggressiveQty: [100, 500],
-        aggressiveRate: 0.1,
+        aggressiveRate: 0.007, // 原 0.1
         polarOrderScale: false,
         openShortSentiment: -9,
         quoteTilt: 0.2,
@@ -458,8 +498,10 @@ const config = {
     // 注意力分层决定每个人每轮看几只票，也决定性能上限（方案 §4.2）。
     cross: {
       enabled: true,
-      // 每类投资者每 tick 尝试看外股的概率（真实投资者也不是每秒都在刷行情）
-      rate: { inst: 0.1, hot: 0.16, big: 0.07, mid: 0.09, small: 0.12 },
+      // 每类投资者每 tick 尝试看外股的概率（真实投资者也不是每秒都在刷行情）。
+      // ÷5.871（0.1/0.16/0.07/0.09/0.12 → 0.017/0.027/0.012/0.015/0.02）：
+      // tick 密了 5.87 倍，不降的话跨股成交量会整段 ×5.87
+      rate: { inst: 0.017, hot: 0.027, big: 0.012, mid: 0.015, small: 0.02 },
       // 同时关注几只（含本股）：机构看全场，散户只盯两只
       watch: { inst: 10, hot: 3, big: 4, mid: 3, small: 2 },
       // 关注面里留给「已有外股持仓」的名额：不给自己持仓留位，不在榜上的票永远卖不掉
@@ -496,8 +538,10 @@ const config = {
       // 每 tick 最多成交几笔外股交易（**全市场**闸门，316 个池共用一份，
       // 防止同一 tick 里所有投资者一起往热门股上砸单把盘口打穿）
       maxTradesPerTick: 12,
-      // 耐心：同一账户两次外股操作的最小间隔（tick）
-      cooldownTicks: { inst: 6, hot: 2, big: 10, mid: 8, small: 5 },
+      // 耐心：同一账户两次外股操作的最小间隔（tick）。
+      // ×5.871（6/2/10/8/5 → 35/12/59/47/29）：与上面 rate 反向配套，
+      // 否则「看外股更频繁 + 冷却没变」会让同一批钱一天里反复来回搬
+      cooldownTicks: { inst: 35, hot: 12, big: 59, mid: 47, small: 29 },
     },
 
     // 单账户持股上限 = 初始持仓 × longCapMult。太小会让机构在单边行情里
@@ -542,7 +586,9 @@ const config = {
     // 意图状态不落盘（与 fairValue/fund/regime 同寿命），重启即重新观察。
     intent: {
       enabled: true,
-      warmupTicks: 200, // 开局先看盘，不立刻动手
+      // 开局先看盘，不立刻动手。**这里刻意不按日尺度换算**：×5.871 会变成开盘后
+      // 整整 59 分钟没人动手；按现实时间给 3 分钟（60 tick）才符合「开盘先看一会儿」
+      warmupTicks: 60,
       depthAware: true, // 主动单按对手最优档承接力约束（不留超量残单在盘口）
       aggroDepthMult: 3, // 单笔主动量 ≤ 对手最优档剩余量 × 该系数
       // 盘口承接力地板：主动卖单不下手于比这更薄的买盘。
@@ -559,8 +605,9 @@ const config = {
         minShortFloatRatio: 0.05, // 空头存量 / 流通盘 门槛
         minLendUtilization: 0.45, // 券源被借走比例门槛（借不到券才是逼空的燃料）
         minForce: 0.1, // 力量天平门槛：多头至少不处劣势才挤得动空头
-        durationTicks: [150, 500],
-        cooldownTicks: [1200, 3000],
+        // ×5.871：150~500 tick → 881~2936（≈44~147 分钟）；冷却 1200~3000 → 7045~17613
+        durationTicks: [881, 2936],
+        cooldownTicks: [7045, 17613],
         power: [0.7, 1.3],
         bias: 1.1, // 情绪附加：> 0.65 即触发"不看价地扫单"
         aggroBoost: 2.0, // 主动吃单量放大
@@ -581,8 +628,9 @@ const config = {
         // 的命中率是 0.00%——拿它当门槛等于这条战术永不触发
         maxLevel: -0.25, // 大级别跌掉四分之一才算低位
         maxForce: 0.3, // 力量天平门槛：多头强势期不吸筹（那是接飞刀）
-        durationTicks: [200, 600],
-        cooldownTicks: [1200, 3000],
+        // ×5.871：200~600 → 1174~3523（≈59~176 分钟）；冷却同上
+        durationTicks: [1174, 3523],
+        cooldownTicks: [7045, 17613],
         power: [0.7, 1.3],
         lureRatio: 0.25, // 前 25% 时长是"诱空砸盘"铺垫段
         lureBias: -0.55, // 铺垫段：主动卖，把价格打下去
@@ -607,8 +655,9 @@ const config = {
         // 获利盘越重、天平越往下走，两个条件永远凑不到一起
         minForce: -0.2,
         minMomentum: 0, // 要有追涨的动量盘才谈得上"诱多"
-        durationTicks: [150, 500],
-        cooldownTicks: [1200, 3000],
+        // ×5.871：150~500 → 881~2936；冷却同上
+        durationTicks: [881, 2936],
+        cooldownTicks: [7045, 17613],
         power: [0.7, 1.3],
         lureRatio: 0.2, // 前 20% 时长是"诱多拉抬"铺垫段
         lureBias: 0.6, // 铺垫段：小幅拉抬，做出突破的样子
@@ -654,7 +703,7 @@ const config = {
         bias: 0.45,
         aggro: [0.55, 1.45],
         intentChance: [0, 0.55],
-        planTicks: [80, 900],
+        planTicks: [470, 5284], // ×5.871：80~900 → 470~5284
       },
       // 唯一大模型主力：账号 `AI·一号主力`（续跑沿用该名，避免旧档多出一只无脑 AI）
       whales: [
@@ -689,9 +738,9 @@ const config = {
       // leadMs 要覆盖"推理耗时 + 重试"：实测单次 4~26s、最慢 25.7s，25s 提前量会让订单
       // 刚好卡在竞价开始那一刻甚至更晚，所以留 45s（下午段 260s，余量足够）。
       preTrigger: { phase: 'afternoon', leadMs: 45000, dedupeKey: 'closeAuction' },
-      // 计划存活 tick 数：交易日约 886 tick，480 ≈ 336s（覆盖到午后），
-      // 写回时再夹进 clamp.planTicks；旧值 200 只覆盖 26% 的交易日
-      defaultPlanTicks: 480,
+      // 计划存活 tick 数：一天 5200 tick，2818 ≈ 2.3 小时（覆盖到午后）。
+      // 写回时再夹进 clamp.planTicks。旧口径 480/886 ≈ 54% 个交易日，这里保持同一比例
+      defaultPlanTicks: 2818,
       // 聪明钱情绪偏置增益（机构 1、游资打折）；被动类型不受 llmPlan 影响
       biasScale: {
         hot: 0.55,
@@ -768,15 +817,20 @@ const config = {
     // 调参用 `node test/day-probe.js [局数] [天数] [on|off]`——off 看原始日波动定 pct、
     // on 看贴板观感，和 `npc-probe.js` 的买盘空档率 / 强平次数一起盯。
     trend: {
-      phaseMinTicks: 45, // 阶段最短 ~30 秒
-      phaseMeanTicks: 260, // 时长均值 ~3 分钟（指数分布），一天约 3.4 段
-      phaseMaxTicks: 1200, // 时长硬上限 ~14 分钟
+      // 时长（×5.871）：45/260/1200 → 264/1526/7045 tick。3 秒一 tick 下即 13 分钟均值、
+      // 一天 5200 tick ≈ 3.4 段——与旧口径「一天 3.4 段」的日内故事线完全一致
+      phaseMinTicks: 264, // 阶段最短 ~13 分钟
+      phaseMeanTicks: 1526, // 时长均值 ~76 分钟（指数分布），一天约 3.4 段
+      phaseMaxTicks: 7045, // 时长硬上限 ~5.9 小时（跨日）
       flatWeight: 0.3, // 抽中震荡阶段（g=0）的概率
       weights: [0.62, 0.3, 0.08], // 温和 / 强 / 极端 的抽中权重
+      // 每 tick 对数漂移（÷5.871，原值 0.0000145/0.000068/0.000195/0.00039）。
+      // 阶段长度同步 ×5.871，所以「单阶段幅度」与「日收益分布」原样保留：
+      // 温和段单阶段仍是 ±0.4%~1.8%，极端段仍能连板
       bands: [
-        [0.0000145, 0.000068], // 温和：单阶段（~260 tick）±0.4%~1.8%
-        [0.000068, 0.000195], // 强：单阶段 ±1.8%~5.1%
-        [0.000195, 0.00039], // 极端：单阶段 ±5%~10%——正好能打出连续涨停 / 跌停
+        [0.0000025, 0.0000116], // 温和：单阶段（~1526 tick）±0.4%~1.8%
+        [0.0000116, 0.0000332], // 强：单阶段 ±1.8%~5.1%
+        [0.0000332, 0.0000664], // 极端：单阶段 ±5%~10%——正好能打出连续涨停 / 跌停
       ],
     },
     // 行情周期层：牛 / 熊 / 震荡三态的**周月级**慢推力（2026-10-18 新增）。
@@ -792,7 +846,8 @@ const config = {
     //   A 股「牛短熊长、暴涨缓跌」之外的另一半事实：涨多跌少
     // - 状态内幕：cycleDir 与 fund/regime 同级，不下发客户端，玩家只能从盘面与消息猜
     // - 隔夜折算：夜间推力按 overnightDriftMul 放大，抽出的目标涨幅先按一日的有效
-    //   推力当量（≈886 tick × 1.77）折算，否则周期幅度会凭空放大近一倍
+    //   推力当量（一天 tick 数 × 隔夜放大系数）折算，否则周期幅度会凭空放大近一倍
+    //   ——代码里按 config.tickIntervalMs 与 day.phases 现算（npc.updateCycle），不写死
     // 上线前用 day-probe.js / npc-probe.js 复核强平次数、贴板率与买盘空档（连续单边段
     // 是杠杆/补款/涨跌停从未承受过的新压力源）
     cycle: {
@@ -825,14 +880,14 @@ const config = {
       greedGain: 1.4, // 近期上涨对 mood 的冲击（故意更弱：恐慌比贪婪猛）
       ddGain: 1.6, // 距峰值回撤加深恐惧（dd 为负）
       cyclePrior: 0.15, // 周期方向先验：牛周期里 baseline 略偏贪婪
-      halfLifeTicks: 320, // mood 逼近目标的半衰期（≈0.36 个游戏日）
+      halfLifeTicks: 1879, // mood 逼近目标的半衰期（×5.871，仍是 ≈0.36 个游戏日）
       // 不对称定价：跌更狠、反弹更弱（方向敏感，不抬总波动）
       panicAsym: 1.25, // 负向漂移放大 1 + panic×this（mood<0 且 push<0）
       panicReboundDamp: 0.4, // 恐慌时正向漂移收力到 1 − panic×this（反弹无力）
       greedAsym: 0.45, // 正向漂移放大 1 + greed×this（mood>0 且 push>0）
       greedDipDamp: 0.25, // 贪婪时负向漂移收力到 1 − greed×this（惜售）
       blowoffGain: 0.55, // 赶顶：贪婪 × 近期已涨 → 额外上推（加速段）
-      blowoffCap: 0.012, // 赶顶额外推力每 tick 上限（防失控）
+      blowoffCap: 0.002, // 赶顶额外推力每 tick 上限（÷5.871，原 0.012；防失控）
       // 波动聚集：恐慌时噪声更大（跌得急、反弹毛刺多）；幅度收着点，别把日 std 推太高
       volGain: 0.5,
       panicVolAsym: 1.3, // 恐慌侧波动再乘这个（不对称）
@@ -855,14 +910,16 @@ const config = {
     // 交易日**——今天涨 20% 明天先抹 10%，任何趋势都活不过两天。这是「半年无牛熊」的
     // 主凶（2026-10-18 诊断：VR20 实测 0.09~0.18，价格是围绕发行价的均值回归而非随机游走）。
     // 降到 2e-5（半衰期 ≈ 39 个游戏日）后只做超长期的数值保险丝，周月级趋势由 cycle 层承载
-    fundAnchor: 0.00002,
-    fundNoiseRel: 0.0006,
+    // ÷5.871：2e-5 → 3.4e-6。半衰期（tick）= ln2/rate，一天 tick 数涨了 5.87 倍，
+    // 不跟着降的话「≈39 个游戏日」的保险丝会缩成 6.7 天，周月级趋势又会被均值回归抹平
+    fundAnchor: 0.0000034,
+    fundNoiseRel: 0.00025, // ÷2.42（=√5.871）：随机游走的总方差按步数线性增长
     // 公允价值向重心回归 / 向最新价跟随的强度
     fvAnchor: 0.025,
     priceCoupling: 0.04,
-    noiseRel: 0.0012, // 每 tick 相对噪声（管毛刺，不管趋势）
+    noiseRel: 0.0005, // 每 tick 相对噪声（管毛刺，不管趋势）；÷2.42 = √5.871，日噪声总幅度不变
     // 休市（午休 / 夜间）时公允价值仍随趋势与消息迁移，但报价与撮合冻结。
-    // 日内 40 秒的休市要折算真实世界的「一夜」，所以推力按倍数放大：
+    // 日内的 10 分钟休市要折算真实世界的「一夜」，所以推力按倍数放大：
     // 阶段结束时 NPC 拿着已经走远的定价锚重新报价，**隔夜跳空**就是这么来的
     // （跳空幅度 ≈ 漂移 / priceCoupling，再被涨跌停夹在区间内）。
     // 真实口径：十只原型港股近两年 5030 个「股票×交易日」的**开盘跳空 std 1.82%**、
@@ -876,7 +933,24 @@ const config = {
     // 试探远价，跳空只吃到放大效果的一半（实测 8% 缓冲：不收敛 std 2.90% / ≥3% 占 15%，
     // 有收敛档 std 1.54% / ≥3% 占 6.7%）。改这一项要连 `auctionCushionOpen` /
     // `auctionConvergeMs` 一起看，并用 `day-probe.js` 盯跳空分布
-    overnightDriftMul: 13,
+    //
+    // 2026-11-02 日长改 1:1 后重标：13 → 21.75。
+    // 13 是按旧夜段 57 tick（40s / 700ms）标定的，累计夜推力 = 57 × 13 = 741「tick 当量」。
+    // 新夜段是 200 tick（10min / 3s），而 trend bands 已按 ÷5.871 缩过，所以
+    //   mul = 57 × 13 × 5.871 / 200 ≈ 21.75
+    // 才能还原同一个 741 当量。不重标的后果实测过（day-probe 2026-11-02）：开盘跳空
+    // 中位 0.35% / std 0.83% / ≥3% 占 0%，只有标定目标（std 1.54~1.82%、≥3% 占 7.7%）的一半。
+    // 注意 `updateCycle` 的 `_nightBoost` 会自动跟随本值（周期层不需要另改），
+    // 但 trend 层没有归一化，靠的就是这个手算值。
+    //
+    // **实测（60 个「股票×交易日」，同一组种子 A/B）**：
+    //   mul 13   → 跳空 std 0.77% / ≥3% 占 0.0% / 日收益 std 3.84%
+    //   mul 21.75→ 跳空 std 1.14% / ≥3% 占 1.7% / 日收益 std 4.48%（落在 1.4~1.7× 真实的目标内）
+    //   mul 30   → 跳空 std 1.10% / ≥3% 占 3.3% / 日收益 std 4.84%
+    // 第三条说明**再加倍已经没用**：开盘跳空被竞价收敛档（`auctionCushionOpen` /
+    // `auctionConvergeMs`）夹住了，漂移再大也只泄漏一小部分到开盘价，代价却是日波动被
+    // 推到目标区间之外。跳空还想更大，要动的是**收敛档**，不是这个倍数。
+    overnightDriftMul: 21.75,
     // 夜间基本面重心跟着同一倍数一起迁移。**不放大重心的话跳空根本建不起来**：
     // 机构的定价锚是 `fund`（fundWeight 0.7），重心不挪 → 这批报价一夜之间"没改口"，
     // 而它们又是竞价簿里单量最大的一侧，最大成交量原则算出的开盘价被硬生生拉回昨收附近。
@@ -918,7 +992,8 @@ const config = {
     // 空头保证金会把全池现金吸干（开空时现金的一半进保证金），现金归零后
     // 没人买得动、盘面双向死锁——回补就是给做市商池子的"活水"，只补到地板不注水
     liquidityFloor: 42000000,
-    liquidityRefill: 0.02, // 每 tick 向地板回补剩余缺口的比例（~2 分钟补满）
+    liquidityRefill: 0.0034, // 每 tick 向地板回补剩余缺口的比例（÷5.871，原 0.02；
+    // 时间常数仍是「几十 tick」这一档，3 秒一 tick 下约 15 分钟补满，与旧口径的日内占比一致）
     // 2026-10-16 加的第二条判据（判据是**症状**，不是"人头够不够"）：
     // 实测（`diag-empty-bid`，24010 个连续竞价采样）买盘空档那一刻——占全部采样的 11.5%——
     // 全池现金仍占流通市值 18.75%，与有买盘的时刻（18.92%）几乎一样；
@@ -937,7 +1012,8 @@ const config = {
     // 而全池 62% 的现金压在 10 家机构手里：能挂买盘的账户只有约 6%。
     // 5 人/12 tick 太慢（316 户要补 90 轮 ≈ 18 分钟），这里提到 12 人 / 6 tick。
     liquidityTopUpHeads: 6,
-    liquidityTopUpCooldown: 6, // 补一次歇多少 tick（6 tick ≈ 4.2 秒）
+    liquidityTopUpCooldown: 6, // 补一次歇多少 tick（3 秒一 tick 下 ≈ 18 秒，刻意保持原 tick 数：
+    // 补盘是「按需」动作，不该跟着日尺度变慢）
     // 买盘深度目标（手）：**低于它就补，不再等整侧空**。
     // 原来判据是 `book.bids.length === 0`——只有整侧归零才动作，等于事后再救；
     // 而"买一到买五全空"的那一瞬玩家已经看见了（实测占连续竞价采样的 7.8%，
@@ -955,10 +1031,13 @@ const config = {
     // 竞价段**不递减**（竞价要的是委托累积，见 shouldRequote），竞价结束进入连续竞价
     // 后这些陈旧单才开始老化，2 tick 内清干净。
     aggroTtlTicks: 2,
-    // 游资/散户追涨杀跌的动量窗口（tick 数，约 1 分钟）：看最近一段涨跌幅而不是
+    // 游资/散户追涨杀跌的动量窗口（tick 数，约 15 分钟）：看最近一段涨跌幅而不是
     // vs 重心的偏离——顶部一旦横盘动量归零，情绪才能轮动出卖家，不会全员死多。
     // 各类强度 = momentumGain × types[x].momentumGainMul
-    momentumTicks: 90,
+    // 90 tick（旧口径 63 秒 = 一天的 10%）→ 300 tick（15 分钟 = 一天的 5.8%）。
+    // 按比例本该给 528（26 分钟），但那样动量盘看到的是「半小时前的行情」，追涨杀跌会明显滞后，
+    // 取 15 分钟折中：既不是 3 秒噪声，也不会慢到错过午后的反转
+    momentumTicks: 300,
     momentumGain: 2,
     momentumClamp: 0.3,
   },
@@ -1027,12 +1106,21 @@ const config = {
 
   // 随机消息（利多 / 利空）
   news: {
-    minIntervalMs: 20000,
-    maxIntervalMs: 60000,
-    durationMs: 60000, // 消息影响持续时间
+    // 2026-11-02 随「一天 = 4 小时 20 分」重标：节奏按**现实分钟**给，不再按 10 分钟一天的压缩比。
+    // 一天约 20~30 条消息（旧口径 620 秒里也是这个密度），玩家每 5~15 分钟遇到一条。
+    // 另外 minIntervalMs 必须 ≥ 收盘竞价段长（3 分钟），否则重排队后会有消息落进收盘竞价，
+    // 破坏「尾盘不发消息、张力交给竞价」这条设计（game.test [16] 钉住了它）。
+    minIntervalMs: 5 * 60000,
+    maxIntervalMs: 15 * 60000,
+    // 消息作用期：旧口径 60 秒 = 一天的 10%，新口径按同一比例给 ~26 分钟太长，
+    // 取 10 分钟（一天的 6.4%）——足够把一条利好走成一段行情，又不会赖着不走。
+    // ⚠️ 它和 fvDriftCoef 一起决定消息盘的总推力，改这两个数要重跑 day-probe。
+    durationMs: 10 * 60000,
     // 消息对公允价值的每 tick 相对推力（乘性：fv *= 1 + 推力，与价格无关）。
     // 调大 = 消息行情更凶
-    fvDriftCoef: 0.0015,
+    // 作用期从旧口径 60 秒（86 tick）拉到 10 分钟（200 tick），每 tick 推力反算成
+    // 0.00065（原 0.0015）：一条消息对公允价值的**总**推力维持 ≈13%，消息行情的力度不变
+    fvDriftCoef: 0.00065,
     // 消息方向跟随当前牛熊阶段的偏向强度：p(利好) = 0.5 + regimeBias × 阶段方向。
     // 0.2 → 牛市阶段 70% 消息利好、熊市阶段 70% 利空，让消息面与走势互相印证。
     // **regimeBias 只管分钟级趋势纹理**（3 分钟相位，翻得快、均值偏 0）；
@@ -1046,17 +1134,17 @@ const config = {
     // 按交易日阶段覆盖产出节奏与 scope 分布（key 对应 day.phases[].key）。
     // 没配的阶段回退到上面的 min/max + 三 scope 均匀抽；换阶段时节奏重新排队
     // （news.js maybeEmit），不跨阶段沿用上一段排出的倒计时。
-    //   盘前（开盘竞价 30s）：隔夜重磅密集落地，8~16s 一条、以「全体」隔夜宏观为主
-    //   盘中（上午/下午）    ：默认 20~60s、均匀抽
-    //   午休（40s）          ：18~35s 保底一条午间公告，scope 偏机构
-    //   收盘竞价（20s）      ：不配规则 → 重排队后首个候选 ≥20s 落在段外，恒无新消息
-    //                         （尾盘的张力交给竞价机制本身，不加消息料）
-    //   盘后（夜间 40s）     ：8~15s 公告密集、偏机构；个股消息改走「盘后公告」文案池，
-    //                         作用期由 game.tick 抬到次日开盘竞价结束（untilFloor）
+    //   盘前（开盘竞价 5min）  ：隔夜重磅密集落地，1.5~3 分钟一条、以「全体」隔夜宏观为主
+    //   盘中（上午/下午）      ：默认 5~15 分钟、均匀抽
+    //   午休（5min）           ：1.5~4 分钟保底一条午间公告，scope 偏机构
+    //   收盘竞价（3min）       ：不配规则 → 重排队后首个候选 ≥5 分钟落在段外，恒无新消息
+    //                            （尾盘的张力交给竞价机制本身，不加消息料）
+    //   盘后（夜间 10min）     ：2.5~5 分钟公告密集、偏机构；个股消息改走「盘后公告」文案池，
+    //                            作用期由 game.tick 抬到次日开盘竞价结束（untilFloor）
     phaseRules: {
-      auction: { minIntervalMs: 8000, maxIntervalMs: 16000, scopeWeights: { 全体: 0.6, 机构: 0.25, 散户: 0.15 } },
-      lunch: { minIntervalMs: 18000, maxIntervalMs: 35000, scopeWeights: { 全体: 0.35, 机构: 0.45, 散户: 0.2 } },
-      night: { minIntervalMs: 8000, maxIntervalMs: 15000, scopeWeights: { 全体: 0.3, 机构: 0.5, 散户: 0.2 } },
+      auction: { minIntervalMs: 90 * 1000, maxIntervalMs: 180 * 1000, scopeWeights: { 全体: 0.6, 机构: 0.25, 散户: 0.15 } },
+      lunch: { minIntervalMs: 90 * 1000, maxIntervalMs: 240 * 1000, scopeWeights: { 全体: 0.35, 机构: 0.45, 散户: 0.2 } },
+      night: { minIntervalMs: 150 * 1000, maxIntervalMs: 300 * 1000, scopeWeights: { 全体: 0.3, 机构: 0.5, 散户: 0.2 } },
     },
 
     // ---------------- 消息分层（信息不对称，见 Doc/消息分层方案.md） ----------------
@@ -1069,15 +1157,20 @@ const config = {
     // `publicAt - lead[tier]` 起可见。于是
     //   孕育期 = [t0, publicAt − lead_inst)、泄露期 = [.., publicAt)、公开期 = [publicAt, until)。
     lead: {
-      insiderMs: 6000, // L0 内幕（机构里再抽 insiderFrac 的一小撮）
-      instMs: 4000, // L1 机构（现有 type==='inst' 的聪明钱）
-      vipMs: 3000, // L2 情报玩家（招伤满额；按声誉星级 1/4 递进，见 broker.js）
+      // ⚠️ **毫秒数必须大于一个 tick（3000ms）才有意义**——可见性按 tick 判定，
+      // 提前量小于一帧时「有名额、看不见」，招伤那张招牌等于白买。
+      // 2026-11-02 日长改 1:1 后按 ×(3000/700) 重标（保住「提前多少帧」而不是「多少毫秒」）：
+      insiderMs: 26000, // L0 内幕（机构里再抽 insiderFrac 的一小撮；原 6000）
+      instMs: 17000, // L1 机构（现有 type==='inst' 的聪明钱；原 4000）
+      vipMs: 13000, // L2 情报玩家（招伤满额；按声誉星级 1/4 递进，见 broker.js；原 3000）
       publicMs: 0, // L3 公众
     },
     // 提前量按 scope 折扣：政策/宏观的内幕就是不存在（恒 0，完全维持现状）；
     // 研报/调研/大宗本来就是机构先知道（全额）；股吧小道本就是传言（打折）
     leadByScope: { 全体: 0, 机构: 1.0, 散户: 0.5 },
-    minLeadMs: 1400, // 最小生效提前量；折算后不足此值一律抬到它（否则「名义有、实际看不见」）
+    // 最小生效提前量 = 2 个 tick。旧口径 1400ms 是 2×700ms，新 tick 是 3000ms → 6000。
+    // 语义没变：星级递进折出来的 1★（3250ms）比 2 tick 还短，抬到这里才「看得见」
+    minLeadMs: 6000,
     insiderFrac: 0.1, // 机构里再抽多少比例当 L0（10 股各 10 个机构 → 每股 1 个）
     // 异动提示（§7.2 公平窗口）：个股在泄露期出现异动时给公众一条**模糊**提示——
     // 不点方向、不点原因、不说是谁。「偷偷买进」不能是纯黑箱，否则普通玩家只剩被割。
@@ -1116,8 +1209,14 @@ const config = {
   // 行情数据保留
   market: {
     tradeTapeSize: 500, // 逐笔成交保留条数
-    priceHistorySize: 10300, // 分时价格序列（tick 级，约 2 小时 @ 700ms）
-    dailyBarsKeep: 1000, // 日线（K 线）保留根数：内存与存档同一个上限，约 173 小时的游戏时间
+    // 分时价格序列（tick 级）。**这个数必须覆盖客户端的「5 日」窗口**：
+    // 一个交易日 = 4900 个连续竞价 tick + 4 个冻结段起点锚点 ≈ 4904 点
+    //（竞价 5min + 上午 120 + 下午 117 + 收盘竞价 3 = 245 分钟 = 4900 tick @3s），
+    // 5 日 ≈ 24520 点。留到 26000（≈5.3 日）。旧口径 10300 是按 700ms/886 tick
+    // 标定的（≈11.6 日），日长改 1:1 后若不跟着抬，「五日」视图只能画出最近 2 天。
+    // 改 tickIntervalMs 或 day.phases 之后必须重算：一天点数 = 可交易毫秒/ tickMs + 冻结段数
+    priceHistorySize: 26000,
+    dailyBarsKeep: 1000, // 日线（K 线）保留根数：内存与存档同一个上限，约 1000 个交易日（≈4 年）
     depthLevels: 5, // 五档盘口
   },
 
@@ -1482,7 +1581,7 @@ const config = {
         overrides: {
           feeRate: 0.0003,
           cooldownMs: 3000,
-          lockMs: 10000,
+          lock: 't1',
           financeRatio: 0.4,
           marginRatio: 0.4,
           lendCapacityMul: 1,
@@ -1504,13 +1603,13 @@ const config = {
         targetShare: 0.16,
         virtualClients: 2880,
         crowd: 0.34,
-        strengths: ['下单冷却 0.5 秒（全服最快）', 'T+锁仓砍半（5 秒）', '自动化策略槽 4 个（基准 2）'],
+        strengths: ['下单冷却 0.5 秒（全服最快）', 'T+0 日内交易（全服唯一：成交即可卖）', '自动化策略槽 4 个（基准 2）'],
         costs: ['融资最高仅 1.67×（借钱能力最弱）', '保证金比例 60%（最高）'],
         suitable: '打板、日内高频、挂自动化策略的人',
         overrides: {
           feeRate: 0.00015,
           cooldownMs: 500,
-          lockMs: 5000,
+          lock: 't0',
           financeRatio: 0.6,
           marginRatio: 0.6,
           lendCapacityMul: 0.9,
@@ -1532,19 +1631,19 @@ const config = {
         targetShare: 0.14,
         virtualClients: 2520,
         crowd: 0.28,
-        strengths: ['消息提前量满额 3 秒（L2 情报，按星级 1/4 递进）', '每日赠送免息券 ×1（当日利息全免）'],
+        strengths: ['消息提前量满额 13 秒（L2 情报，按星级 1/4 递进）', '每日赠送免息券 ×1（当日利息全免）'],
         costs: ['融券券源仅基准的 60%', '券息上浮 1.4×（做空又贵又难借到）'],
         suitable: '做多为主、跟消息面吃饭的人',
         overrides: {
           feeRate: 0.0002,
           cooldownMs: 2000,
-          lockMs: 10000,
+          lock: 't1',
           financeRatio: 0.5,
           marginRatio: 0.5,
           lendCapacityMul: 0.6,
           lendRateMul: 1.4,
           autoSlots: 2,
-          newsVipLeadMs: 3000,
+          newsVipLeadMs: 13000, // = config.news.lead.vipMs（日长 1:1 后由 3000 重标）
           freeCouponPerDay: 1,
           openGift: 0,
           liquidationBuffer: 0.05,
@@ -1571,7 +1670,7 @@ const config = {
         overrides: {
           feeRate: 0.00025,
           cooldownMs: 2000,
-          lockMs: 8000,
+          lock: 't1-open',
           financeRatio: 0.3,
           marginRatio: 0.3,
           maintenance: 0.25,
@@ -1606,7 +1705,7 @@ const config = {
         overrides: {
           feeRate: 0.00005,
           cooldownMs: 2500,
-          lockMs: 10000,
+          lock: 't1',
           financeRatio: 0.55,
           marginRatio: 0.55,
           lendCapacityMul: 0.9,
@@ -1638,7 +1737,7 @@ const config = {
         overrides: {
           feeRate: 0.0001,
           cooldownMs: 1500,
-          lockMs: 10000,
+          lock: 't1',
           financeRatio: 0.5,
           marginRatio: 0.5,
           maintenance: 0.33,

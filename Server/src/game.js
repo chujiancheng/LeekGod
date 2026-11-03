@@ -470,9 +470,10 @@ class Game {
     const restoreNow = Date.now();
     for (const acc of this.store.all()) {
       if (!acc.longs.size && !acc.shorts.size) continue;
-      const lockMs = this.brokerOf(acc, restoreNow).lockMs;
       for (const sid of new Set([...acc.longs.keys(), ...acc.shorts.keys()])) {
-        acc.syncReserved(sid, lockMs, restoreNow);
+        const mk = this.markets.get(sid);
+        const unlock = mk ? mk.lockFnFor(acc, restoreNow) : config.trade.lockMs;
+        acc.syncReserved(sid, unlock, restoreNow);
       }
     }
 
@@ -2104,6 +2105,7 @@ class Game {
     return {
         feeRate: bk.feeRate,
         cooldownMs: bk.cooldownMs,
+        lock: bk.lock,
         lockMs: bk.lockMs,
         marginRatio: bk.marginRatio,
         maintenance: bk.maintenance,
@@ -2119,7 +2121,9 @@ class Game {
           ratio: bk.financeRatio,
           baseMinuteRate: config.margin.finance ? config.margin.finance.baseMinuteRate : 0,
           maxMinuteRate: config.margin.finance ? config.margin.finance.maxMinuteRate : 0,
-          // 当前分钟息（百分数，0.01 = 0.01%/分）：1e6/1e4 比 r2 更干净地消掉浮点尾数。
+          // 日息口径（百分数，0.1 = 0.1%/游戏日）：计息按它，改一天长度不会改变融资成本体感
+          dayRate: Math.round(primary.financeDayRate() * 1e6) / 1e4,
+          // 当前分钟息（百分数）：只给前端做"每分钟烧多少钱"的实时预估
           // 融资利率按市场整体现金紧张度算，各股同一档，取第一只即可
           minuteRate: Math.round(primary.financeMinuteRate() * 1e6) / 1e4,
         },
@@ -2201,11 +2205,14 @@ class Game {
     const sid = stock.id;
     const market = this.markets.get(sid);
     const last = market.lastPrice;
-    // 锁仓时长按账户券商解析（滑泰 5 秒 / 天疯 8 秒 / 基准 10 秒）。
+    // 锁仓口径按账户券商解析（滑泰 T+0 / 天疯次日 09:15 / 其余次日 09:25）。
     // 这里与 market.place 的卖出闸门必须同源：早先两处各读各的（这里写死全局根值），
-    // 出现了「rules.lockMs 显示 5 秒、lockedUntil 与可卖却按 10 秒算」的自相矛盾
+    // 出现了「rules 显示 5 秒、lockedUntil 与可卖却按 10 秒算」的自相矛盾。
+    // 现在唯一事实源是 market.lockFnFor —— 它返回「(成交时刻)=>解锁时刻」的函数，
+    // UI 的 lockedUntil 与真正能不能卖因此永远是同一个数。
     const brokerCfg = bk || this.brokerOf(acc, now);
-    const lockMs = brokerCfg.lockMs;
+    const unlock = market ? market.lockFnFor(acc, now) : config.trade.lockMs;
+    const unlockAt = (ts) => (typeof unlock === 'function' ? unlock(ts) : ts + (unlock || 0));
     const longPos = acc.longs.get(sid);
     const shortPos = acc.shorts.get(sid);
     let longCost = 0;
@@ -2213,7 +2220,7 @@ class Game {
     if (longPos) {
       for (const lot of longPos.lots) {
         longCost += lot.qty * lot.price;
-        const lockedUntil = lot.ts + lockMs;
+        const lockedUntil = unlockAt(lot.ts);
         longLots.push({
           qty: lot.qty,
           price: r2(lot.price),
@@ -2231,7 +2238,13 @@ class Game {
       for (const lot of shortPos.lots) {
         shortCost += lot.qty * lot.price;
         shortMarginOfLots += lot.margin;
-        shortLots.push({ qty: lot.qty, price: r2(lot.price), margin: r2(lot.margin) });
+        shortLots.push({
+          qty: lot.qty,
+          price: r2(lot.price),
+          margin: r2(lot.margin),
+          ts: lot.ts == null ? null : lot.ts,
+          lockedUntil: lot.ts == null ? null : unlockAt(lot.ts),
+        });
       }
     }
     const longQty = acc.longQty(sid);
@@ -2298,7 +2311,7 @@ class Game {
         value: longValue,
         pnl: r2(longValue - longCost),
         lots: longLots,
-        sellable: acc.freeSellableLong(sid, now, lockMs),
+        sellable: acc.freeSellableLong(sid, now, unlock),
       },
       short: {
         qty: shortQty,
@@ -2307,14 +2320,14 @@ class Game {
         margin: r2(shortMarginOfLots),
         pnl: r2(shortCost - shortValue),
         lots: shortLots,
-        coverable: acc.coverableShort(sid),
+        coverable: acc.coverableShort(sid, now, unlock),
       },
       financeDebt: debt, // 融资负债（本金 + 已摊利息）
       financePrincipal: r2(acc.financePrincipal(sid)), // 其中还没还的借入本金
       financeInterest: r2(led ? led.financeInterestAccrued || 0 : 0), // 该股累计已计利息（展示用）
       liquidationPrice,
       liquidationPriceLong,
-      lending: this.serializeLending(acc, sid, lockMs),
+      lending: this.serializeLending(acc, sid, unlock),
     };
   }
 
@@ -2448,6 +2461,7 @@ class Game {
       // 有效数值（已含拥挤税与每周加成、已按星级折算）
       feeRate: bk.feeRate,
       cooldownMs: bk.cooldownMs,
+      lock: bk.lock,
       lockMs: bk.lockMs,
       financeRatio: bk.financeRatio,
       leverage: broker.leverageOf(bk.financeRatio),
@@ -2499,7 +2513,7 @@ class Game {
   }
 
   /** 账户在某只股票上的融券视角：可挂借、挂借中、被借走、可撤、累计利息 */
-  serializeLending(acc, stockId, lockMs) {
+  serializeLending(acc, stockId, unlock) {
     const m = this.markets.get(stockId);
     const stock = this.stocksById.get(stockId);
     const led = acc.ledger.get(stockId);
@@ -2507,11 +2521,11 @@ class Game {
     const lentOut = Math.floor(offered * m.lendUtilization());
     // 可撤口径必须与撤借闸门一致（含在途开空占用），否则 UI 显示可撤、点撤借却被拒
     const removable = m.lendRemovableQty(acc);
-    // 可挂借口径必须与 market.lendShares 的闸门同源——两处都按**账户券商的锁仓时长**
+    // 可挂借口径必须与 market.lendShares 的闸门同源——两处都按**账户券商的锁仓口径**
     const free = acc.freeSellableLong(
       stockId,
       Date.now(),
-      lockMs == null ? this.brokerOf(acc).lockMs : lockMs
+      unlock == null ? m.lockFnFor(acc) : unlock
     );
     return {
       stockId,
@@ -2528,7 +2542,7 @@ class Game {
   }
 
   /** 玩家资产排行（组合口径：跨全部股票的总权益）。展示名走昵称，账号另带一份供前端自行识别。
-   *  50 行 ≈ 14KB/帧（700ms 一帧）：玩家要看的榜太短就没意思，帧大头始终是行情段，这个量级可接受 */
+   *  50 行 ≈ 14KB/帧（tick 3000ms 一帧）：玩家要看的榜太短就没意思，帧大头始终是行情段，这个量级可接受 */
   leaderboard(limit = 50) {
     const priceOf = (s) => this.markets.get(s).lastPrice;
     const all = this.store
@@ -2565,7 +2579,7 @@ class Game {
    * 玩家榜**分页**（`GET /api/leaderboard?offset=&limit=`，排行 tab 翻页用）。
    *
    * 为什么不复用每帧下发的 `players`：那是 SSE 帧的一部分，每行 ≈280B，抬到几百行
-   * 会把 700ms 一帧的体量撑爆；而榜要能翻到全部玩家，所以翻页时按需拉一页。
+   * 会把每一帧（3000ms 一次）的体量撑爆；而榜要能翻到全部玩家，所以翻页时按需拉一页。
    *
    * 口径与 `leaderboard()` 完全同源（同一份排序、同一套字段、同一个 `brokerRank`），
    * 只是把切片交给调用方指定。名次**不写进行里**——客户端用 `offset + i` 算，
@@ -2961,10 +2975,17 @@ class Game {
   }
 
   /**
-   * 某只标的（股票或指数）的分时序列。客户端切股票时按需拉全量，SSE 帧里不带，
-   * 否则 10 只股票各 10300 点会把每帧撑到几 MB。
+   * 某只标的（股票或指数）的分时序列。客户端切股票时按需拉，SSE 帧里不带，
+   * 否则 10 只股票各 26000 点会把每帧撑到十几 MB。
+   *
+   * **必须带 `days` 窗口**：内存里留 26000 点（≈5.3 个交易日，客户端「五日」视图要它），
+   * 但一次全量吐出去约 **1.35MB** JSON——手机上每切一只票就下一兆多，太贵。
+   * 默认只给「从今天开盘竞价起」，客户端切到「五日」再按 `days=5` 重拉。
+   *
+   * @param {string} stockIdRaw 标的 id（股票或指数代码）
+   * @param {number} [days] 回看几个交易日（1~5，缺省 1）。没有交易日时钟时忽略此参数
    */
-  historyFor(stockIdRaw) {
+  historyFor(stockIdRaw, days) {
     const stockId = this.resolveMarketId(stockIdRaw);
     if (!stockId) return { ok: false, error: '未知标的' };
     // 「有人正在看这只票」的打点：客户端切股票/刷新本来就会拉一次 history，
@@ -2972,7 +2993,24 @@ class Game {
     // **只在个股上打点**：指数没有 NPC 池，为它生成弹幕纯属空转
     if (this.stocksById.has(stockId)) this.danmaku.noteWatch(stockId);
     const market = this.markets.get(stockId);
-    return { ok: true, stockId, priceHistory: market.priceHistory };
+    const all = market.priceHistory;
+    // 窗口裁剪：序列升序，二分找起点，避免每次 slice 拷一份大数组
+    const n = Math.max(1, Math.min(5, Math.floor(Number(days)) || 1));
+    let from = 0;
+    if (this.day && this.day.ok && n > 1) {
+      const st = this.day.locate(Date.now());
+      from = st.dayStartAt - (n - 1) * this.day.dayMs;
+    } else if (this.day && this.day.ok) {
+      from = this.day.locate(Date.now()).dayStartAt;
+    }
+    let lo = 0;
+    let hi = all.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (all[mid].t < from) lo = mid + 1;
+      else hi = mid;
+    }
+    return { ok: true, stockId, days: n, priceHistory: lo > 0 ? all.slice(lo) : all };
   }
 
   /**
@@ -3013,7 +3051,7 @@ class Game {
 
   /**
    * 全部标的的**降采样**分时，只用于主页行情列表的迷你走势。
-   * 全量分时是 10 只 × 10300 点（几 MB），首屏拉不动；这里每只压到 ~60 点，
+   * 全量分时是 10 只 × 26000 点（十几 MB），首屏拉不动；这里每只压到 ~60 点，
    * 一次请求把所有股票的走势形状都拿到，之后客户端靠 SSE 自己往后追加。
    */
   sparksFor(points = 60) {

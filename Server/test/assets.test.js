@@ -40,6 +40,11 @@ function assert(cond, msg) {
 }
 const r2 = (v) => Math.round(v * 100) / 100;
 const near = (a, b, eps = 0.02) => Math.abs(a - b) < eps;
+/** 一天总长 / 夜间段长：由 day.phases 推导，别写死毫秒（阶段时长会随拟真度调整） */
+const DAY_MS = config.day.phases.reduce((a, p) => a + p.ms, 0);
+const NIGHT_MS = config.day.phases[config.day.phases.length - 1].ms;
+/** 第 n 天「夜间已开始 10 秒」那个时刻——收盘结算就落在这附近 */
+const nightAtOf = (startAt, day = 1) => startAt + (day - 1) * DAY_MS + DAY_MS - NIGHT_MS + 10000;
 
 const ID = config.stocks[0].id;
 const FILE = path.join(os.tmpdir(), `gushen-assets-test-${process.pid}.db`);
@@ -48,7 +53,7 @@ for (const s of ['', '-wal', '-shm']) fs.rmSync(FILE + s, { force: true });
 const persist = new Persister(FILE);
 const g = new Game({ persist });
 g.start();
-g.day.reanchor(Date.now() - 120000); // 锚进第 1 天上午连续竞价
+g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000)); // 锚进第 1 天上午连续竞价
 for (let i = 0; i < 3; i++) g.tick();
 
 // 两个玩家 + 一个 NPC。玩家不带持仓先落一天，第二轮回再加仓位验 equity 口径
@@ -68,15 +73,34 @@ N.cash = 100000000;
 g.store.put(N);
 
 const dayMs = g.day.dayMs;
-const night1 = g.day.startAt + 590000; // 第 1 天夜间
+const night1 = nightAtOf(g.day.startAt, 1); // 第 1 天夜间
 const st1 = g.day.locate(night1);
 assert(st1.phase.key === 'night' && st1.day === 1, `night1 落在第 1 天夜间（${st1.day}/${st1.phase.key}）`);
 
 // 给 A 买 500 股（对手是 NPC），让「现金 + 持仓市值」两种构成都出现
 const m = g.markets.get(ID);
-const rp = m.place(N, { action: 'sell_open', qty: 1000, price: 20, now: Date.now(), noCooldown: true });
+// 价格按**当前盘口**取，不写死 20：NPC 已经跑过几步，最新价早就不在开盘价上了；
+// 写死会让「挂单」变成穿价的主动单（post-only 之后做市商报价会把同价对手吃光），
+// A 只能成交到残量
+const asks5 = m.snapshot().depth.asks;
+const topAsk = asks5.length ? asks5[0].price : m.lastPrice;
+const deepAsk = asks5.length ? asks5[asks5.length - 1].price : m.lastPrice;
+// N 挂在更外面当被动对手（不穿价），A 吃掉五档以内的量，保证 500 股全部成交
+const rp = m.place(N, {
+  action: 'sell_open',
+  qty: 1000,
+  price: m.roundPrice(deepAsk * 1.01),
+  now: Date.now(),
+  noCooldown: true,
+});
 assert(rp.ok, `NPC 挂出对手卖单（${rp.ok}）`);
-const rb = m.place(A, { action: 'buy_open', qty: 500, price: 20, now: Date.now(), noCooldown: true });
+const rb = m.place(A, {
+  action: 'buy_open',
+  qty: 500,
+  price: Math.max(topAsk, deepAsk),
+  now: Date.now(),
+  noCooldown: true,
+});
 assert(rb.ok && rb.order.filled === 500, `A 买入成交 500 股（${rb.ok ? rb.order.filled : rb.error}）`);
 // C 融券开空 200 股（吃做市商买盘）：保证金 + 空头市值 + 融券欠息都该进快照。
 // 不能用「自己挂买单再自己卖」的路子——同账户反手会被自成交闸门挡掉
@@ -141,7 +165,7 @@ console.log('\n[3] 轨迹查询：新→旧、limit');
   // 快进到第 2/3 天夜间补结算（_turnoverDay 生产上由 tick 的 rollTurnoverDay 维护，
   // 这里手动推到对应天，与「该天夜间定格」的真实时序一致）
   for (let d = 2; d <= 3; d++) {
-    const nightAt = g.day.startAt + (d - 1) * dayMs + 590000;
+    const nightAt = nightAtOf(g.day.startAt, d);
     assert(g.day.locate(nightAt).phase.key === 'night' && g.day.locate(nightAt).day === d,
       `第 ${d} 天夜间时刻定位正确`);
     g._turnoverDay = d;
@@ -163,7 +187,7 @@ console.log('\n[4] /api/account/assets：鉴权、盘中实时点、夜间不重
 
   // 模拟「昨天已收盘、今天盘中」：墙钟锚到第 4 天上午（reanchor 的参数是本轮开盘时刻，
   // elapsed = now − startAt，所以要往前倒推 3 整天再走 120s）→ 当日实时点必须有
-  g.day.reanchor(Date.now() - 3 * dayMs - 120000);
+  g.day.reanchor(Date.now() - 3 * dayMs - (config.day.phases[0].ms + 90 * 1000));
   const st4 = g.day.locate(Date.now());
   assert(st4.phase.key === 'morning' && st4.day === 4, `墙钟落在第 4 天上午（${st4.day}/${st4.phase.key}）`);
   const rDay = g.assetHistoryFor('tok-a', 60);
@@ -173,7 +197,7 @@ console.log('\n[4] /api/account/assets：鉴权、盘中实时点、夜间不重
   assert(!rDay.rows.some((row) => row.day === rDay.live.day), '实时点不与已收盘行同天（不会双点）');
 
   // 夜间且当日已定格 → 不给 live（那一行刚写进 rows，重复给就是同一天两个点）
-  g.day.reanchor(Date.now() - 4 * dayMs - 590000);
+  g.day.reanchor(Date.now() - 4 * dayMs - (DAY_MS - NIGHT_MS + 10000));
   assert(g.day.locate(Date.now()).phase.key === 'night', '墙钟落在第 5 天夜间');
   g._turnoverDay = 5;
   g.settleDay(Date.now(), { meta: true }); // 第 5 天的正式夜间定格
@@ -230,7 +254,7 @@ console.log('\n[7] 续跑恢复：水位线以库为准，重启后不会拿次�
   // 这种情况下 meta 的 turnover_live 还停在前天，_turnoverDay 落后于真实交易日；
   // 成交统计只能跟着落后（它写的是内存累计），但资产快照读的是账户实时值，
   // 拿 `completedDay === _turnoverDay` 当判据只会让那一天在轨迹上永久缺一格
-  g2.day.reanchor(Date.now() - 7 * dayMs - 590000); // 第 8 天夜间
+  g2.day.reanchor(Date.now() - 7 * dayMs - (DAY_MS - NIGHT_MS + 10000)); // 第 8 天夜间
   const st = g2.day.locate(Date.now());
   assert(st.day === 8 && st.phase.key === 'night', `墙钟落在第 8 天夜间（${st.day}/${st.phase.key}）`);
   g2._turnoverDay = 6;

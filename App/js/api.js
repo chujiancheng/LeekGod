@@ -67,8 +67,9 @@
     brokers: () => getJSON('/api/brokers'),
     /** 全量状态（首屏兜底；SSE 断了用它续命） */
     state: () => getJSON('/api/state'),
-    /** 分时（含历史，5 日窗口由前端裁剪） */
-    history: (stockId) => getJSON('/api/history?stock=' + encodeURIComponent(stockId)),
+    /** 分时（`days` = 回看几个交易日，1 = 今天 / 5 = 五日；窗口仍由前端再裁一道） */
+    history: (stockId, days) =>
+      getJSON('/api/history?stock=' + encodeURIComponent(stockId) + '&days=' + (days >= 5 ? 5 : 1)),
     /** 全市场降采样迷你走势 */
     sparks: () => getJSON('/api/sparks'),
     /** 下单：action=buy|sell|short|cover，qty 必须整手 */
@@ -94,20 +95,30 @@
   const hist = new Map(); // stockId -> [{t, price, vol}]（跨天连续，与网页版同口径）
   const histPending = new Set();
 
-  /** 分时序列容量上限：与网页版一致（服务端保留约 2 小时 ≈ 10300 点） */
-  const HIST_MAX = 10300;
+  /** 分时序列容量上限：与网页版一致（服务端保留 26000 点 ≈ 5.3 个交易日，一天约 4904 点） */
+  const HIST_MAX = 26000;
 
   function historyOf(stockId) {
     return hist.get(stockId) || [];
   }
 
-  function loadHistory(stockId) {
+  /**
+   * 拉分时。`days` = 回看几个交易日（1 或 5）：默认只拉今天（≈250KB），切「五日」再补拉
+   * （5 天 ≈1.3MB）。已经拉到过不少于所需天数时不再重复请求。
+   */
+  const histDays = new Map(); // stockId -> 已拉到的天数
+  function loadHistory(stockId, days) {
+    const want = (days || 1) >= 5 ? 5 : 1;
+    if (!stockId) return Promise.resolve(historyOf(stockId));
+    if ((histDays.get(stockId) || 0) >= want) return Promise.resolve(historyOf(stockId));
     if (histPending.has(stockId)) return Promise.resolve(historyOf(stockId));
     histPending.add(stockId);
+    histDays.set(stockId, want);
     return api
-      .history(stockId)
+      .history(stockId, want)
       .then((r) => {
         histPending.delete(stockId);
+        if (!r || !r.ok) histDays.delete(stockId); // 失败允许下次再试
         if (r && r.ok && Array.isArray(r.priceHistory)) {
           // 服务端全量覆盖本地累积的点；期间新到的点（时间戳更晚）保序接在尾部，不丢帧
           const local = hist.get(stockId) || [];
@@ -131,6 +142,7 @@
       })
       .catch(() => {
         histPending.delete(stockId);
+        histDays.delete(stockId);
         return historyOf(stockId);
       });
   }

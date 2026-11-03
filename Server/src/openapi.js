@@ -412,6 +412,8 @@ function rulesView(game, acc) {
   return {
     feeRate: bk.feeRate,
     cooldownMs: bk.cooldownMs,
+    // 锁仓口径（t0 / t1-open / t1）。锁仓是跨日政策，不再是秒数，见 config.trade.lock
+    lock: bk.lock,
     lockMs: bk.lockMs,
     marginRatio: bk.marginRatio,
     maintenance: bk.maintenance,
@@ -421,6 +423,9 @@ function rulesView(game, acc) {
       enabled: !!(config.margin.finance && config.margin.finance.enabled),
       baseMinuteRate: config.margin.finance ? config.margin.finance.baseMinuteRate : 0,
       maxMinuteRate: config.margin.finance ? config.margin.finance.maxMinuteRate : 0,
+      // 按游戏日计的融资日息（策略计算持仓成本请用这个，不要用分钟息）
+      dayRate: config.margin.finance ? config.margin.finance.dayRate : 0,
+      maxDayRate: config.margin.finance ? config.margin.finance.maxDayRate : 0,
     },
     lending: {
       enabled: !!(config.margin.lending && config.margin.lending.enabled),
@@ -667,9 +672,10 @@ function createOpenApi(game) {
       return send(res, r.ok ? 200 : 400, r);
     }
 
-    // ---- GET /open/v1/markets/:id/minute：分时序列（跨天连续，保留约 2 小时）----
+    // ---- GET /open/v1/markets/:id/minute：分时序列（跨天连续，服务端保留 ≈5 个交易日）----
+    // `?days=1..5` 收窄窗口（缺省 5 = 全部）。全量约 1.3MB JSON，只算今天的指标就传 1
     if (seg.length === 3 && seg[0] === 'markets' && seg[2] === 'minute' && req.method === 'GET') {
-      const r = game.historyFor(seg[1]);
+      const r = game.historyFor(seg[1], clampInt(q.get('days'), 1, 5, 5));
       return send(res, r.ok ? 200 : 400, r);
     }
 

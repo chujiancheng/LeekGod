@@ -200,8 +200,11 @@ class AutoManager {
     if (!fire) return;
 
     const target = p.qty > 0 ? Math.min(p.qty, total) : total;
-    // 锁仓时长按账户券商取：滑泰 5 秒 → 自动策略也能早 5 秒卖出，与手动下单同口径
-    const avail = isLong ? acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs) : acc.coverableShort(sid);
+    // 锁仓口径按账户券商取（滑泰 T+0 → 自动策略也能当天进出，与手动下单同口径）
+    const unlock = ctx.market.lockFnFor(acc, now);
+    const avail = isLong
+      ? acc.freeSellableLong(sid, now, unlock)
+      : acc.coverableShort(sid, now, unlock);
     const qty = Math.min(target, avail);
     if (qty <= 0) {
       if (!s.state.waiting) {
@@ -269,7 +272,7 @@ class AutoManager {
       const entry = st.buys[0];
       const target = gridSellPrice(p.base, p.stepPct, entry.level);
       if (last >= target && this.cooldownLeft(acc, now) <= 0) {
-        const sellable = acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs);
+        const sellable = acc.freeSellableLong(sid, now, ctx.market.lockFnFor(acc, now));
         const qty = Math.min(entry.shares, sellable);
         if (qty > 0) {
           // 买一已 ≥ 目标价就按买价打（锁定更高卖价），否则挂目标价等
@@ -391,7 +394,7 @@ class AutoManager {
       if (r.ok) this.clearSignal(s, now, `金叉买入 ${qty}股 @${price}`);
       else if (!/频繁/.test(r.error || '')) this.clearSignal(s, now, `金叉买入失败: ${r.error}`);
     } else {
-      const qty = acc.freeSellableLong(sid, now, this.brokerOf(acc, now, ctx.market).lockMs);
+      const qty = acc.freeSellableLong(sid, now, ctx.market.lockFnFor(acc, now));
       if (qty <= 0) {
         if (acc.longQty(sid) <= 0) this.clearSignal(s, now, '死叉触发但无多头持仓，跳过本次卖出');
         return; // 锁仓中：等解锁后下个 tick 重试

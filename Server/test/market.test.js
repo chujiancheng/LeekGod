@@ -200,11 +200,11 @@ console.log('\n[9] 涨跌停（相对昨收 ±30%，依赖交易日时钟）');
   const { m, A } = fresh();
   // 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收由每个交易日的收盘结算滚动而来，
   // 所以这里必须挂上交易日时钟——孤立 Market（无 dayCycle）没有昨收口径，band() 直接返回 null。
-  // 一天里：竞价 0~30s、上午 30~260s、午休 260~300s、下午 300~560s、收盘竞价 560~580s、夜间 580~620s。
-  // 取 now = 120000ms 落在「上午连续竞价」段内（可撮合、非竞价锁定期）。
+  // 一天 260 分钟：竞价 0~5min、上午 5~125min、午休 125~130min、下午 130~247min、
+  // 收盘竞价 247~250min、夜间 250~260min。取 now = 10min 落在「上午连续竞价」段内。
   const { DayCycle } = require('../src/daycycle');
   m.dayCycle = new DayCycle(config.day, 0);
-  const now = 120000;
+  const now = 10 * 60000;
   const band = m.band();
   assert(band.up === 26 && band.down === 14, `昨收 20 → 涨跌停 14 ~ 26（${band.down} ~ ${band.up}）`);
   const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now });
@@ -721,14 +721,16 @@ console.log('\n[25] 融资利息按 tick 摊入负债');
   A.longPos('600001').lots.push({ qty: 100000, price: 20, ts: 0, reserved: 0, debt: 5000000, principal: 5000000 });
   N.cash = 0; // 全市场现金耗尽 → 压力利率打满
   m.accountsProvider = () => [A, N];
-  const rateHot = m.financeMinuteRate();
-  assert(rateHot === fin.maxMinuteRate, `现金耗尽时利率打满封顶 (${rateHot}/分钟)`);
+  // 2026-11-02 起融资利息以**日利率**为准（按 dayMs 摊到 tick），分钟息只是折算出来的展示值
+  const dayMs = config.day.phases.reduce((a, p) => a + p.ms, 0);
+  const rateHot = m.financeDayRate();
+  assert(rateHot === fin.maxDayRate, `现金耗尽时日利率打满封顶 (${rateHot}/日)`);
 
   N.cash = 1e10; // 现金充裕 → 回落到基础利率附近
-  const rate = m.financeMinuteRate();
-  assert(rate >= fin.baseMinuteRate && rate < rateHot, `现金充裕时利率回落 (${rate})`);
+  const rate = m.financeDayRate();
+  assert(rate >= fin.dayRate && rate < rateHot, `现金充裕时利率回落 (${rate})`);
 
-  const tickRate = rate * (config.tickIntervalMs / 60000);
+  const tickRate = rate * (config.tickIntervalMs / dayMs);
   const expectAdd = Math.round(5000000 * tickRate * 100) / 100;
   const realizedBefore = A.realizedPnL;
   const eqBefore = A.equity(() => 20);
@@ -753,7 +755,7 @@ console.log('\n[25] 融资利息按 tick 摊入负债');
 
   // 关闭融资 → 利率为 0 且不摊息
   fin.enabled = false;
-  assert(m.financeMinuteRate() === 0, '融资关闭时利率为 0');
+  assert(m.financeDayRate() === 0 && m.financeMinuteRate() === 0, '融资关闭时利率为 0');
   fin.enabled = true;
 }
 
@@ -1018,58 +1020,61 @@ console.log('\n[34] 旧档多空并存：只许平仓，不再新增任何一侧
   assert(!ru.ok && /空头/.test(ru.error), '仍持空时买开依旧被拒');
 }
 
-// ---- 35. 券商通道差异：锁仓时长与「偶发卡顿」都要真的落在撮合层 ----
-// 这两条曾经是「配置里写了、文案里写了，撮合层却没读」：锁仓判定写死全局 10 秒
-// （滑泰 5 秒只在提示文案里出现），glitchDelay 是零调用方的死函数。这条用例把
-// 「per-broker 的通道参数必须由 market/store 真正消费」钉住。
-console.log('\n[35] 券商通道（锁仓时长 / 偶发卡顿）落在撮合层');
+// ---- 35. 券商通道差异：锁仓口径与「偶发卡顿」都要真的落在撮合层 ----
+// 这类参数曾经是「配置里写了、文案里写了，撮合层却没读」：锁仓判定写死全局值，
+// glitchDelay 是零调用方的死函数。这条用例把「per-broker 的参数必须由 market/store
+// 真正消费」钉住。2026-11-02 起锁仓从「5/8/10 秒」改成 T+0 / T+1 三种跨日政策。
+console.log('\n[35] 券商通道（T+0 / T+1 锁仓 + 偶发卡顿）落在撮合层');
 {
   const lot = stock.lotSize;
-  const base = 1000000;
   const m = new Market(stock);
   m.lastPrice = 20;
+  // 锁仓从「固定时长」改成「跨日政策」（2026-11-02）后，判定必须有交易日时钟——
+  // 没有钟就没有"次日"，`lockFnFor` 会退回 trade.lockMs 的兜底口径。
+  // 这里挂在 startAt=0、并取「第 2 天上午连续竞价」做基准时刻，方便构造"昨天买的"。
+  const { DayCycle } = require('../src/daycycle');
+  m.dayCycle = new DayCycle(config.day, 0);
+  const DAY = config.day.phases.reduce((s, p) => s + p.ms, 0);
+  const auctionMs = config.day.phases[0].ms;
+  const base = DAY + auctionMs + 60000; // 第 2 天，竞价结束后 1 分钟（上午连续竞价）
 
-  // (1) 滑泰：锁仓砍半 5 秒 → 6 秒前的批次应当已可卖
+  // (1) 滑泰 T+0：当天买、当天就能卖（全服唯一的日内权限）
   const A = new Account('滑泰玩家');
   A.broker = 'huatai';
   A.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
   m.place(pad('垫单甲'), { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base - 1, noCooldown: true });
   const s1 = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(s1.ok && s1.order.filled === lot, `滑泰 5 秒锁仓：6 秒前的批次已可卖${s1.ok ? '' : '（' + s1.error + '）'}`);
+  assert(s1.ok && s1.order.filled === lot, `滑泰 T+0：当天买的批次当天可卖${s1.ok ? '' : '（' + s1.error + '）'}`);
 
-  // (2) 对照：没有券商的账户仍是全局基准 10 秒，同样 6 秒必须被拒
+  // (2) 基准（t1）：当天买的当天卖不掉，文案要说清是「次日 09:25」
   const B = new Account('基准玩家');
   B.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
   const s2 = m.place(B, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(!s2.ok && /10 秒锁仓/.test(s2.error), `无券商账户 6 秒仍锁着，且文案是基准的 10 秒（${s2.error}）`);
+  assert(!s2.ok && /次日 09:25/.test(s2.error), `基准 T+1：当天不可卖，文案含次日 09:25（${s2.error}）`);
 
-  // (3) 滑泰自己也不能提前：4 秒仍然锁着，且文案是券商的 5 秒（不是全局 10 秒）
-  const C = new Account('滑泰玩家2');
-  C.broker = 'huatai';
-  C.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 4000, reserved: 0 });
-  const s3 = m.place(C, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(!s3.ok && /5 秒锁仓/.test(s3.error), `滑泰 4 秒仍锁着，文案 = 券商的 5 秒（${s3.error}）`);
+  // (3) 基准（t1）：昨天买的、今天已过竞价 → 可卖
+  B.longPos(stock.id).lots[0].ts = base - DAY;
+  const s3 = m.place(B, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
+  assert(s3.ok, `基准 T+1：昨天买的今天可卖${s3.ok ? '' : '（' + s3.error + '）'}`);
 
-  // (4) 天疯：锁仓 8 秒 → 6 秒被拒、9 秒放行
+  // (4) 天疯（t1-open）：昨天买的、今天**竞价一开始**就能卖（比基准早一个竞价段）
   const D = new Account('天疯玩家');
   D.broker = 'tianfeng';
-  D.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
-  const s4 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(!s4.ok && /8 秒锁仓/.test(s4.error), `天疯 6 秒仍锁着（8 秒锁仓，${s4.error}）`);
-  D.longPos(stock.id).lots[0].ts = base - 9000;
-  const s5 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(s5.ok, `天疯 9 秒后可卖${s5.ok ? '' : '（' + s5.error + '）'}`);
+  D.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - DAY, reserved: 0 });
+  const early = DAY + Math.floor(auctionMs / 2); // 第 2 天开盘竞价的中间（基准还没解锁）
+  const s4 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: early, noCooldown: true });
+  assert(s4.ok, `天疯 T+1·竞价开始即可卖（${early} 时点）${s4.ok ? '' : '（' + s4.error + '）'}`);
 
-  // (5) 挂借闸门与卖出闸门同源：滑泰 5 秒过后就能挂借，基准账户 6 秒还不能
+  // (5) 挂借闸门与卖出闸门同源：滑泰当天就能挂借，基准当天不能
   const L1 = new Account('滑泰挂借');
   L1.broker = 'huatai';
   L1.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
   const l1 = m.lendShares(L1, lot, base);
-  assert(l1.ok, `滑泰 6 秒后可挂借${l1.ok ? '' : '（' + l1.error + '）'}`);
+  assert(l1.ok, `滑泰 T+0：当天可挂借${l1.ok ? '' : '（' + l1.error + '）'}`);
   const L2 = new Account('基准挂借');
   L2.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
   const l2 = m.lendShares(L2, lot, base);
-  assert(!l2.ok, `无券商账户 6 秒不能挂借（${l2.error}）`);
+  assert(!l2.ok, `基准 T+1：当天不能挂借（${l2.error}）`);
 
   // (6) 嗨通：偶发通道卡顿 —— 命中时这一单要多等 1 个 tick。
   // 用一个固定值的 Math.random 替身把「命中 / 不命中」两条分支都走成确定性的

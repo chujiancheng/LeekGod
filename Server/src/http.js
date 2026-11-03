@@ -675,7 +675,7 @@ function createServer(game, options) {
         if (!game.accountFor(token)) {
           return json(res, 401, { ok: false, error: '请先登录', account: null });
         }
-        // 多股票后完整状态里不再带分时（10 只 × 10300 点太大），
+        // 多股票后完整状态里不再带分时（10 只 × 26000 点太大），
         // 首屏要的那只走 /api/history?stock=
         return json(res, 200, game.stateFor(token));
       }
@@ -689,7 +689,10 @@ function createServer(game, options) {
         if (!game.accountFor(token)) {
           return json(res, 401, { ok: false, error: '请先登录' });
         }
-        const r = game.historyFor(url.searchParams.get('stock'));
+        // `?days=1..5`：内存里留 5 天（26000 点），但默认只回今天——全量约 1.3MB，
+        // 切股票时每次下一兆多太贵。客户端切「五日」再按 days=5 重拉（见 Client/app.js loadHistory）
+        const wantDays = Math.max(1, Math.min(5, Math.floor(Number(url.searchParams.get('days'))) || 1));
+        const r = game.historyFor(url.searchParams.get('stock'), wantDays);
         return json(res, r.ok ? 200 : 400, r);
       }
 
@@ -950,8 +953,8 @@ function createServer(game, options) {
 
       // ---- 运维：交易日时钟（server.py 的安全关服判定每秒轮询它）----
       //
-      // 故意**不过 admin 限流**：admin 档是 10 次/分钟，而休市窗口（收盘后的 night 段）
-      // 只有 40 秒，40 秒内最多问 6 次就等于没有精度。这是纯只读、几十字节的接口，
+      // 故意**不过 admin 限流**：admin 档是 10 次/分钟，而休市窗口（收盘后的 night 段、
+      // 午休段）只有 5~10 分钟，窗口内最多问几次就等于没有精度。这是纯只读、几十字节的接口，
       // 又有口令把关，放开频率比让脚本瞎猜安全得多。
       if (p === '/api/admin/clock' && req.method === 'GET') {
         if (!admin.authorized(req.headers['x-admin-token'])) {

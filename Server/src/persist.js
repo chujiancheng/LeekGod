@@ -17,7 +17,11 @@ const { logger } = require('./logger');
 
 const ORDER_HISTORY_KEEP = 100; // 每个账户保留的已完结委托行数（与内存 orderHistory 一致）
 const TAPE_KEEP = 500; // 逐笔成交恢复条数（与 config.market.tradeTapeSize 一致）
-const PRICE_KEEP_MS = 2 * 60 * 60 * 1000; // 分时序列保留窗口，与 priceHistorySize 同为 2 小时
+// 分时序列落盘保留窗口。**必须不短于内存窗口**（config.market.priceHistorySize 个 tick），
+// 否则重启后内存里那一条会比库里长，剪出来的那段永远补不回来：旧值 2h 是按「一天 620 秒」
+// 标定的（2h ≈ 11.6 天），日长改 1:1 后一天就是 4h20m，下午重启会只剩 13:00 之后的分时。
+// 26000 tick × 3s ≈ 21.7h，取 24h 留一点余量；改 tickIntervalMs / priceHistorySize 要一起看
+const PRICE_KEEP_MS = 24 * 60 * 60 * 1000;
 const DAILY_KEEP = config.market.dailyBarsKeep || 260; // 日线恢复根数（与内存上限一致）
 const PRUNE_EVERY_TICKS = 300;
 
@@ -799,4 +803,7 @@ class Persister {
   }
 }
 
-module.exports = { Persister };
+// PRICE_KEEP_MS 一并导出：它不是拍脑袋的数字，必须 ≥ priceHistorySize × tickIntervalMs，
+// 否则重启后内存窗口比库里的长，剪掉的那段永久补不回来（Day 长度改动时最容易被漏掉的一条）。
+// 这条不变式由 test/day.test.js 的「配置自洽」一组断言守住
+module.exports = { Persister, PRICE_KEEP_MS, ORDER_HISTORY_KEEP };

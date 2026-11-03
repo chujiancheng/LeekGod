@@ -223,6 +223,9 @@ function baseValues() {
   return {
     feeRate: config.trade.feeRate,
     cooldownMs: config.trade.cooldownMs,
+    // 锁仓口径（2026-11-02）：`lock` 是**策略**，`lockMs` 只在没有交易日时钟时兜底
+    // （单测 / 无时钟模式）。见 config.trade.lock 与 Market.lockFnFor。
+    lock: config.trade.lock || 't1',
     lockMs: config.trade.lockMs,
     marginRatio: config.margin.ratio,
     maintenance: config.margin.maintenance,
@@ -253,14 +256,17 @@ function privilege(base, val, betterIsLower, intensity) {
 /**
  * 提前量的生效口径（消息分层方案 §4）：**只做下限夹取，不做 tick 对齐**。
  *
- * 设计稿原文是「向下对齐 tick 边界（700ms）+ 最小生效 2 tick」。但两者一起用会把
- * **满额 3s 砍成 2.8s**（3000 / 700 = 4.28 → 4 tick），而「满额 3s」是招伤那张招牌
- * 写死的数字，星级递进 0.75 / 1.5 / 2.25 / 3.0 也会跟着整体错位。
+ * 设计稿原文是「向下对齐 tick 边界 + 最小生效 2 tick」。但两者一起用会把满额值
+ * 砍掉一截（旧口径 3000ms / 700ms = 4.28 → 4 tick，招牌数字 3s 变 2.8s），而满额值
+ * 是招伤那张招牌写死的数字，星级递进 1/4 也会跟着整体错位。
  * 真正要防的是「名义上有提前量、实际一个 tick 都看不见」——那条由 minLeadMs 兜住。
+ *
+ * 2026-11-02 日长改 1:1（tick 700ms → 3000ms）时，满额值按同一比例抬到 13000ms
+ * （= config.news.lead.vipMs），minLeadMs 抬到 6000，语义（提前几帧）保持不变。
  */
 function quantizeLead(ms) {
   const news = config.news || {};
-  const minLead = news.minLeadMs == null ? 1400 : news.minLeadMs;
+  const minLead = news.minLeadMs == null ? 6000 : news.minLeadMs;
   if (!(ms > 0)) return 0;
   return ms < minLead ? minLead : ms;
 }
@@ -299,6 +305,7 @@ function forAccount(acc, opts = {}) {
     // 平铺的有效值（下面的默认 = 全局基准）
     feeRate: base.feeRate,
     cooldownMs: base.cooldownMs,
+    lock: base.lock,
     lockMs: base.lockMs,
     marginRatio: base.marginRatio,
     maintenance: base.maintenance,
@@ -346,7 +353,10 @@ function forAccount(acc, opts = {}) {
   out.feeRate = (ov.feeRate == null ? base.feeRate : ov.feeRate) * crowd.feeMul * out.weekly.feeMul;
   // 通道（冷却 / 锁仓）与风控（维持率）是服务能力与风险属性，不随星级变
   out.cooldownMs = ov.cooldownMs == null ? base.cooldownMs : ov.cooldownMs;
-  out.lockMs = ov.lockMs == null ? base.lockMs : ov.lockMs;
+  // 锁仓：现在是口径而非时长（T+0 / 次日竞价开始 / 次日竞价结束），所以不受星级递进影响。
+  // 旧字段 lockMs 保留为「无交易日时钟时的兜底时长」，不再随券商变化——六家的差异
+  // 全部落在 lock 上，玩家在规则页看到的是「T+0」「T+1·次日 09:15」这样的口径。
+  out.lock = ov.lock == null ? base.lock : ov.lock;
   out.maintenance = ov.maintenance == null ? base.maintenance : ov.maintenance;
   // 额度类：特权按星级递进、代价立刻全量（越小的自备比例 = 越高杠杆 = 越好）
   out.marginRatio = privilege(base.marginRatio, ov.marginRatio, true, intensity);
@@ -394,7 +404,7 @@ function interestWaived(acc, day) {
 /**
  * 嗨通证券的「偶发通道卡顿」：约 glitchRate 比例的报单会被延迟 1 个 tick。
  * 设计稿 §9 D4 明确不做「报单延迟 tick」那套侵入撮合的改造，所以这里只落在
- * **冷却**上（多等 700ms）——效果同源、零侵入。
+ * **冷却**上（多等 1 个 tick = `config.tickIntervalMs`，2026-11-02 起是 3000ms）——效果同源、零侵入。
  */
 function glitchDelay(acc, bk) {
   const rate = bk && bk.features ? bk.features.glitchRate : 0;
@@ -601,6 +611,7 @@ function describe(key) {
     preview: {
       feeRate: (b.overrides.feeRate == null ? baseValues().feeRate : b.overrides.feeRate) * crowd.feeMul,
       cooldownMs: b.overrides.cooldownMs == null ? baseValues().cooldownMs : b.overrides.cooldownMs,
+      lock: b.overrides.lock == null ? baseValues().lock : b.overrides.lock,
       lockMs: b.overrides.lockMs == null ? baseValues().lockMs : b.overrides.lockMs,
       leverage: leverageOf(
         (b.overrides.financeRatio == null ? baseValues().financeRatio : b.overrides.financeRatio)

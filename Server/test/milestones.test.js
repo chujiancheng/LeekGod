@@ -24,6 +24,13 @@ const { Persister } = require('../src/persist');
 const { openDatabase, SCHEMA_VERSION } = require('../src/db');
 const Database = require('better-sqlite3');
 
+// 时钟标尺由 config 推出（2026-11-02 起一天不再固定 620s）
+const PHASES = config.day.phases;
+const DAY_MS = PHASES.reduce((a, p) => a + p.ms, 0);
+/** 夜间第 10 秒：收盘结算已做完、还没到次日开盘 */
+const NIGHT_10S = DAY_MS - PHASES[5].ms + 10 * 1000;
+const AFTERNOON_MID = PHASES[0].ms + PHASES[1].ms + PHASES[2].ms + 10 * 60 * 1000;
+
 let passed = 0;
 let failed = 0;
 function assert(cond, msg) {
@@ -238,7 +245,7 @@ console.log('\n[8] Game 集成：收盘结算判定、口径一致、NPC 不参�
 let token = '';
 const g = new Game();
 {
-  g.day.reanchor(Date.now() - 590000); // 锚进第 1 天的夜间（580~620s）→ 收盘结算会做掉第 1 天
+  g.day.reanchor(Date.now() - NIGHT_10S); // 锚进第 1 天的夜间 → 收盘结算会做掉第 1 天
   const lr = g.onboard('eggTester', 'eggTester', 'zhaoshang');
   assert(lr.ok && !!lr.token, '登录成功');
   token = lr.token;
@@ -268,7 +275,7 @@ const g = new Game();
   assert(acc.milestones.fired.length === 3, '盘中不产生新彩蛋（P0 不做盘中瞬时演出）');
 
   // 兜底路径：时钟直接跳到第 2 天夜间（模拟休眠唤醒 / 长 GC 跨过收盘）
-  g.day.reanchor(Date.now() - (620000 + 590000));
+  g.day.reanchor(Date.now() - (DAY_MS + NIGHT_10S));
   g.ensureDaySettled(Date.now());
   assert(evals >= 1, '跨天兜底路径 ensureDaySettled 会判一次硬门槛');
 
@@ -302,12 +309,12 @@ const g = new Game();
 console.log('\n[9] 补结算路径：停机跨过好几天，回来也要判一次');
 {
   const g2 = new Game();
-  g2.day.reanchor(Date.now() - 590000);
+  g2.day.reanchor(Date.now() - NIGHT_10S);
   g2.onboard('eggJump', 'eggJump', 'zhongxin');
   const acc = g2.store.get('eggJump');
   acc.cash = r2(acc.cash + 6000000); // 700 万 → A01~A05
   g2._daySettled = 0; // 假装从没结过（模拟停机数天）
-  g2.day.reanchor(Date.now() - (2 * 620000 + 500000)); // 第 3 天下午
+  g2.day.reanchor(Date.now() - (2 * DAY_MS + AFTERNOON_MID)); // 第 3 天下午
   g2.ensureDaySettled(Date.now());
   assert(acc.milestones.fired.includes('A05'), `补结算把该发的彩蛋补上（${acc.milestones.fired.join(',')}）`);
   assert(acc.milestones.dayEvaluated >= 1, `评估日号落盘（${acc.milestones.dayEvaluated}）`);
@@ -323,7 +330,7 @@ console.log('\n[10] 落盘：只有玩家写 milestones；重启后水位线与�
   const p = new Persister(FILE);
   const g3 = new Game({ persist: p });
   p.startRound(Date.now()); // 不写 meta 的话 loadAll 判不出「续跑」，重启取不到账户
-  g3.day.reanchor(Date.now() - 590000);
+  g3.day.reanchor(Date.now() - NIGHT_10S);
   g3.onboard('eggSave', 'eggSave', 'haitong');
   const acc = g3.store.get('eggSave');
   const npc = new Account('大米·散户1', true, 'small');
@@ -364,7 +371,7 @@ console.log('\n[11] 收盘评估必须标脏：没发事件的收盘，水位线
   const p = new Persister(FILE);
   const g8 = new Game({ persist: p });
   p.startRound(Date.now());
-  g8.day.reanchor(Date.now() - 590000);
+  g8.day.reanchor(Date.now() - NIGHT_10S);
   g8.onboard('eggPeak', 'eggPeak', 'zhaoshang');
   const acc = g8.store.get('eggPeak');
   acc.cash = r2(acc.cash + 50000); // 105 万：创了新高，但一档都够不着（A01 要 110 万）
@@ -394,7 +401,7 @@ console.log('\n[12] 老档兼容：milestones 为 NULL 的档也能起，水位�
   const p = new Persister(FILE);
   const g5 = new Game({ persist: p });
   p.startRound(Date.now());
-  g5.day.reanchor(Date.now() - 590000);
+  g5.day.reanchor(Date.now() - NIGHT_10S);
   g5.onboard('eggOld', 'eggOld', 'dongfeng');
   const acc = g5.store.get('eggOld');
   acc.cash = r2(acc.cash + 2000000); // 300 万
@@ -423,7 +430,7 @@ console.log('\n[12] 老档兼容：milestones 为 NULL 的档也能起，水位�
 console.log('\n[13] 不污染消息池：彩蛋不进 news 列表、不参与池去重');
 {
   const g7 = new Game();
-  g7.day.reanchor(Date.now() - 590000);
+  g7.day.reanchor(Date.now() - NIGHT_10S);
   g7.onboard('eggNews', 'eggNews', 'huatai');
   const acc = g7.store.get('eggNews');
   acc.cash = r2(acc.cash + 9000000);

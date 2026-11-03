@@ -376,8 +376,8 @@
       const c = rules.ma || {};
       return (
         '<div class="sec-title">参数</div>' +
-        field('cfFast', '快线窗口（tick）', '45', (c.minFast || 10) + ' ~ ' + (c.maxFast || 300), 'numeric') +
-        field('cfSlow', '慢线窗口（tick）', '150', '至少 快线 + ' + (c.minSlowGap || 10), 'numeric') +
+        field('cfFast', '快线窗口（tick，1 tick = 3 秒）', '45', (c.minFast || 10) + ' ~ ' + (c.maxFast || 300), 'numeric') +
+        field('cfSlow', '慢线窗口（tick，1 tick = 3 秒）', '150', '至少 快线 + ' + (c.minSlowGap || 10), 'numeric') +
         field('cfBudget', '每次投入（% 可用资金）', '50', '1 ~ 100')
       );
     }

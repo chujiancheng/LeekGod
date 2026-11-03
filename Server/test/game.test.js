@@ -52,10 +52,11 @@ function assert(cond, msg) {
 const g = new Game();
 const stock = STOCK;
 
-// 交易日时钟：把这一局的时钟锚到「上午连续竞价」段内（一天：竞价 0~30s、上午 30~260s…）。
-// 本文件的用例验的是撮合 / 风控 / 快照 / 消息，不需要真等 30 秒集合竞价走完才有成交；
+// 交易日时钟：把这一局的时钟锚到「上午连续竞价」段内。
+// 锚点必须是「竞价段长 + 90 秒」——**不能写死 120 秒**：2026-11-02 起开盘竞价是 5 分钟，
+// 写死 120 秒会把整局锚在集合竞价里，届时只入簿不撮合，本文件所有成交断言会集体变红。
 // 集合竞价的集中撮合、日终结算与涨跌停由 test/day.test.js 专门覆盖。
-g.day.reanchor(Date.now() - 120000);
+g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
 
 // 手动初始化（不启动 setInterval）：与 Game.start 的新局路径一致，**每只股票各建一套 NPC 池**，
 // 否则其余 9 只没有账户、股东榜为空，跨股票断言就失去意义
@@ -790,16 +791,18 @@ console.log('\n[16] 消息按「天」分段：节奏 / scope 权重 / 盘后公
   const leaked = ann.filter((t) => othersSet.has(t));
   assert(leaked.length === 0, `公告池与既有文案池零重叠（${others.length} 条既有文案，越池 ${leaked.length} 条${leaked.length ? '：' + leaked.slice(0, 3).join('；') : ''}）`);
 
-  // ⑦ untilFloor：盘后消息作用期抬到次日开盘竞价结束，其余照旧 60s
+  // ⑦ untilFloor：盘后消息作用期抬到次日开盘竞价结束，其余照旧按 durationMs
+  // 注意 floor 必须**比自然过期更晚**才算「被抬高」，所以按 durationMs 现算，
+  // 不能写死 68 秒——作用期在 2026-11-02 随一天变长一起改了。
   const sys5 = new NewsSystem(config.stocks);
-  const floor = NOW + 68000;
+  const floor = NOW + config.news.durationMs + 8000;
   sys5.nextAt = 0;
   assert(sys5.maybeEmit(NOW, 0, { phaseKey: 'night', untilFloor: floor }).until === floor, 'untilFloor 生效：作用期被抬到竞价结束');
   sys5.nextAt = 0;
-  assert(sys5.maybeEmit(NOW, 0, { phaseKey: 'night', untilFloor: NOW + 1000 }).until === NOW + config.news.durationMs, 'untilFloor 早于自然过期时按 60s 走');
+  assert(sys5.maybeEmit(NOW, 0, { phaseKey: 'night', untilFloor: NOW + 1000 }).until === NOW + config.news.durationMs, 'untilFloor 早于自然过期时按 durationMs 走');
   const sys6 = new NewsSystem(config.stocks); // 换阶段会重排 nextAt（覆盖 nextAt=0），所以另起一个实例
   sys6.nextAt = 0;
-  assert(sys6.maybeEmit(NOW, 0, { phaseKey: 'auction' }).until === NOW + config.news.durationMs, '盘前不传 floor 时作用期仍是 60s');
+  assert(sys6.maybeEmit(NOW, 0, { phaseKey: 'auction' }).until === NOW + config.news.durationMs, '盘前不传 floor 时作用期仍是 durationMs');
 }
 
 // ---- 17. 下发给客户端的锁仓口径必须与撮合层同源 ----
@@ -810,28 +813,47 @@ console.log('\n[17] 快照的锁仓口径 = 账户券商（rules / lockedUntil /
 {
   const stock0 = config.stocks[0];
   const lot = stock0.lotSize;
-  const seed = (account, brokerKey) => {
+  const DAY = config.day.phases.reduce((s, p) => s + p.ms, 0);
+  const AUCTION = config.day.phases[0].ms;
+  const seed = (account, brokerKey, ageMs) => {
     const tk = g.onboard(account, account, brokerKey).token;
     const a = g.accountFor(tk);
-    const ts = Date.now() - 6000; // 6000ms：滑泰（5s）已解锁、基准（10s）仍锁着
+    const ts = Date.now() - ageMs;
     a.longPos(stock0.id).lots.push({ qty: lot, price: P(g).lastPrice, ts, reserved: 0, debt: 0, principal: 0 });
     const st = g.stateFor(tk);
     return { st, pos: st.account.positions.find((p) => p.stockId === stock0.id), ts };
   };
 
-  const ht = seed('lockprobe_h', 'huatai');
-  assert(ht.st.rules.lockMs === 5000, `滑泰下发的 rules.lockMs = 5000（${ht.st.rules.lockMs}）`);
+  // 滑泰 T+0：当天买的，lockedUntil 就是成交时刻本身（等价于"立即可卖"）
+  const ht = seed('lockprobe_h', 'huatai', 6000);
+  assert(ht.st.rules.lock === 't0', `滑泰下发的锁仓口径 = t0（${ht.st.rules.lock}）`);
   const htLot = ht.pos.long.lots.find((l) => l.ts === ht.ts);
-  assert(htLot && htLot.lockedUntil === ht.ts + 5000, `滑泰 lockedUntil = ts + 5000（${htLot && htLot.lockedUntil - ht.ts}）`);
-  assert(htLot.sellable === true, '滑泰 6 秒的批次在持仓切片里已标可卖');
+  assert(htLot && htLot.lockedUntil === ht.ts, `滑泰 lockedUntil = ts（差 ${htLot && htLot.lockedUntil - ht.ts}ms）`);
+  assert(htLot.sellable === true, '滑泰 6 秒前的批次在持仓切片里已标可卖');
   assert(ht.pos.long.sellable === lot, `滑泰 long.sellable 计入该批次（${ht.pos.long.sellable}）`);
 
-  const zx = seed('lockprobe_z', 'zhongxin');
-  assert(zx.st.rules.lockMs === 10000, `钟信下发的 rules.lockMs = 10000（${zx.st.rules.lockMs}）`);
+  // 钟信 T+1：解锁时刻 = 次一交易日开盘竞价结束（09:25），是绝对时间戳而不是 ts+常量
+  const zx = seed('lockprobe_z', 'zhongxin', 6000);
+  assert(zx.st.rules.lock === 't1', `钟信下发的锁仓口径 = t1（${zx.st.rules.lock}）`);
   const zxLot = zx.pos.long.lots.find((l) => l.ts === zx.ts);
-  assert(zxLot && zxLot.lockedUntil === zx.ts + 10000, `钟信 lockedUntil = ts + 10000（${zxLot && zxLot.lockedUntil - zx.ts}）`);
-  assert(zxLot.sellable === false, '钟信同样 6 秒的批次仍标不可卖');
+  const zxDayEnd = g.day.locate(zx.ts).dayEndsAt;
+  assert(
+    zxLot && zxLot.lockedUntil === zxDayEnd + AUCTION,
+    `钟信 lockedUntil = 次日开盘竞价结束（${zxLot && zxLot.lockedUntil - (zxDayEnd + AUCTION)}ms 偏差）`
+  );
+  assert(zxLot.sellable === false, '钟信同样 6 秒前的批次仍标不可卖（T+1）');
   assert(zx.pos.long.sellable === 0, `钟信 long.sellable = 0（${zx.pos.long.sellable}）`);
+
+  // 天疯 T+1·竞价开始：与钟信只差一个竞价段，且必须 < 钟信的解锁时刻
+  const tf = seed('lockprobe_t', 'tianfeng', 6000);
+  const tfLot = tf.pos.long.lots.find((l) => l.ts === tf.ts);
+  assert(
+    tfLot.lockedUntil === zxDayEnd && tfLot.lockedUntil < zxLot.lockedUntil,
+    `天疯 unlockedAt 早一个竞价段（${zxLot.lockedUntil - tfLot.lockedUntil}ms）`
+  );
+  // 「昨天买的今天可卖」这一条不在这里验：本局开盘锚点就在今天上午，往前推一整天会落到
+  // startAt 之前被时钟夹回第 1 天（elapsed 负值），造不出真正的"昨天"。
+  // 那条边界由 market.test [35](3) 用 startAt=0 的独立市场覆盖。
 }
 
 // ---- 18. 玩家榜分页（排行 tab 翻页）：切片连续、名次由 offset 决定、越界与脏值都被夹住 ----
@@ -897,6 +919,9 @@ console.log('\n[18] 玩家榜分页 leaderboardPage（/api/leaderboard）');
       '买侧全空时做市商无视随机门与冷却，立即重报价'
     );
     // 现金不够一手时不能放行（挂不出买单，放行只是白撤白挂一轮空转）
+    // ⚠️ 先把报价基准钉到现价：否则会走「价格动了就重报」的 drift 分支，
+    // 用例会随盘口价格漂移随机变红（不是旁路的锅）
+    mk.lastQuotePx = mgr.market.lastPrice;
     const savedCash = mk.acc.cash;
     mk.acc.cash = mgr.market.lastPrice * lot - 1;
     assert(

@@ -133,14 +133,19 @@ console.log('\n[3] 方向规则：特权按星级递进、代价立刻全量');
   // 滑泰 自备 60%，比基准更差 —— 是**代价**，1★ 就照单全收
   const h1 = broker.forAccount(buyer('huatai'), { day: DAY });
   assert(Math.abs(h1.financeRatio - 0.6) < 1e-9, `滑泰 1★ 自备比例就是 60%（代价立刻生效，不因升级变好）`);
-  // 招伤 提前量 3s 是特权：1★ 抬到最小生效值，4★ 满额
+  // 招伤 提前量是特权：1★ 抬到最小生效值，4★ 满额（满额值 = config.news.lead.vipMs）
   const s1 = broker.forAccount(buyer('zhaoshang'), { day: DAY });
   const s2 = broker.forAccount(buyer('zhaoshang', 5e6, 0), { day: DAY });
   const s3 = broker.forAccount(buyer('zhaoshang', 2e7, 1e5), { day: DAY });
   const s4 = broker.forAccount(buyer('zhaoshang', 8e7, 5e5), { day: DAY });
-  assert(s1.newsVipLeadMs === config.news.minLeadMs, `招伤 1★ 提前量抬到最小生效值 ${s1.newsVipLeadMs}ms（原始 0.75s 低于 1 个 tick 看不见）`);
-  assert(s2.newsVipLeadMs === 1500 && s3.newsVipLeadMs === 2250, `星级递进 2★ ${s2.newsVipLeadMs}ms / 3★ ${s3.newsVipLeadMs}ms`);
-  assert(s4.newsVipLeadMs === 3000, `4★ 满额 3000ms（${s4.newsVipLeadMs}）`);
+  const VIP_FULL = config.news.lead.vipMs;
+  assert(VIP_FULL > config.tickIntervalMs, `满额提前量 ${VIP_FULL}ms 必须大于一个 tick（${config.tickIntervalMs}ms），否则「有名义、看不见」`);
+  assert(s1.newsVipLeadMs === config.news.minLeadMs, `招伤 1★ 提前量抬到最小生效值 ${s1.newsVipLeadMs}ms（1/4 强度不足 2 tick，看不见）`);
+  assert(
+    s2.newsVipLeadMs === Math.round((VIP_FULL / 4) * 2) && s3.newsVipLeadMs === Math.round((VIP_FULL / 4) * 3),
+    `星级递进 2★ ${s2.newsVipLeadMs}ms / 3★ ${s3.newsVipLeadMs}ms`
+  );
+  assert(s4.newsVipLeadMs === VIP_FULL, `4★ 满额 ${VIP_FULL}ms（${s4.newsVipLeadMs}）`);
   assert(s4.newsVipVisible === false, '4★ 还不给方向');
   const s5 = broker.forAccount(buyer('zhaoshang', 3e8, 2e6), { day: DAY });
   assert(s5.star === 5 && s5.newsVipVisible === true, '5★ 额外给「标的方向」');
@@ -345,15 +350,21 @@ console.log('\n[10] 消息分层的可见性');
   ns.pickScope = () => '机构';
   const n = ns.maybeEmit(now, 0, { phaseKey: 'morning' });
   ns.pickScope = real;
-  assert(n.lead.insider === 6000 && n.lead.inst === 4000 && n.lead.vip === 3000, `个股消息三级提前量 ${JSON.stringify(n.lead)}`);
-  assert(n.publicAt === now + 6000, `publicAt = t + 最大提前量（${n.publicAt - now}ms）`);
+  // 期望值一律从 config.news.lead 推，不写死毫秒：日长改 1:1 后这套值整体抬过
+  //（6000/4000/3000 → 26000/17000/13000），写死的话这里会变成「测试在测一份过期副本」
+  const L = config.news.lead;
+  assert(n.lead.insider === L.insiderMs && n.lead.inst === L.instMs && n.lead.vip === L.vipMs, `个股消息三级提前量 ${JSON.stringify(n.lead)}`);
+  assert(n.publicAt === now + L.insiderMs, `publicAt = t + 最大提前量（${n.publicAt - now}ms）`);
+  const tInst = n.publicAt - n.lead.inst; // L1 的可见起点 = publicAt − instMs
+  const tVip = n.publicAt - n.lead.vip; // L2 的可见起点 = publicAt − vipMs
   assert(NewsSystem.visibleFor(n, { tier: 'insider' }, now) === true, 'L0 在 t0 就可见');
   assert(NewsSystem.visibleFor(n, { tier: 'inst' }, now) === false, 'L1 在 t1 之前不可见');
-  assert(NewsSystem.visibleFor(n, { tier: 'inst' }, now + 2000) === true, 'L1 从 publicAt − 4s 起可见');
-  assert(NewsSystem.visibleFor(n, { tier: 'vip' }, now + 2999) === false, 'L2 在 publicAt − 3s 之前不可见');
-  assert(NewsSystem.visibleFor(n, { tier: 'vip' }, now + 3000) === true, 'L2 从 publicAt − 3s 起可见');
-  assert(NewsSystem.visibleFor(n, null, now + 5999) === false, '公众要等到 publicAt');
-  assert(NewsSystem.visibleFor(n, null, now + 6000) === true, '公众在 publicAt 可见');
+  assert(NewsSystem.visibleFor(n, { tier: 'inst' }, tInst - 1) === false, `L1 在 publicAt − ${n.lead.inst}ms 之前不可见`);
+  assert(NewsSystem.visibleFor(n, { tier: 'inst' }, tInst) === true, `L1 从 publicAt − ${n.lead.inst}ms 起可见`);
+  assert(NewsSystem.visibleFor(n, { tier: 'vip' }, tVip - 1) === false, `L2 在 publicAt − ${n.lead.vip}ms 之前不可见`);
+  assert(NewsSystem.visibleFor(n, { tier: 'vip' }, tVip) === true, `L2 从 publicAt − ${n.lead.vip}ms 起可见`);
+  assert(NewsSystem.visibleFor(n, null, n.publicAt - 1) === false, '公众要等到 publicAt');
+  assert(NewsSystem.visibleFor(n, null, n.publicAt) === true, '公众在 publicAt 可见');
   // 大盘消息 lead 恒 0
   ns.nextAt = 0;
   ns.pickScope = () => '全体';
@@ -369,17 +380,17 @@ console.log('\n[10] 消息分层的可见性');
   const retail = ns.maybeEmit(now, 0, { phaseKey: 'morning' });
   ns.pickScope = real;
   assert(
-    retail.lead.insider === 3000 && retail.lead.inst === 2000 && retail.lead.vip === 1500,
+    retail.lead.insider === L.insiderMs / 2 && retail.lead.inst === L.instMs / 2 && retail.lead.vip === L.vipMs / 2,
     `散户消息按 scope 打 0.5 折（insider ${retail.lead.insider} / inst ${retail.lead.inst} / vip ${retail.lead.vip}ms）`
   );
-  assert(retail.publicAt === now + 3000, '折算后的 publicAt 跟着缩到 3s');
+  assert(retail.publicAt === now + L.insiderMs / 2, `折算后的 publicAt 跟着缩到 ${L.insiderMs / 2}ms`);
   // tape 不外泄
   const publicTape = ns.tapeSnapshot(50, now);
   assert(!publicTape.some((x) => x.publicAt > now), '公众 tape 里没有泄露期消息');
-  const vipTape = ns.tapeSnapshot(50, now + 3000, { tier: 'vip', leadMs: 3000, showDir: false });
+  const vipTape = ns.tapeSnapshot(50, tVip, { tier: 'vip', leadMs: L.vipMs, showDir: false });
   const early = vipTape.filter((x) => x.early);
   assert(early.length >= 1 && early.every((x) => x.masked && x.dir === 0), '未满 4★ 的情报玩家只看到「有事」、看不到方向');
-  const vipSee = ns.tapeSnapshot(50, now + 3000, { tier: 'vip', leadMs: 3000, showDir: true });
+  const vipSee = ns.tapeSnapshot(50, tVip, { tier: 'vip', leadMs: L.vipMs, showDir: true });
   assert(vipSee.filter((x) => x.early).every((x) => !x.masked), '5★ 才给方向');
   // 不传 viewer 的三个读取口：老行为不变
   ns.active = [{ id: 'X', dir: 1, scope: '机构', power: 0.5, until: now + 60000 }];

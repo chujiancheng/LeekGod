@@ -36,17 +36,29 @@ function assert(cond, msg) {
   }
 }
 
-// 一天的各段偏移，写在这里当"标尺"用：竞价 0~30s 上午 30~260s 午休 260~300s
-// 下午 300~560s 收盘竞价 560~580s 夜间 580~620s
+// 一天的各段偏移：**由 config 推出来**，不再写死。
+// 2026-11-02 起交易时段与现实 1:1（竞价 5min、上午 120min、午休 5min、下午 117min、
+// 收盘竞价 3min、夜间 10min），写死 620 秒的时代结束了，硬编码会让整份用例静默失真。
+const PH = config.day.phases;
+const A = PH[0].ms;      // 开盘集合竞价
+const M = PH[1].ms;      // 上午连续竞价
+const L = PH[2].ms;      // 午间休市
+const AF = PH[3].ms;     // 下午连续竞价
+const CA = PH[4].ms;     // 收盘集合竞价
+const NI = PH[5].ms;     // 夜间休市
+const lockA = PH[0].cancelLockMs; // 开盘竞价最后 2.5 分钟锁死撤单（模块级：[3][4] 都要用）
 const P = {
   auction: 0,
-  morning: 30000,
-  lunch: 260000,
-  afternoon: 300000,
-  closeAuction: 560000,
-  night: 580000,
-  dayMs: 620000,
+  morning: A,
+  lunch: A + M,
+  afternoon: A + M + L,
+  closeAuction: A + M + L + AF,
+  night: A + M + L + AF + CA,
+  dayMs: A + M + L + AF + CA + NI,
 };
+/** 竞价刚结束后的第一毫秒 / 收盘竞价刚结束后的第一毫秒（很多用例要"段边界 +1"） */
+const AFTER_AUCTION = P.morning + 1;
+const AFTER_CLOSE = P.night + 1;
 
 /** 造一个挂上交易日时钟的市场 + 几个荷包鼓鼓的账户（买卖两侧要不同账户，同股多空互斥） */
 function fresh() {
@@ -74,18 +86,18 @@ console.log('\n[1] DayCycle：阶段定位是纯函数，边界不重不漏');
     const okLeft = left === null || s.leftMs === left;
     assert(okKey && okLeft, `t=${t} → ${key}${left === null ? '' : ` 剩 ${left}ms`}（实际 ${s.phase.key} 剩 ${s.leftMs}ms）`);
   };
-  at(0, 'auction', P.auction === 0 ? 30000 : null);
-  at(29999, 'auction', 1); // 边界前一毫秒仍属竞价
-  at(30000, 'morning', 230000); // 边界这一毫秒翻段
-  at(259999, 'morning', 1);
-  at(260000, 'lunch', 40000);
-  at(299999, 'lunch', 1);
-  at(300000, 'afternoon', 260000);
-  at(559999, 'afternoon', 1);
-  at(560000, 'closeAuction', 20000);
-  at(579999, 'closeAuction', 1);
-  at(580000, 'night', 40000);
-  at(619999, 'night', 1);
+  at(0, 'auction', A);
+  at(A - 1, 'auction', 1); // 边界前一毫秒仍属竞价
+  at(A, 'morning', M); // 边界这一毫秒翻段
+  at(P.lunch - 1, 'morning', 1);
+  at(P.lunch, 'lunch', L);
+  at(P.afternoon - 1, 'lunch', 1);
+  at(P.afternoon, 'afternoon', AF);
+  at(P.closeAuction - 1, 'afternoon', 1);
+  at(P.closeAuction, 'closeAuction', CA);
+  at(P.night - 1, 'closeAuction', 1);
+  at(P.night, 'night', NI);
+  at(P.dayMs - 1, 'night', 1);
 
   const d2 = dc.locate(P.dayMs);
   assert(d2.day === 2 && d2.phase.key === 'auction', `跨到第 2 天并回到开盘竞价（day=${d2.day} ${d2.phase.key}）`);
@@ -99,15 +111,15 @@ console.log('\n[2] DayCycle：游戏内时刻映射（顶栏显示的 09:15 / 11
   const dc = new DayCycle(config.day, 0);
   const clock = (t) => formatGameClock(dc.locate(t).gameClockMs);
   assert(clock(0) === '09:15:00', `开盘竞价起点 ${clock(0)}`);
-  assert(clock(15000) === '09:20:00', `开盘竞价中点 ${clock(15000)}（可撤单硬线）`);
-  assert(clock(30000) === '09:30:00', `上午开盘 ${clock(30000)}`);
-  assert(clock(260000) === '11:30:00', `上午收盘 ${clock(260000)}`);
-  assert(clock(300000) === '13:00:00', `下午开盘 ${clock(300000)}`);
-  assert(clock(560000) === '14:57:00', `收盘竞价 ${clock(560000)}`);
-  assert(clock(580000) === '15:00:00', `收盘 ${clock(580000)}`);
-  assert(clock(600000) === '00:07:30', `夜间中点跨日回卷 ${clock(600000)}`);
-  assert(clock(619999).startsWith('09:14'), `夜间末尾回卷到次日开盘前 ${clock(619999)}`);
-  // 夜间 40 秒要映射 15:00→次日 09:15 的 18 小时 15 分，所以游戏内一夜等于真实一夜
+  assert(clock(A / 2) === '09:20:00', `开盘竞价中点 ${clock(A / 2)}（可撤单硬线）`);
+  assert(clock(A) === '09:30:00', `上午开盘 ${clock(A)}`);
+  assert(clock(P.lunch) === '11:30:00', `上午收盘 ${clock(P.lunch)}`);
+  assert(clock(P.afternoon) === '13:00:00', `下午开盘 ${clock(P.afternoon)}`);
+  assert(clock(P.closeAuction) === '14:57:00', `收盘竞价 ${clock(P.closeAuction)}`);
+  assert(clock(P.night) === '15:00:00', `收盘 ${clock(P.night)}`);
+  assert(clock(P.night + NI / 2) === '00:07:30', `夜间中点跨日回卷 ${clock(P.night + NI / 2)}`);
+  assert(clock(P.dayMs - 1).startsWith('09:14'), `夜间末尾回卷到次日开盘前 ${clock(P.dayMs - 1)}`);
+  // 夜间那一段要映射 15:00→次日 09:15 的 18 小时 15 分，所以游戏内一夜等于真实一夜
   assert(dc.locate(P.night).phase.gameMs === 1095 * 60000, '夜间阶段映射跨度 1095 分钟（15:00→次日 09:15）');
 }
 
@@ -126,13 +138,17 @@ console.log('\n[3] DayCycle：可交易 / 竞价 / 撤单锁判据');
   assert(dc.auction(P.morning) === null, '连续竞价无竞价标识');
   assert(dc.auction(P.closeAuction) === 'close', '收盘集合竞价标识为 close');
 
-  // cancelLockMs = 10s：前 20 秒可撤，最后 10 秒锁死（复刻真实市场 09:20 那条硬线）
+  // 开盘竞价 5 分钟、cancelLockMs = 2.5 分钟：前一半可撤、后一半锁死（复刻 09:20 那条硬线）
   assert(dc.auctionLocked(0) === false, '竞价刚开始可撤单');
-  assert(dc.auctionLocked(19999) === false, '竞价第 19999ms 仍可撤单');
-  assert(dc.auctionLocked(20000) === true, '竞价进入最后 10 秒，撤单被锁');
-  assert(dc.auctionLocked(29999) === true, '竞价最后一毫秒仍是锁定的');
+  assert(dc.auctionLocked(A - lockA - 1) === false, '锁单窗口前 1ms 仍可撤单');
+  assert(dc.auctionLocked(A - lockA) === true, '进入最后 2.5 分钟，撤单被锁');
+  assert(dc.auctionLocked(A - 1) === true, '竞价最后一毫秒仍是锁定的');
   assert(dc.auctionLocked(P.morning) === false, '连续竞价不锁撤单');
-  assert(dc.auctionLocked(P.closeAuction + 10000) === true, '收盘竞价同样有 10 秒撤单锁');
+  // 收盘竞价 3 分钟、最后 1 分钟锁死：锁单窗口由 CA - lockMs 推出来，不写死「第 60 秒」
+  const lockC = PH[4].cancelLockMs;
+  assert(dc.auctionLocked(P.closeAuction + CA - lockC - 1) === false, '收盘竞价锁单窗口前 1ms 仍可撤单');
+  assert(dc.auctionLocked(P.closeAuction + CA - lockC) === true, '收盘竞价同样有撤单锁（最后 1 分钟）');
+  assert(dc.auctionLocked(P.closeAuction + CA - 1) === true, '收盘竞价最后一毫秒仍是锁定的');
 }
 
 // ============================================================
@@ -142,13 +158,13 @@ console.log('\n[4] DayCycle：下发给客户端的 day 段');
   const s = dc.snapshot(5000);
   assert(s.enabled === true && s.day === 1 && s.phase === 'auction', '快照带天号与阶段');
   assert(s.trading === true && s.auction === 'open' && s.locked === false, '竞价段可交易、未锁定');
-  assert(s.phaseLeftMs === 25000 && s.phaseMs === 30000, `阶段倒计时 ${s.phaseLeftMs}/${s.phaseMs}`);
-  assert(s.unlockLeftMs === 15000, `距撤单锁定还有 ${s.unlockLeftMs}ms`);
-  assert(s.phaseEndsAt === 30000 && s.dayEndsAt === P.dayMs, '阶段/当日截止时刻正确');
+  assert(s.phaseLeftMs === A - 5000 && s.phaseMs === A, `阶段倒计时 ${s.phaseLeftMs}/${s.phaseMs}`);
+  assert(s.unlockLeftMs === A - lockA - 5000, `距撤单锁定还有 ${s.unlockLeftMs}ms`);
+  assert(s.phaseEndsAt === A && s.dayEndsAt === P.dayMs, '阶段/当日截止时刻正确');
   // 分时图按「天」切窗口要用它：客户端没有阶段偏移表，算不出本日开工时刻
   assert(s.dayStartAt === 0, `本交易日开工时刻随快照下发（${s.dayStartAt}）`);
 
-  const s2 = dc.snapshot(25000);
+  const s2 = dc.snapshot(A - lockA);
   assert(s2.locked === true && s2.unlockLeftMs === 0, '进入锁定窗口后 unlockLeftMs 归零');
   assert(s2.dayStartAt === 0 && s2.dayEndsAt === P.dayMs, '同一天内开工时刻不随阶段漂移');
 
@@ -204,7 +220,7 @@ console.log('\n[6] 集合竞价：最大成交量原则 + 阶段结束按统一�
   const q = m.auctionQuote();
   assert(q.price === 21.0 && q.volume === 1000, `最大成交量价 ${q.price}，可成交 ${q.volume} 股`);
 
-  const r = m.runAuction(P.auction + 30001);
+  const r = m.runAuction(AFTER_AUCTION);
   assert(r.price === 21.0 && r.qty === 1000, `集中撮合成交 ${r.qty} 股 @ ${r.price}`);
   assert(m.lastPrice === 21.0, '最新价定格为虚拟成交价');
   assert(m.open === 21.0 && m.high === 21.0 && m.low === 21.0, '今开/最高/最低由竞价成交价填出');
@@ -234,7 +250,7 @@ console.log('\n[7] 集合竞价：竞价位沿用涨跌停，但不受价格笼�
   // 竞价相对昨收可以有大跳空（涨跌停区间内即可）：笼子只认「上一笔成交价 ±5%」，
   // 照笼子判会把所有跳空单都判成脱笼——所以竞价撮合必须绕开笼子
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 100, price: 21.9, now: 1000, noCooldown: true });
-  const r = m.runAuction(P.auction + 30001);
+  const r = m.runAuction(AFTER_AUCTION);
   assert(r.price === 21.9 && m.lastPrice === 21.9, `跳空 9.5% 能正常开出盘（成交价 ${r.price}，未按笼子撤单）`);
 }
 
@@ -248,13 +264,13 @@ console.log('\n[8] 集合竞价：撤单锁与残留委托');
   assert(B1.orders.size === 0 && Math.abs(B1.cash - 100000000) < 0.01, '撤单后资金全额释放');
 
   const rb2 = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 500, price: 20.5, now: 6000 });
-  const locked = m.cancel(B1, rb2.order.id, 25000);
+  const locked = m.cancel(B1, rb2.order.id, A - 1000);
   assert(!locked.ok && /锁定/.test(locked.error), '竞价最后 10 秒撤单被拒');
   assert(B1.orders.size === 1, '被拒后委托仍在簿');
 
   // 卖盘多于买盘时，吃不完的部分留在簿里承接随后的连续竞价
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 1500, price: 19.5, now: 6000, noCooldown: true });
-  const r = m.runAuction(P.auction + 30001);
+  const r = m.runAuction(AFTER_AUCTION);
   assert(r.qty === 500, `买方 500 股全部成交（实际 ${r.qty}）`);
   const snap = m.snapshot();
   const restAsk = snap.depth.asks.find((d) => d.price === 19.5);
@@ -273,7 +289,7 @@ console.log('\n[9] 竞价期间冻结风控强平');
   // 造一个必被强平的账户：满仓空头 + 现金清零（权益为负，远低于维持线×敞口）
   m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20.0, now: 1000 });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20.0, now: 1000, noCooldown: true });
-  m.runAuction(P.auction + 30001);
+  m.runAuction(AFTER_AUCTION);
   S1.cash = 0;
   const shortMV = S1.totalShortMV(() => m.lastPrice);
   assert(shortMV > 0 && m.equityOf(S1) < config.margin.maintenance * shortMV, `账户已跌破维持线（空头市值 ${shortMV}，权益 ${m.equityOf(S1)}）`);
@@ -318,7 +334,7 @@ console.log('\n[11] 日终结算：昨收滚动、当日高低量额归零、委
   m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 21.0, now: 1000 });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 400, price: 19.0, now: 1000, noCooldown: true });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 900, price: 21.0, now: 1000, noCooldown: true });
-  m.runAuction(P.auction + 30001);
+  m.runAuction(AFTER_AUCTION);
   assert(m.lastPrice === 21.0 && m.volume === 1000, `收盘前最新价 ${m.lastPrice}，成交量 ${m.volume}`);
 
   // 下午挂一笔不会成交的买单（远低于盘口），用来验证"当日作废"
@@ -326,7 +342,7 @@ console.log('\n[11] 日终结算：昨收滚动、当日高低量额归零、委
   assert(rest.ok && rest.order.status === 'live', '该买单挂在簿上等收盘');
   assert(C.orderFrozen > 0 && C.cash < 100000000, '挂单资金已冻结');
 
-  const st = m.settleDay(P.closeAuction + 20001, { cancelOrders: true });
+  const st = m.settleDay(AFTER_CLOSE, { cancelOrders: true });
   assert(st.prevClose === 21.0, `昨收滚动到收盘价 ${st.prevClose}`);
   assert(m.open === 21.0 && m.high === 21.0 && m.low === 21.0, '今开/最高/最低重置到收盘价');
   assert(m.volume === 0 && m.turnover === 0, '当日成交量/额归零');
@@ -348,8 +364,8 @@ console.log('\n[11b] 夜间休市快照：涨跌幅按「刚收盘这一天」�
   m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 21.0, now: 1000 });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 400, price: 19.0, now: 1000, noCooldown: true });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 900, price: 21.0, now: 1000, noCooldown: true });
-  m.runAuction(P.auction + 30001);
-  m.settleDay(P.closeAuction + 20001, { cancelOrders: true });
+  m.runAuction(AFTER_AUCTION);
+  m.settleDay(AFTER_CLOSE, { cancelOrders: true });
 
   const snap = m.snapshot();
   assert(snap.prevClose === 20, `夜间快照昨收仍是前一天收盘 ${snap.prevClose}`);
@@ -373,16 +389,16 @@ console.log('\n[12] 次日开盘竞价：隔夜跳空');
   m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 21.0, now: 1000 });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 400, price: 19.0, now: 1000, noCooldown: true });
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 900, price: 21.0, now: 1000, noCooldown: true });
-  m.runAuction(P.auction + 30001);
-  m.settleDay(P.closeAuction + 20001, { cancelOrders: true });
+  m.runAuction(AFTER_AUCTION);
+  m.settleDay(AFTER_CLOSE, { cancelOrders: true });
   assert(m.prevClose === 21.0, `第 1 天收盘 ${m.prevClose}`);
 
-  // 第 2 天开盘竞价（区间 P.dayMs ~ P.dayMs+30s）
+  // 第 2 天开盘竞价（区间 P.dayMs ~ P.dayMs+A）
   const d2 = P.dayMs + 1000;
   const rd = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 27.3, now: d2 });
   assert(rd.ok, `次日竞价买单挂入（涨停已放宽到 27.3）`);
   m.place(C, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 21.5, now: d2, noCooldown: true });
-  const r = m.runAuction(P.dayMs + P.auction + 30001);
+  const r = m.runAuction(P.dayMs + AFTER_AUCTION);
   assert(r.price === 21.5 && r.qty === 1000, `次日开盘成交价 ${r.price} × ${r.qty}`);
   assert(m.open === 21.5 && m.prevClose === 21.0, `今开 ${m.open} 高于昨收 ${m.prevClose}，跳空成立`);
   assert(m.volume === 1000, '次日的成交量从 0 重新累计（不与前一天串号）');
@@ -679,7 +695,10 @@ console.log('\n[17] 公允迁移：只有夜间放大，午休不制造假跳空
   assert(n1.closed === true && n1.night === true, '夜间：休市且是夜间');
   assert(Math.abs(l1.delta - m1.delta) < 1e-9, `午休步进与上午相同（${m1.delta.toFixed(6)} vs ${l1.delta.toFixed(6)}）`);
   const mul = config.npc.overnightDriftMul;
-  assert(Math.abs(n1.delta - m1.delta * mul) < 1e-9, `夜间公允步进是上午的 ${mul} 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * mul).toFixed(6)}）`);
+  // 容差 = 一个最小价位（0.01）：`fairValue` 末尾要过 `market.clampPrice`（对齐到分），
+  // 倍数取奇数时 20 × 0.001 × mul 可能正好落在半厘上（21.75 → 0.435 → 取整 0.43），
+  // 严格相等会因为这个取整假红。重心 `fund` 不过价格网格，仍按 1e-9 卡死
+  assert(Math.abs(n1.delta - m1.delta * mul) < 5e-3, `夜间公允步进是上午的 ${mul} 倍（${n1.delta.toFixed(6)} vs ${(m1.delta * mul).toFixed(6)}，容差 1 个价位）`);
   assert(config.npc.fundOvernightFollow === true, '夜间基本面重心同步放大（否则机构的定价锚一夜不动，跳空被稀释一半）');
   assert(Math.abs(n1.fundDelta - m1.fundDelta * mul) < 1e-9, `夜间重心步进同倍数放大（${n1.fundDelta.toPrecision(14)} vs ${(m1.fundDelta * mul).toPrecision(14)}）`);
   } finally {
@@ -714,7 +733,7 @@ console.log('\n[18] 盘后消息：作用期跨夜，次日开盘竞价仍驱动
   assert(n.until > n.t + config.news.durationMs, `比 60s 墙钟长（自然过期 ${n.t + config.news.durationMs} < until）——否则隔夜迁移吃不到它`);
 
   // 次日开盘竞价中段：消息仍 active，情绪与公允推力都还在（这就是「影响次日开盘」）
-  const inAuction = st.dayEndsAt + 15000;
+  const inAuction = st.dayEndsAt + openAuction.ms / 2;
   assert(g.news.active.some((x) => x.id === n.id && x.until > inAuction), '开盘竞价中段消息仍生效');
   const senti = g.news.sentiment(n.scope, inAuction, n.stockId);
   assert(Math.abs(senti) > 0.01, `竞价中段情绪非零（${senti.toFixed(3)}）`);
@@ -971,6 +990,60 @@ console.log('\n[21] 次日开盘的逐笔 tape：只发当日（面板不能翻�
   assert(
     mk0.trades.length >= tape2.length,
     '磁带本体没有作废：昨天的记录仍留在服务端（夜间展示要用），只是不再下发'
+  );
+}
+
+// ============================================================
+// 跨模块的「日长口径」不变式。
+//
+// 2026-11-02 把一天从 620 秒改成 260 分钟（tick 700ms → 3000ms）时，凡是**按 tick 或按
+// 小时**标定的参数都必须跟着改，而它们散落在 config / persist / broker / 客户端三处，
+// 改漏了不会报错，只会静默失真（分时「五日」只剩两天、隔夜跳空砍半、券商提前量
+// 买了个看不见）。这一组断言把这些跨文件的耦合钉在测试里，改日长时先让它红。
+console.log('\n[配置自洽] 日长 / 分时窗口 / 消息提前量必须与 tick 一致');
+{
+  const tickMs = config.tickIntervalMs;
+  const tradingMs = PH.filter((p) => p.trading).reduce((s, p) => s + p.ms, 0);
+  const frozenN = PH.filter((p) => !p.trading).length;
+  const pointsPerDay = Math.ceil(tradingMs / tickMs) + frozenN;
+  const FIVE_DAYS = pointsPerDay * 5;
+
+  assert(tickMs === 3000, `tick 间隔 ${tickMs}ms（真实行情 Level-1 就是 3 秒一笔）`);
+  assert(
+    P.dayMs === 260 * 60 * 1000,
+    `一天 ${P.dayMs / 60000} 分钟（盘中 1:1 的 260 分钟：竞价 5 + 上午 120 + 午休 5 + 下午 117 + 收盘竞价 3 + 夜间 10）`
+  );
+  assert(
+    config.day.phases.filter((p) => p.key === 'night').length === 1,
+    '夜间段存在且只有一个（隔夜跳空、盘后公告都挂在它上面）'
+  );
+  assert(
+    config.market.priceHistorySize >= FIVE_DAYS,
+    `分时容量 ${config.market.priceHistorySize} ≥ 五日 ${FIVE_DAYS} 点（一天 ${pointsPerDay} 点）`
+  );
+
+  // persist 的落盘窗口不能比内存窗口短：PRICE_KEEP_MS 是**时间**窗口，内存是**点数**窗口，
+  // 两者单位不同，换算靠 tickIntervalMs——这正是旧值 2h 在日长改动后失真的地方
+  const persist = require('../src/persist');
+  const memWindowMs = config.market.priceHistorySize * tickMs;
+  assert(
+    persist.PRICE_KEEP_MS >= memWindowMs,
+    `落盘窗口 ${persist.PRICE_KEEP_MS / 3600000}h ≥ 内存窗口 ${(memWindowMs / 3600000).toFixed(1)}h（${config.market.priceHistorySize} 点 × ${tickMs}ms）`
+  );
+
+  // 消息提前量：可见性按 tick 判定，小于一帧 = 名义有、实际看不见
+  const lead = config.news.lead;
+  assert(lead.insiderMs > lead.instMs && lead.instMs > lead.vipMs, `提前量分层递减 ${lead.insiderMs} > ${lead.instMs} > ${lead.vipMs}`);
+  assert(lead.vipMs > tickMs, `券商满额提前量 ${lead.vipMs}ms > 1 tick（${tickMs}ms）——否则「提前」等于没有`);
+  assert(config.news.minLeadMs >= 2 * tickMs, `最小生效提前量 ${config.news.minLeadMs}ms ≥ 2 tick`);
+
+  // 隔夜推力放大倍数的自洽：夜段 tick 占比变了，倍数必须跟着变，否则跳空幅度按比例衰减
+  const nightMs = (config.day.phases.find((p) => p.key === 'night') || { ms: 0 }).ms;
+  const nightTicks = nightMs / tickMs;
+  const nightBoost = (nightTicks * (config.npc.overnightDriftMul - 1)) / (P.dayMs / tickMs);
+  assert(
+    Math.abs(nightBoost - 0.78) < 0.08,
+    `夜段推力当量 ${nightBoost.toFixed(3)}（旧口径 57×12/886 = 0.772，差太多说明 overnightDriftMul 没跟着重标）`
   );
 }
 

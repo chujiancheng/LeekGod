@@ -36,7 +36,7 @@ function assert(cond, msg) {
 const g = new Game();
 const stock = STOCK;
 // 交易日时钟锚到「上午连续竞价」段内，免得整段用例都卡在集合竞价里没有成交
-g.day.reanchor(Date.now() - 120000);
+g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
 N(g).init(g.startedAt);
 P(g).priceHistory.push({ t: g.startedAt, price: P(g).lastPrice, vol: 0 });
 N(g).step(g.startedAt);
@@ -44,7 +44,9 @@ N(g).step(g.startedAt);
 // 仿真若干 tick 让盘口成型
 for (let i = 0; i < 30; i++) g.tick();
 
-const lr = g.onboard('quantuser', 'quantuser', 'zhaoshang');
+// 用滑泰（`lock: 't0'`，全服唯一 T+0）：本文件验的是自动化策略的触发与下单，
+// T+1 锁仓会让"当天买、当天卖"的策略永远动不了。想验锁仓本身看 market.test [35]
+const lr = g.onboard('quantuser', 'quantuser', 'huatai');
 assert(lr.ok && !!lr.token, '玩家登录成功');
 const token = lr.token;
 const acc = g.store.get('quantuser');
@@ -95,9 +97,7 @@ console.log('\n[2] 止盈止损：触发即卖出并完成');
   const t0 = g.auto.byId.get(cr.id);
   assert(t0.enabled && !t0.done, '创建后处于启用状态');
 
-  // 绕过 T+2 分钟锁仓：把刚买的批次时间往前拨
-  const pos = acc.longs.get(stock.id);
-  for (const lot of pos.lots) lot.ts = Date.now() - 3 * 60 * 1000;
+  // 滑泰 T+0：成交即可卖，不需要绕过锁仓
 
   const longBefore = acc.longQty(stock.id);
   g.auto.step(nextT());
@@ -152,8 +152,7 @@ console.log('\n[3] 网格：跌到格子挂买单，成交后记入格子库存'
 
   // 价格拉回基准之上 → 第 1 格卖出目标 = base*1.05
   P(g).lastPrice = P(g).roundPrice(base * 1.06);
-  // 锁仓 2 分钟：新建仓不能立刻卖。推进时间越过锁仓窗口
-  for (const lot of acc.longs.get(stock.id).lots) lot.ts = Date.now() - 3 * 60 * 1000;
+  // 滑泰 T+0：成交即可卖
   g.auto.step(nextT());
   assert(!!s.state.pendingSellId, '价格达到第 1 格卖出目标，触发卖出');
 
@@ -297,7 +296,7 @@ console.log('\n[8] 自动策略的锁仓口径按账户券商取');
   // 落在「滑泰 5 秒已解锁」与「基准 10 秒仍锁着」之间，两侧各验一次
   const sellAt6s = (account, brokerKey) => {
     const T = nextT();
-    g.day.reanchor(T - 120000); // 锚回上午连续竞价，避免长跑后漂到休市被整体冻结
+    g.day.reanchor(T - (config.day.phases[0].ms + 90 * 1000)); // 锚回上午连续竞价，避免长跑后漂到休市被整体冻结
     const lr = g.onboard(account, account, brokerKey);
     assert(lr.ok, `${brokerKey} 玩家 ${account} 开户成功`);
     const a = g.store.get(account);

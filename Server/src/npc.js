@@ -571,6 +571,7 @@ class NpcManager {
     const cfg = config.npc.maker;
     const lot = this.stock.lotSize;
     const sid = this.stock.id;
+    const inAuction = this.market.auctionKind ? !!this.market.auctionKind(now) : false;
     // 撤旧单（做市商现金充足，不存在"撤了挂不回来"的问题，可以全撤）
     for (const o of m.ownResting) {
       if (o.status === 'live') this.market.cancel(m.acc, o.id, now, { internal: true });
@@ -609,11 +610,33 @@ class NpcManager {
     const bidMul = 1 + scarce * Math.max(0, (cfg.scarceBidMul != null ? cfg.scarceBidMul : 2) - 1);
 
     let placed = false;
+    const tickSize = 0.01; // 最小价位（价格一律 roundPrice 到分）
     for (let i = 0; i < levels; i++) {
       const off = step * i;
-      const bidPx = this.market.clampPrice(center * (1 - off) - spread / 2);
-      const askPx = this.market.clampPrice(center * (1 + off) + spread / 2);
+      let bidPx = this.market.clampPrice(center * (1 - off) - spread / 2);
+      let askPx = this.market.clampPrice(center * (1 + off) + spread / 2);
       const want = levelQty(i);
+
+      // ---- 只当 maker，绝不穿价（post-only）----
+      // 做市商 aggressiveRate = 0，语义就是「只报价、不主动吃单」。但「不主动吃单」不能靠
+      // 概率保证：6 家自营各算各的中枢（库存倾斜 / 逐股情绪），A 家急着卖、B 家急着买时
+      // 两边的报价会直接穿透——`place` 一看到穿透就当场撮合，于是**自营之间互相成交**。
+      // 实测（output/turnover-probe.js，一天 5200 tick）：`mm→mm` 占全市场成交量的 56.8%，
+      // 日换手 109%——一半以上的量是自家左手倒右手，既虚增成交量、又把内外盘与
+      // 「主力动向」搅浑（自营明明没有观点，内外盘却在剧烈翻）。
+      // 退让到对手一档内侧：库存最急的那家因此决定价格，这才是存货模型该有的传导方式。
+      // ⚠️ 集合竞价里**不夹**：竞价靠「可穿透的委托」按最大成交量原则算清算价，
+      // 把报价都夹成不穿透，竞价就永远撮不出量（day.test 的竞价用例会整段归零）
+      if (!inAuction) {
+        const oBestAsk = this.market.book.bestAsk();
+        if (oBestAsk != null && bidPx >= oBestAsk) {
+          bidPx = this.market.roundPrice(oBestAsk - tickSize);
+        }
+        const oBestBid = this.market.book.bestBid();
+        if (oBestBid != null && askPx <= oBestBid) {
+          askPx = this.market.roundPrice(oBestBid + tickSize);
+        }
+      }
 
       // 买盘：受现金与库存上限约束（自营也有一条"别把整只票买下来"的线）
       if (bidPx > 0.01) {
@@ -1084,7 +1107,7 @@ class NpcManager {
     this.updateCycle();
     this.updateFeedback(); // 恐慌/贪婪慢变量（step 与 stepFairValue 两条路径共用）
 
-    // 夜间（40 秒休市代表现实的一整夜）推力按 overnightDriftMul 放大。
+    // 夜间（10 分钟休市代表现实的一整夜）推力按 overnightDriftMul 放大。
     // **重心与短端公允一起放大**——只推短端的话，机构的定价锚（fundWeight 0.7）一夜不动，
     // 而机构是竞价簿里单量最大的一侧，最大成交量原则算出的开盘价会被这批"没改口"的
     // 报价拉回昨收，跳空幅度衰减掉一半以上（见 config.npc.fundOvernightFollow）
@@ -1124,7 +1147,7 @@ class NpcManager {
 
     let fv = this.fairValue;
     // 阶段推力：对数空间 → 乘性，越涨越猛（翻几倍 / 腰斩的来源）。
-    // **只有夜间**按 overnightDriftMul 放大——游戏里的 40 秒夜间代表现实一整夜，
+    // **只有夜间**按 overnightDriftMul 放大——游戏里的 10 分钟夜间代表现实一整夜，
     // 不放大的话次日开盘价与昨收几乎贴在一起。午休同样是 closedForTrading，
     // 但只是盘中暂停，同样放大会在 13:00 制造与隔夜同量级的假跳空
     let push = (this.trendDrift + this.cycleDrift) * trendMul;
@@ -2082,8 +2105,31 @@ class NpcManager {
       0.02,
       base * rand(spreadRange[0], spreadRange[1]) * this._mul.spread
     );
-    const bidPx = this.market.clampPrice(center - spread / 2);
-    const askPx = this.market.clampPrice(center + spread / 2);
+    let bidPx = this.market.clampPrice(center - spread / 2);
+    let askPx = this.market.clampPrice(center + spread / 2);
+    // ---- 报价只当 maker（post-only）----
+    // requote 的语义是「提供深度」，不是「吃单」：想主动成交走 tryAggressive（有频率门与
+    // 单笔量约束）。但报价中枢是「最新价 + 私人估值 + 情绪」的混合，个体中枢各不相同，
+    // 当某人的中枢越过对手一档时，这张"报价"在 place 里就变成了主动单、当场成交。
+    // 实测（output/turnover-probe.js，把 aggressiveRate 全置 0 后的基线）：
+    // 仍有 26.6% 日换手，成交对是 big→mm / mid→mm / big→big——全是**报价互相穿透**，
+    // 与「谁看好谁看空」毫无关系，只是各算各的中枢在中点附近打架。
+    // 退让到对手一档内侧（最小价位 0.01），让报价永远只是"等别人来吃"的深度。
+    // 同做市商：集合竞价里不夹（竞价要可穿透才能算出清算价）。
+    // 也**不给"看空/看多"开口子**：想主动成交走 tryAggressive（有频率门与 impactCap 约束），
+    // 报价一律只当深度。早先试过"空头阵营穿价出货"，结果一半账户都在穿价，
+    // 实测日换手从 5% 抬回 14%——那等于把 post-only 又还回去了。
+    const inAuction = this.market.auctionKind ? !!this.market.auctionKind(now) : false;
+    if (!inAuction) {
+      const oBestAsk = this.market.book.bestAsk();
+      if (oBestAsk != null && bidPx >= oBestAsk) {
+        bidPx = this.market.roundPrice(oBestAsk - 0.01);
+      }
+      const oBestBid = this.market.book.bestBid();
+      if (oBestBid != null && askPx <= oBestBid) {
+        askPx = this.market.roundPrice(oBestBid + 0.01);
+      }
+    }
     const lot = this.stock.lotSize;
     const rq = p.requoteQty || [100, 800];
     // 挂单量按情绪倾斜：偏多加深买盘、偏空加深卖盘（出货/吸筹直接写在盘口）
@@ -2250,7 +2296,15 @@ class NpcManager {
         // 买盘太薄就不砸：砸掉最后一档承接力，盘面立刻变成"没有买盘"，
         // 之后连想跑的人都跑不掉（这是买盘空档时段的主要来源，纯负外部性）
         const floor = (config.npc.intent.thinBookFloor || 0) * this.qtyScale;
-        const bidRemain = Math.max(0, bid.qty - bid.filled);
+        // 承接力按「买一这个价位上的合计剩余量」算，不只看最优那一张：
+        // place 的成交价钉在 bid-0.01，会把同价（及更优价）的委托一起吃掉。
+        // 只盯 bids[0] 的话，散户一张 3000 股的限价单挤到最优价，就能把整侧判成
+        // 「承接力不足」——大单从此一股都砸不出去（post-only 之后散户报价不再被穿透，
+        // 全都停在最优价上，这个坑才暴露出来：multi.test [13] 的派发会 0 股卡住）
+        const bidRemain = book.bids.reduce(
+          (a, o) => (o.price >= bid.price ? a + Math.max(0, o.qty - o.filled) : a),
+          0
+        );
         const sellable = n.acc.freeSellableLong(this.stock.id, now);
         const moodScale = p.polarOrderScale ? 1 + this.polar * 0.8 : 1;
         // 给买盘留一口：impactCap 允许吃到最优档的 aggroDepthMult(3) 倍 ——
@@ -2261,8 +2315,9 @@ class NpcManager {
         // 改成"砸完必须留 floor 股"，厚买盘时 maxTake 巨大，行为与原来一致。
         const keep = Math.min(floor, bidRemain);
         const maxTake = Math.max(0, bidRemain - keep);
+        const depthLevel = { qty: bidRemain, filled: 0 }; // 同价合计，喂给 impactCap
         const sized = (cap) =>
-          Math.floor(Math.min(cap, this.impactCap(bid), maxTake) / lot) * lot;
+          Math.floor(Math.min(cap, this.impactCap(depthLevel), maxTake) / lot) * lot;
         if (maxTake < lot) return;
         if (sellable >= 100) {
           let qty = roundLot(

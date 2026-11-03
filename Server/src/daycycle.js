@@ -168,7 +168,8 @@ function parseGameTime(s) {
 
 /**
  * 阶段内的游戏内时刻：按「该阶段在游戏里的进度」线性映射到真实交易日的同一段。
- * 竞价 30 秒 → 09:15~09:25，上午 230 秒 → 09:30~11:30，夜间 40 秒 → 15:00~次日 09:15。
+ * 竞价 5 分钟 → 09:15~09:25，上午 120 分钟 → 09:30~11:30，夜间 10 分钟 → 15:00~次日 09:15
+ * （2026-11-02 起交易时段与现实 1:1，只快进午休与夜间；具体毫秒全在 config.day.phases 里）。
  */
 function gameClock(phase, elapsedMs) {
   const start = parseGameTime(phase.gameTime);

@@ -6,6 +6,24 @@ const milestones = require('./milestones');
 
 const r2 = (v) => Math.round(v * 100) / 100;
 
+/**
+ * 批次是否已过锁仓（T+0 / T+1）。
+ *
+ * `unlock` 两种形态：
+ *   - **数字**：固定时长（毫秒）。没有交易日时钟时的兜底口径——NPC、单测、
+ *     `day.enabled=false` 的无钟模式都走这条，行为与 2026-11-02 之前逐位一致。
+ *   - **函数**：`(成交时刻 ts) => 解锁时间戳`。有钟时由 `Market.lockFnFor` 生成：
+ *     T+0 返回恒等（立即可卖），T+1 返回「次一交易日的开盘竞价开始/结束」。
+ *     用函数而不是把 unlockAt 写进批次，是为了**不新增存档字段**——解锁时刻由
+ *     成交时间和交易日时钟算出来，是纯函数，重启后自然成立（见 market.lockFnFor）。
+ */
+function isUnlocked(lot, now, unlock) {
+  // 老批次可能没有成交时刻（引入 T+1 之前的空头批次）：当成已解锁，绝不能让它们永久锁死
+  if (lot.ts == null) return true;
+  if (typeof unlock === 'function') return now >= unlock(lot.ts);
+  return now - lot.ts >= (unlock || 0);
+}
+
 class Account {
   constructor(name, isNPC = false, role = null) {
     this.name = name; // 账号：登录凭据（唯一、不可改），也是存档里各表的 account 键
@@ -181,12 +199,12 @@ class Account {
    *
    * @param {number} [lockMs] 该账户券商的锁仓时长
    */
-  sellableLong(stockId, now, lockMs = config.trade.lockMs) {
+  sellableLong(stockId, now, unlock = config.trade.lockMs) {
     const p = this.longs.get(stockId);
     if (!p) return 0;
     let n = 0;
     for (const lot of p.lots) {
-      if (now - lot.ts >= lockMs) {
+      if (isUnlocked(lot, now, unlock)) {
         n += lot.qty - lot.reserved;
       }
     }
@@ -194,9 +212,9 @@ class Account {
   }
 
   /** 真正可卖：可卖多头中未挂入融券池的部分（挂借量按股票取） */
-  freeSellableLong(stockId, now, lockMs = config.trade.lockMs) {
+  freeSellableLong(stockId, now, unlock = config.trade.lockMs) {
     const offered = this.ledgerOf(stockId).lendOffered || 0;
-    return Math.max(0, this.sellableLong(stockId, now, lockMs) - offered);
+    return Math.max(0, this.sellableLong(stockId, now, unlock) - offered);
   }
 
   /**
@@ -211,11 +229,20 @@ class Account {
     return Math.max(0, n - (this.ledgerOf(stockId).lendOffered || 0));
   }
 
-  /** 可平掉的空头（未被占用） */
-  coverableShort(stockId) {
+  /**
+   * 可平掉的空头（未被占用）。
+   * 传了 `now`/`unlock` 时按**开空锁仓**过滤——2026-11-02 起多头 T+1、空头也对称 T+1，
+   * 否则「多头当天锁死、开空当天随便平」就是一个只赚不赔的套利口子。
+   * 不传则退化为「全部可平」（强平、权益、NPC 内部核算走这条，它们不该受锁仓约束）。
+   */
+  coverableShort(stockId, now, unlock) {
     const p = this.shorts.get(stockId);
     if (!p) return 0;
-    return p.lots.reduce((s, l) => s + (l.qty - l.reserved), 0);
+    let n = 0;
+    for (const l of p.lots) {
+      if (now == null || isUnlocked(l, now, unlock)) n += l.qty - l.reserved;
+    }
+    return n;
   }
 
   /**
@@ -232,7 +259,7 @@ class Account {
    * @param {number} [lockMs] 多头只有已过锁仓的批次可被占用（与 reserveLong 同口）
    * @param {number} [now] 判定锁仓的当前时刻
    */
-  syncReserved(stockId, lockMs = config.trade.lockMs, now = Date.now()) {
+  syncReserved(stockId, unlock = config.trade.lockMs, now = Date.now()) {
     let longNeed = 0;
     let shortNeed = 0;
     for (const o of this.orders.values()) {
@@ -244,7 +271,7 @@ class Account {
     if (lp) {
       let need = longNeed;
       for (const lot of lp.lots) {
-        const take = now - lot.ts >= lockMs ? Math.min(lot.qty, need) : 0;
+        const take = isUnlocked(lot, now, unlock) ? Math.min(lot.qty, need) : 0;
         lot.reserved = take;
         need -= take;
       }
@@ -252,8 +279,13 @@ class Account {
     const sp = this.shorts.get(stockId);
     if (sp) {
       let need = shortNeed;
+      // 空头锁仓只在「有交易日时钟 + 采用 T+1 政策」时生效（unlock 是函数）。
+      // NPC 是做市商；数字形态是「无钟兜底」的老口径——那两种情形下空头本来就没有锁，
+      // 历史和单测都依赖这一点，不能让它们突然被 10 秒锁住。
+      const shortUnlock = this.isNPC || typeof unlock !== 'function' ? 0 : unlock;
       for (const lot of sp.lots) {
-        const take = Math.min(lot.qty, need);
+        // 空头同样受开空锁仓约束（T+1 对称）：锁仓中的批次不许被平仓委托占用
+        const take = isUnlocked(lot, now, shortUnlock) ? Math.min(lot.qty, need) : 0;
         lot.reserved = take;
         need -= take;
       }
@@ -264,14 +296,14 @@ class Account {
    * 从多头 FIFO 中预留 qty（需可卖），成功返回 true。
    * `lockMs` 与 `sellableLong` 同口：由调用方传账户券商的锁仓时长，缺省回落全局基准
    */
-  reserveLong(stockId, qty, now, lockMs = config.trade.lockMs) {
+  reserveLong(stockId, qty, now, unlock = config.trade.lockMs) {
     let need = qty;
     const p = this.longs.get(stockId);
     if (!p) return false;
     const before = p.lots.map((l) => l.reserved);
     for (const lot of p.lots) {
       if (need <= 0) break;
-      if (now - lot.ts < lockMs) continue;
+      if (!isUnlocked(lot, now, unlock)) continue;
       const avail = lot.qty - lot.reserved;
       if (avail <= 0) continue;
       const take = Math.min(avail, need);
@@ -332,13 +364,15 @@ class Account {
   }
 
   /** 从空头 FIFO 中预留 qty，成功返回 true（不够则整体回滚，理由同 reserveLong） */
-  reserveShort(stockId, qty) {
+  reserveShort(stockId, qty, now, unlock) {
     let need = qty;
     const p = this.shorts.get(stockId);
     if (!p) return false;
     const before = p.lots.map((l) => l.reserved);
     for (const lot of p.lots) {
       if (need <= 0) break;
+      // 锁仓中的空头批次不能被平仓委托占用（与 coverableShort 同口）
+      if (now != null && !isUnlocked(lot, now, unlock)) continue;
       const avail = lot.qty - lot.reserved;
       if (avail <= 0) continue;
       const take = Math.min(avail, need);

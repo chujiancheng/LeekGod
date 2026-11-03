@@ -7,8 +7,8 @@
  * 受控时钟：把 Date.now 换成每 tick 前进 tickIntervalMs 的假时钟。
  *
  * 存在的理由：引入「天」之后，**「一天的涨跌幅」成了一个一等的调参轴**。
- * `config.npc.trend` 的幅度参数是按「连续无边的时间轴」标的，而一天只有 620 秒
- * = 886 tick、约 3.4 个趋势段；不把这套参数与"一天"对齐，`priceLimit` 的 ±pct
+ * `config.npc.trend` 的幅度参数是按「连续无边的时间轴」标的，而一天只有 5200 tick
+ * （260 分钟 ÷ 3 秒）、约 3.4 个趋势段；不把这套参数与"一天"对齐，`priceLimit` 的 ±pct
  * 就会从"熔断器"变成"日内主约束"，价格大面积贴在涨跌停上，市场等于半瘫。
  *
  * 所以要盯的硬指标有两个（和 npc-probe.js 的"买盘空档率 / 强平次数"同级）：
@@ -32,6 +32,13 @@ const DAY_MS = (config.day.phases || []).reduce((a, p) => a + p.ms, 0) || 620000
 // ── 受控时钟 ──
 let clock = 1800000000000;
 Date.now = () => clock;
+
+// ── 隔夜推力倍数的手动覆盖（调参用，不在 npm test 里）──
+// 例：ODM=13 node test/day-probe.js 2 3 on → 与当前配置做 A/B，看开盘跳空分布差多少
+if (process.env.ODM) {
+  config.npc.overnightDriftMul = Number(process.env.ODM);
+  console.log(`[probe] overnightDriftMul 手动覆盖为 ${config.npc.overnightDriftMul}`);
+}
 
 // ── 强平计数（换波动率最容易把连环爆仓一起放大，必须一起盯）──
 let liqCount = 0;

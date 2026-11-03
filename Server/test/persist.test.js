@@ -63,7 +63,7 @@ assert(p1.loadAll(ALL_IDS).resumed === false, '空存档 resumed=false');
 
 const g1 = new Game({ persist: p1 });
 g1.start();
-g1.day.reanchor(Date.now() - 120000);
+g1.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
 g1.stop(); // 测试里手动 tick，不要 setInterval
 
 console.log('\n[2] 玩家下单产生持仓 / 空头 / 活动委托');
@@ -119,6 +119,7 @@ p1.touch(acc1);
 g1.tick();
 assert(acc1.financeDebt(STOCK.id) > 0, `注入融资负债 ${acc1.financeDebt(STOCK.id)}`);
 
+console.log('DBG lots', JSON.stringify(acc1.longPos(STOCK.id).lots.map(l=>({q:l.qty,d:l.debt,p:l.principal,ts:l.ts}))));
 const before = {
   startedAt: g1.startedAt,
   lastPrice: P(g1).lastPrice,
@@ -163,7 +164,7 @@ assert(snap2.startedAt === before.startedAt, '开局时间延续（未开新局�
 
 const g2 = new Game({ persist: p2 });
 g2.start();
-g2.day.reanchor(Date.now() - 120000);
+g2.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
 g2.stop();
 
 const acc2 = g2.store.get('tester');
@@ -318,7 +319,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p = new Persister(file);
   const g = new Game({ persist: p });
   g.start();
-    g.day.reanchor(Date.now() - 120000);
+    g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g.halt(30, '跨重启测试');
   const until = P(g).haltUntil;
   g.tick(); // 触发一次 commit，把停牌写进 meta
@@ -328,7 +329,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p2h = new Persister(file);
   const g2h = new Game({ persist: p2h });
   g2h.start();
-    g2h.day.reanchor(Date.now() - 120000);
+    g2h.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   assert(P(g2h).isHalted(), '重启后仍在停牌');
   assert(P(g2h).haltUntil === until, `停牌截止时间原样恢复 (${P(g2h).haltUntil})`);
   assert(P(g2h).haltReason === '跨重启测试', '停牌原因原样恢复');
@@ -343,7 +344,7 @@ console.log('\n[12] 停牌状态跨重启保留（不静默复牌）');
   const p3 = new Persister(file);
   const g3 = new Game({ persist: p3 });
   g3.start();
-    g3.day.reanchor(Date.now() - 120000);
+    g3.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   assert(!P(g3).isHalted(), '复牌状态同样跨重启保留');
   g3.stop();
   p3.close();
@@ -361,7 +362,7 @@ console.log('\n[13] 空头存量披露：收盘定格 + 跨重启保留');
   const p = new Persister(file);
   const g = new Game({ persist: p });
   g.start();
-  g.day.reanchor(Date.now() - 120000);
+  g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g.stop();
 
   P(g).shortInterest = 500000;
@@ -381,7 +382,7 @@ console.log('\n[13] 空头存量披露：收盘定格 + 跨重启保留');
   const p2 = new Persister(file);
   const g2 = new Game({ persist: p2 });
   g2.start();
-  g2.day.reanchor(Date.now() - 120000);
+  g2.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g2.stop();
   assert(P(g2).shortInterestPubDay === pubDay, `披露水位线跨重启保留（第 ${P(g2).shortInterestPubDay} 日）`);
   assert(P(g2).pubShortInterest() === 500000, `披露值跨重启保留（不退回实时 ${P(g2).shortInterest}）`);

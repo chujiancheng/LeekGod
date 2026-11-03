@@ -121,7 +121,7 @@
     return { dif, dea, hist };
   }
 
-  // 分时重绘时刷新缓存：光标一动就全量重算 EMA 太浪费（一条序列可到 10300 点）。
+  // 分时重绘时刷新缓存：光标一动就全量重算 EMA 太浪费（一条序列可到 26000 点）。
   // 缓存键带上调用方给的标识（stockId+视图模式）与序列长度/末点时间，任一变了就重算
   const macdCache = { key: '', n: -1, lastT: 0, arr: null };
   function macdOf(key, pts) {

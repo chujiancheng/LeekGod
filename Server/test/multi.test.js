@@ -35,12 +35,26 @@ function assert(cond, msg) {
   }
 }
 
+/** 一天总长：由 day.phases 推导（阶段时长会调整，别写死毫秒） */
+const DAY_MS = config.day.phases.reduce((a, p) => a + p.ms, 0);
+/** reanchor 的偏移：把时钟整体推到「次日同一时刻」（仍落在上午连续竞价） */
+const DAY_AGO = DAY_MS + config.day.phases[0].ms + 90 * 1000;
+/**
+ * 把持仓批次标注成「昨天买的」：造 T+1 已解锁的状态。
+ * ⚠️ reanchor 会平移 startAt，导致原先记录的 ts 被重新解释成另一天，
+ * 所以 ts 必须在**推完时钟之后**再按新 startAt 折算回第 1 天上午。
+ */
+function markBoughtYesterday(g, acc, stockId) {
+  const day1At = g.day.startAt + config.day.phases[0].ms + 60 * 1000;
+  for (const lot of acc.longs.get(stockId).lots) lot.ts = day1At;
+}
+
 /** 起一局纯内存游戏（不启 setInterval），并跑几步让盘口铺开 */
 function fresh(ticks = 12) {
   const g = new Game();
-  // 交易日时钟锚到「上午连续竞价」段内（一天：竞价 0~30s、上午 30~260s…）。
-  // 本文件验的是多股票机制，不需要真等 30 秒集合竞价走完才有成交
-  g.day.reanchor(Date.now() - 120000);
+  // 交易日时钟锚到「上午连续竞价」段内（开盘竞价的时长由 config 决定，约 5 分钟）。
+  // 本文件验的是多股票机制，不需要真等集合竞价走完才有成交
+  g.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   const now = Date.now();
   for (const s of config.stocks) {
     g.npcs.get(s.id).init(now);
@@ -351,8 +365,9 @@ console.log('\n[6] 融券池按股票隔离：挂借、借出、取息都不串�
   assert(buy.ok && buy.order.filled > 0, `A 股建仓成功（${buy.order.filled} 股）`);
   const held = Math.floor(acc.longQty(STOCK_A.id) / 100) * 100;
   assert(held > 0, `A 股持仓 ${held} 股`);
-  // 锁仓未过不能卖，但挂借只看「可卖」——把批次时间往前拨
-  for (const lot of acc.longs.get(STOCK_A.id).lots) lot.ts = Date.now() - 60000;
+  // T+1：今天买的今天既不能卖也不能挂借。推进一整天 + 把批次标成昨天买的
+  g.day.reanchor(Date.now() - DAY_AGO);
+  markBoughtYesterday(g, acc, STOCK_A.id);
   const lend = g.lend(tk, held, STOCK_A.id);
   assert(lend.ok, `A 股挂借成功（${lend.error || 'ok'}）`);
   assert(a.lendTotal === aTotal0 + held, `A 股池子增加 ${held}`);
@@ -456,7 +471,7 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
   const p1 = new Persister(FILE);
   const g1 = new Game({ persist: p1 });
   g1.start();
-    g1.day.reanchor(Date.now() - 120000);
+    g1.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g1.stop();
 
   const tk = g1.onboard('multiuser', 'multiuser', 'zhaoshang').token;
@@ -474,7 +489,8 @@ console.log('\n[9] 存档：11 条行情断点、按股票分账的融券明细�
   assert(buy1.ok && buy1.order.filled > 0, `A 股建仓 ${buy1.order.filled} 股`);
   const held1 = Math.floor(acc1.longQty(STOCK_A.id) / 100) * 100;
   assert(held1 > 0, `A 股持仓 ${held1} 股`);
-  for (const lot of acc1.longs.get(STOCK_A.id).lots) lot.ts = Date.now() - 60000;
+  g1.day.reanchor(Date.now() - DAY_AGO); // 同上：跨一天，T+1 解锁后才能挂借
+  markBoughtYesterday(g1, acc1, STOCK_A.id);
   const lend1 = g1.lend(tk, held1, STOCK_A.id);
   assert(lend1.ok, `A 股挂借 ${held1} 股`);
   const cr = g1.createAuto(tk, {
@@ -620,7 +636,7 @@ console.log('\n[11] 改动股票列表后沿用旧档：不再整局起不来');
   const g1 = new Game({ persist: p1 });
   g1.start();
   // 交易日时钟锚到「上午连续竞价」段（start() 会把它锚到本轮开盘＝集合竞价）
-  g1.day.reanchor(Date.now() - 120000);
+  g1.day.reanchor(Date.now() - (config.day.phases[0].ms + 90 * 1000));
   g1.stop();
   const tk1 = g1.onboard('delstockuser', 'delstockuser', 'zhaoshang').token;
   const acc1 = g1.store.get('delstockuser');
@@ -765,7 +781,10 @@ console.log('\n[13] 同股多空互斥：NPC 单向化，且仍能翻成净空')
   // 机构应当切到空头阵营，并且只往外派发库存、不再挂买开接自己的货
   let dualSeen = 0;
   let bidWhileDumping = 0;
-  for (let i = 0; i < 80; i++) {
+  // 预算按 tick 尺度给：3 秒一 tick 下 470 tick ≈ 23 分钟，相当于旧口径的 80 tick（≈56 秒）。
+  // 派发速度还受 impactCap（≤ 买一承接力 × 3）与主动单频率门约束，库存 300 万股不是几十
+  // tick 能出完的单
+  for (let i = 0; i < 470; i++) {
     inst.ownBias = -3;
     g.tick();
     dualSeen += dualSidePairs(g);
@@ -784,16 +803,18 @@ console.log('\n[13] 同股多空互斥：NPC 单向化，且仍能翻成净空')
   inst.acc.consumeLong(sid, inst.acc.longQty(sid));
   for (const o of [...inst.acc.orders.values()]) man.market.cancel(inst.acc, o.id, Date.now());
   assert(inst.acc.longQty(sid) === 0, '库存已结清');
-  for (let i = 0; i < 80 && inst.acc.shortQty(sid) === 0; i++) {
+  for (let i = 0; i < 470 && inst.acc.shortQty(sid) === 0; i++) {
     inst.ownBias = -3;
     g.tick();
   }
   assert(inst.acc.shortQty(sid) > 0, `库存清空后翻成净空 ${inst.acc.shortQty(sid)} 股`);
 
   // 反向：情绪回暖后必须先把空头平掉，才谈得上回到多头侧。
-  // 预算 400 tick：回补要靠"有人把货卖给它的挂单"或它自己去吃卖盘，行情不给面子时
-  // 200 tick 会偶发收尾未完（改动前的 10 局探针里就出现过 1 次余 21800 股）
-  for (let i = 0; i < 400 && inst.acc.shortQty(sid) > 0; i++) {
+  // 预算 1600 tick（≈80 分钟）：回补要靠"有人把货卖给它的挂单"或它自己去吃卖盘，
+  // 行情不给面子时就慢。400 tick 的原预算在一次「2 挂 1 过」的复跑里明显不够
+  // （实测偶发余 19000~39000 股），而这不是被测行为失败、只是成交节奏没赶上。
+  // **别用缩短断言来"修"偶发**：这里只放大机会窗口，断言仍是「必须回补到 0」
+  for (let i = 0; i < 1600 && inst.acc.shortQty(sid) > 0; i++) {
     inst.ownBias = 3;
     g.tick();
   }

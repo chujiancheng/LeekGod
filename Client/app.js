@@ -10,15 +10,15 @@
   // 旧键 gushen_name 是"账号与昵称还没分家"时留下的，读一次兜底，免得老浏览器卡在登录页
   let me = localStorage.getItem('gushen_account') || localStorage.getItem('gushen_name') || '';
   /**
-   * 一个游戏日有多少**真实**分钟（620 秒 ≈ 10.3 分钟，取服务端下发的 `rules.day.totalMs`）。
+   * 一个游戏日有多少**真实**分钟（260 分钟 = 4 小时 20 分，取服务端下发的 `rules.day.totalMs`）。
    *
    * 做空利息按游戏日结算，界面上凡是把日息折算成「每分钟」的地方都必须用这个数：
    * 融资那边的分钟息是**真实分钟**（服务端逐 tick 摊），两边混在一行里相加时
-   * 单位必须一致。用 A 股的 240 交易分钟折算会让做空成本少算约 23 倍。
+   * 单位必须一致。用 A 股的 240 交易分钟折算会让做空成本少算约 8%。
    */
   function minutesPerGameDay() {
     const ms = state && state.rules && state.rules.day && Number(state.rules.day.totalMs);
-    return ms > 0 ? ms / 60000 : 620000 / 60000;
+    return ms > 0 ? ms / 60000 : 260;
   }
   let myNick = localStorage.getItem('gushen_nick') || '';
   let token = localStorage.getItem('gushen_token') || '';
@@ -26,10 +26,15 @@
   // 分时：每只股票一条独立序列（切股票时拉该股全量，之后靠 SSE 每帧追加）。
   // 之前是单个 history 数组，多股票下会被 10 只股票互相覆盖
   const histories = new Map(); // stockId -> [{t, price, vol}]
-  // 已经拉过**全量**分时的标的。不能用 histories.has() 判断：onState 每帧会给全部标的
-  // 追加一个点，第一帧过后每只股票都在 histories 里了，那样 /api/history 永远不会被调用，
-  // 分时图就只剩「本次会话累积的点」，刷新页面后看不到服务端已积累的历史
-  const histLoaded = new Set();
+  // 已经拉过的分时窗口：stockId -> 已拉到几天（1 = 只到今天开盘，5 = 五日）。
+  // 不能用 histories.has() 判断：onState 每帧会给全部标的追加一个点，第一帧过后每只股票
+  // 都在 histories 里了，那样 /api/history 永远不会被调用，刷新后看不到服务端已积累的历史。
+  // **也不能再用布尔**：内存里留 5 天（26000 点 ≈1.3MB），默认只拉今天（≈250KB），
+  // 玩家切到「五日」时才按 days=5 补拉一次——用布尔的话「拉过就不拉」会让五日只画得出今天
+  const histLoaded = new Map();
+  // 本地分时序列的容量上限，与服务端 config.market.priceHistorySize 同口径
+  //（26000 点 ≈ 5.3 个交易日；一天 ≈ 4904 点）
+  const HIST_MAX = 26000;
   // 迷你走势用的**降采样**序列（/api/sparks 一次拉全，之后同样按帧追加）
   const sparks = new Map(); // stockId -> [{t, price, vol}]
   let activeStockId = localStorage.getItem('gushen_stock') || ''; // 交易终端当前看的股票
@@ -96,7 +101,7 @@
   // 分时的取数窗口（只有分时模式用得上）：
   //   day = 只看当天（默认；真实行情软件的分时口径，跨天不再连成一条）
   //   5d  = 连续 5 个交易日
-  // 服务端的分时序列是**跨天连续**的一整条（保留 10300 点 ≈ 11.6 个交易日），
+  // 服务端的分时序列是**跨天连续**的一整条（保留 26000 点 ≈ 5.3 个交易日，一天约 4904 点），
   // 不加窗口的话昨天、前天的走势会一直连在左边，开盘价跳一次就看不明白了
   const MINUTE_RANGE_KEY = 'gushen_minute_range';
   const MINUTE_DAYS = 5; // 「5 日」窗口覆盖的交易日数（含当天）
@@ -455,7 +460,7 @@
     return lock;
   }
 
-  /** 某只股票的**全量**分时序列（跨天连续，服务端保留最近约 2 小时） */
+  /** 某只股票的**全量**分时序列（跨天连续，服务端保留最近 26000 点 ≈ 5.3 个交易日） */
   function histOf(stockId) {
     return histories.get(stockId) || [];
   }
@@ -881,7 +886,7 @@
       </div>
       <div class="bk-metrics">
         佣金 <b>${fmtFeeRate(p.feeRate)}</b> · 冷却 <b>${(p.cooldownMs / 1000).toFixed(1)}s</b> ·
-        锁仓 <b>${(p.lockMs / 1000).toFixed(0)}s</b> · 融资 <b>${p.leverage}×</b><br>
+        锁仓 <b>${lockShort(p.lock, p.lockMs)}</b> · 融资 <b>${p.leverage}×</b><br>
         保证金 <b>${Math.round((p.financeRatio || 0) * 100)}%</b> · 券源 <b>${p.lendCapacityPct}%</b> ·
         策略 <b>${p.autoMax} 条</b>${p.newsLeadMs ? ` · 提前量 <b>${(p.newsLeadMs / 1000).toFixed(1)}s</b>` : ''}
       </div>
@@ -2036,11 +2041,19 @@
     }
   }
 
-  /** 拉某只股票的完整分时（首次切到该标的时用，之后靠 SSE 追加） */
-  function loadHistory(stockId) {
-    if (!stockId || histLoaded.has(stockId)) return;
-    histLoaded.add(stockId);
-    apiGet('/api/history?stock=' + encodeURIComponent(stockId))
+  /**
+   * 拉某只股票的分时（首次切到该标的时用，之后靠 SSE 追加）。
+   * @param {string} stockId
+   * @param {number} [days] 回看几个交易日（1 或 5）。缺省按当前窗口：
+   *   「五日」视图要 5 天，其余只拉今天（1 天 ≈250KB，5 天 ≈1.3MB，别默认全拉）
+   * 已经拉到过不少于所需天数时直接跳过——所以切回「当日」不会再发一次请求
+   */
+  function loadHistory(stockId, days) {
+    const want = (days || (minuteRange === '5d' ? 5 : 1)) >= 5 ? 5 : 1;
+    if (!stockId || (histLoaded.get(stockId) || 0) >= want) return;
+    // 先占位：避免并发两次（切股票 + 切窗口）重复发同一个请求
+    histLoaded.set(stockId, want);
+    apiGet('/api/history?stock=' + encodeURIComponent(stockId) + '&days=' + want)
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (!res || !res.ok) {
@@ -2245,7 +2258,9 @@
     const last = arr[arr.length - 1];
     if (!last || t > last.t) arr.push({ t, price, vol });
     else if (t === last.t) arr[arr.length - 1] = { t, price, vol };
-    if (arr.length > 10300) arr.splice(0, arr.length - 10300);
+    // 上限与服务端 config.market.priceHistorySize 同口径（26000 点 ≈ 5.3 个交易日）。
+    // 写死 10300 是旧 700ms 口径留下的：一天 4904 点下只够 2 天，「五日」会越跑越短
+    if (arr.length > HIST_MAX) arr.splice(0, arr.length - HIST_MAX);
   }
 
   // ---------- 分时定格（集合竞价 / 午休 / 夜间） ----------
@@ -2537,6 +2552,8 @@
     if (next === minuteRange) return;
     minuteRange = next;
     localStorage.setItem(MINUTE_RANGE_KEY, minuteRange);
+    // 切到「五日」要补拉更长的窗口（默认只拉了今天）。拉到之后 loadHistory 自己会重画
+    if (minuteRange === '5d') loadHistory(activeStockId, 5);
     renderChartMode();
     drawChart();
   }
@@ -3215,7 +3232,7 @@
         const avg = p.long.cost / p.long.qty;
         const lockedLot = p.long.lots.find((l) => l.lockedUntil > state.serverTime);
         const status = p.long.sellable <= 0
-          ? '<span class="tag lock">锁仓中</span>'
+          ? lockTagHtml()
           : lockedLot
             ? `<span class="tag ok">可卖 ${fmtQty(p.long.sellable)}</span>`
             : `<span class="tag ok">可卖 ${fmtQty(p.long.sellable)}</span>`;
@@ -4277,7 +4294,7 @@
     const cells = [
       ['佣金', fmtFeeRate(bk.feeRate), bk.weekly && bk.weekly.isStar ? '本周半价' : ''],
       ['下单冷却', (bk.cooldownMs / 1000).toFixed(1) + 's', ''],
-      ['买入锁仓', (bk.lockMs / 1000).toFixed(0) + 's', ''],
+      ['卖出锁仓', lockShort(bk.lock, bk.lockMs), bk.lock === 't0' ? '当天可卖' : '次日开盘解锁'],
       ['融资额度', bk.leverage + '×', '自备 ' + Math.round(bk.financeRatio * 100) + '%'],
       ['保证金', Math.round(bk.marginRatio * 100) + '%', ''],
       ['维持率', Math.round(bk.maintenance * 100) + '%', bk.features && bk.features.zeroBufferLiquidation ? '零缓冲' : ''],
@@ -4588,7 +4605,7 @@
       '<div class="rule-grid">' +
         '<div class="rule-cell"><b>一份本金，十个盘口</b><span>现金全股票共用、持仓按股票分账。重仓一只，别的股票就没子弹了。</span></div>' +
         '<div class="rule-cell"><b>同股只能一个方向</b><span>同一只股票要么做多要么做空（含在途开仓单），不能自己跟自己对着干。</span></div>' +
-        '<div class="rule-cell"><b>一天只有 ' + fmtDur((r.day && r.day.totalMs) || 620000) + '</b><span>开盘竞价 → 上午 → 午休 → 下午 → 收盘竞价 → 夜间结算。</span></div>' +
+        '<div class="rule-cell"><b>一个交易日 ' + fmtDur((r.day && r.day.totalMs) || 15600000) + '</b><span>开盘竞价 → 上午 → 午休 → 下午 → 收盘竞价 → 夜间结算（盘中与真实时间 1:1，只快进两段休市）。</span></div>' +
         '<div class="rule-cell"><b>赚差价，也付利息</b><span>融资逐分钟计息；融券按持仓时长累计、每个游戏日收盘结算一次。扛得越久，成本越高。</span></div>' +
         '<div class="rule-cell"><b>指数看得见，摸不着</b><span>「' + esc(state.index ? state.index.name : '全村希望') + '」由十只股票加权合成，只做参照，不能下单。</span></div>' +
       '</div>' +
@@ -4601,7 +4618,8 @@
     const r = S.rules || {};
     const lot = r.lotSize || 100;
     const cd = r.cooldownMs == null ? 2000 : r.cooldownMs;
-    const lock = r.lockMs == null ? 10000 : r.lockMs;
+    const lockTxt = lockText(r.lock, r.lockMs);
+    const sameDaySell = r.lock === 't0';
     const dev = r.maxDeviation == null ? 0.5 : r.maxDeviation;
     const cage = r.cagePct == null ? 0.05 : r.cagePct;
     const pl = r.priceLimit || {};
@@ -4609,9 +4627,9 @@
     const own = fin.ratio == null ? 0.5 : fin.ratio;
     const dirTable = ruleTable(['方向', '做什么', '前提'], [
       ['<b>买入开多</b><span class="rule-sub">buy_open</span>', '用现金买股票，涨了赚', '现金够（勾了融资则只需自备 ' + fmtRatio(own) + '）'],
-      ['<b>卖出平多</b><span class="rule-sub">sell_close</span>', '把手上的多头卖掉兑现', '过了锁仓期、数量不超过可平'],
+      ['<b>卖出平多</b><span class="rule-sub">sell_close</span>', '把手上的多头卖掉兑现', (sameDaySell ? '当天就能卖' : 'T+1 解锁后') + '、数量不超过可平'],
       ['<b>卖出开空</b><span class="rule-sub">sell_open</span>', '先借券卖出，跌了再买回还券', '该股券源可借 + 保证金够'],
-      ['<b>买入平空</b><span class="rule-sub">buy_close</span>', '买回股票还给借出方', '有对应的空头持仓'],
+      ['<b>买入平空</b><span class="rule-sub">buy_close</span>', '买回股票还给借出方', '有对应的空头持仓' + (sameDaySell ? '' : '，且过了 T+1')],
     ]);
     return (
       '<div class="rule-lead">四种方向决定你是<b>开仓</b>还是<b>平仓</b>；能不能开，还要看方向锁与券源。</div>' +
@@ -4620,11 +4638,11 @@
       ruleKv('交易单位', '1 手 = ' + lot + ' 股', '金额随股价不同，下单面板会自动折算') +
       ruleKv('手续费', fmtFeeRate(r.feeRate), '买卖都收，没有最低 5 元') +
       ruleKv('下单冷却', fmtDur(cd), '跨股票共享：冷却里换一只股票下，也算同一笔') +
-      ruleKv('买入锁仓', 'T+' + fmtDur(lock), '按成交时间算，锁仓期内不能卖') +
+      ruleKv('卖出锁仓', lockTxt, sameDaySell ? '成交即可卖，日内可反复做' : '按成交所属交易日算，次日开盘才解锁') +
       ruleKv('委托价偏离', '±' + fmtRatio(dev), '相对最新价，防止手滑打错价格') +
       ruleKv('价格笼子', '±' + fmtRatio(cage, 1), '单笔成交价相对最新价的偏离上限') +
       ruleKv('涨跌停', pl.enabled === false ? '本服未开启' : '±' + fmtRatio(pl.pct == null ? 0.1 : pl.pct), '相对昨收，集合竞价也受它约束') +
-      ruleKv('交易方向', '多空双向', '当天买当天就能卖（过了锁仓期即可）') +
+      ruleKv('交易方向', '多空双向', sameDaySell ? '当天买当天就能卖' : '多头与空头都是 T+1，做空也一样锁') +
       '<div class="rule-warn"><b>挂得远，不等于成交得远。</b>脱离价格笼子的委托会留在盘口等着，' +
         '等最新价靠近它才可能成交；想马上成交，就把价格挂在笼子里。</div>' +
       '<div class="rule-tip"><b>同股多空互斥：</b>一只股票上持有多头（或有买入开仓在途）就不能再卖出开空，' +
@@ -4692,7 +4710,7 @@
     const table = rows.length
       ? ruleTable(['阶段', '盘面时刻', '真实时长', '能下单'], rows)
       : '<div class="rule-warn">本服务端没有下发交易日阶段表，可能未开启交易日时钟。</div>';
-    const total = fmtDur(day.totalMs || 620000);
+    const total = fmtDur(day.totalMs || 15600000);
     return (
       '<div class="rule-lead">一天被切成六段，共 <b>' + total + '</b>。段与段之间发生的事完全不同：' +
         '竞价只入簿不撮合、午休与夜间完全冻结、收盘那一 tick 结算全天。</div>' +
@@ -4729,7 +4747,7 @@
         fmtFeeRate(p.feeRate),
         p.leverage ? trimNum(p.leverage, 2) + '×' : '--',
         p.maintenance == null ? '--' : fmtRatio(p.maintenance),
-        p.lockMs == null ? '--' : fmtDur(p.lockMs),
+        lockShort(p.lock, p.lockMs),
         p.lendCapacityPct == null ? '--' : p.lendCapacityPct + '%',
       ];
     });
@@ -5310,7 +5328,7 @@
           const status = r.side === 'long'
             ? r.closable > 0
               ? `<span class="tag ok">可平 ${fmtQty(r.closable)}</span>`
-              : '<span class="tag lock">锁仓中</span>'
+              : lockTagHtml()
             : `<span class="tag">保证金 ${fmtMoney(r.margin)}</span>`;
           return `<tr class="${r.rowCls}" data-stock="${esc(r.stock.stockId)}">
             <td>${esc(r.stock.name)}<span class="sub-code">${esc(r.stock.stockId)}</span></td>
@@ -5648,7 +5666,7 @@
     } else if (autoType === 'ma') {
       const gap = rules.ma ? rules.ma.minSlowGap : 10;
       $('autoFields').innerHTML = `
-        <div class="field"><label>快线窗口（tick，1 tick ≈ 0.7 秒）</label>
+        <div class="field"><label>快线窗口（tick，1 tick = 3 秒）</label>
           <input id="afFast" type="number" step="1" min="${rules.ma ? rules.ma.minFast : 10}" max="${rules.ma ? rules.ma.maxFast : 300}" value="45">
         </div>
         <div class="field"><label>慢线窗口（tick，至少 = 快线 + ${gap}）</label>
@@ -6189,9 +6207,58 @@
     return state ? state.serverTime + (Date.now() - lastStateAt) : Date.now();
   }
 
+  /**
+   * 毫秒 → 人话时长。日长改 1:1 后「一天」是 260 分钟，必须出小时，
+   * 否则规则页会写成「260 分 0 秒」；「分 秒」的零头也只在真的有时才写。
+   */
   function fmtDur(ms) {
     const s = Math.ceil(ms / 1000);
-    return s >= 60 ? `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒` : `${s} 秒`;
+    if (s >= 3600) {
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+    }
+    if (s >= 60) {
+      const m = Math.floor(s / 60);
+      const rest = s % 60;
+      return rest ? `${m} 分 ${String(rest).padStart(2, '0')} 秒` : `${m} 分`;
+    }
+    return `${s} 秒`;
+  }
+
+  // ---------- 锁仓（见服务端 src/market.js lockFnFor / lockTextFor） ----------
+  //
+  // 2026-11-02 起锁仓不再是「N 秒」而是**跨日政策**：滑泰 T+0（成交即可卖）、
+  // 天疯 T+1 且次日 09:15 就解锁、其余券商 T+1 到次日 09:25（开盘集合竞价收完才解锁）。
+  // 服务端把政策字符串放在 rules.lock（券商覆盖后），lockMs 只在没有交易日时钟的
+  // 老口径里还有意义——所以这里先认 lock，认不出来才退回秒数。
+
+  /** 短标签，表格/卡片用：T+0 / T+1 · 09:15 / T+1 · 09:25 */
+  function lockShort(lock, lockMs) {
+    if (lock === 't0') return 'T+0';
+    if (lock === 't1-open') return 'T+1 · 09:15';
+    if (lock === 't1') return 'T+1 · 09:25';
+    return lockMs == null ? '--' : 'T+' + fmtDur(lockMs);
+  }
+
+  /** 持仓行的「锁仓中」标签：带上什么时候解锁，别只丢两个字让玩家猜 */
+  function lockTagHtml() {
+    const r = (state && state.rules) || {};
+    const short = lockShort(r.lock, r.lockMs);
+    const tip = short.indexOf('T+1') === 0
+      ? 'T+1 锁仓：下一个交易日开盘集合竞价结束后才能卖'
+      : short === 'T+0'
+        ? 'T+0：成交即可卖（这里锁着是别的原因，比如已挂借融券）'
+        : '锁仓中，暂时不能卖';
+    return `<span class="tag lock" title="${tip}">锁仓中 ${short}</span>`;
+  }
+
+  /** 一句话说明，规则页与提示用 */
+  function lockText(lock, lockMs) {
+    if (lock === 't0') return 'T+0（成交即可卖）';
+    if (lock === 't1-open') return 'T+1（次日 09:15 解锁）';
+    if (lock === 't1') return 'T+1（次日 09:25 解锁）';
+    return lockMs == null ? '--' : 'T+' + fmtDur(lockMs) + ' 锁仓';
   }
 
   // ---------- 交易日（见服务端 src/daycycle.js） ----------
@@ -6213,7 +6280,7 @@
   /**
    * 游戏内的真实交易时刻（毫秒，自 00:00 起）。
    * 服务端只给到「上一帧那一刻」，这里按阶段内的真实比例线性推进：
-   * 竞价 30 秒映射 09:15→09:25，于是 3 秒后顶栏正好走到 09:16。
+   * 开盘竞价 5 分钟映射 09:15→09:25，于是过半时顶栏正好走到 09:20。
    * 跨过阶段末尾时就夹住，等下一帧（最慢 200ms）把阶段对齐。
    */
   function gameClockNow() {
@@ -6252,7 +6319,7 @@
    *
    * 分时图的横轴是墙钟（点的 t 就是服务端 tick 的时刻），可玩家要读的是「09:30 / 11:30 / 13:00」
    * 这层游戏内时间——就是顶栏时钟显示的那个。不能拿**当前阶段**的压缩比整条轴外推：各阶段
-   * 压缩比差一个量级（上午 230s→120min、午休 40s→90min、夜间 40s→1095min），外推会把前面的
+   * 压缩比差一个量级（上午 120min→120min 等比、午休 5min→90min、夜间 10min→1095min），外推会把前面的
    * 刻度全算歪。这里按服务端下发的阶段表（`day.phases`）**逐阶段**线性插值——与
    * daycycle.js 的 `gameClock()` 同一套算法，只是反过来查；天号按 dayStartAt 回推（每天等长），
    * 5 日视图因此不会串日。
@@ -6282,8 +6349,8 @@
 
   // ---------- 分时横轴：休市与开盘竞价压成 0 宽 ----------
   //
-  // 墙钟横轴会把「根本没有行情的时间」照样铺开：午休只有 40 秒墙钟，却要在一天里
-  // 占掉 6% 的宽度，而这几段只留一个定格锚点（见上面「分时定格」），于是 11:30 到
+  // 墙钟横轴会把「根本没有行情的时间」照样铺开：午休只有 5 分钟墙钟，却要在一天里
+  // 占掉 2% 的宽度，而这几段只留一个定格锚点（见上面「分时定格」），于是 11:30 到
   // 13:00 之间被拉出一条又长又平的横线——看着像停牌、又像行情卡住了。
   //
   // 这里把横轴换成**连续竞价时间轴**：每个阶段按它映射的真实交易时长（phases[].gm）
@@ -6963,7 +7030,7 @@
 
   /**
    * K 线的 MACD：直接现算，**不做缓存**。
-   * 分时那边要缓存是因为一条序列 10300 点、光标一动就全量重算；K 线最多千根，
+   * 分时那边要缓存是因为一条序列 26000 点、光标一动就全量重算；K 线最多千根，
    * 一次 O(n) 循环可以忽略。而「缓存键」这种东西在 K 线上反而不安全——键只能取到
    * 根数 / 首末值，中间某根被结算改写（或 dayBars 整体换掉）时根数与末根收盘都可能不变，
    * 于是读到上一次的 MACD。少一层缓存就少一类这种 bug。

@@ -12,7 +12,7 @@
  *   2. SSE（sseEncoder()）：连接建立时若客户端支持，挂一个常驻 gzip 流在 res 前面，
  *      帧全部写进压缩流，**每帧之后 flush()（Z_SYNC_FLUSH）**——SSE 客户端必须
  *      能立刻解出当前帧，不能等缓冲攒满。每 tick 每连接一次 flush 的 CPU 开销
- *      在 700ms 的 tick 间隔下可以忽略（level 1，80KB 帧 ≈ 1ms）。
+ *      在 3000ms 的 tick 间隔下可以忽略（level 1，80KB 帧 ≈ 1ms）。
  *
  * 兼容性：浏览器 EventSource / requests（urllib3）/ OkHttp 都默认带
  * Accept-Encoding: gzip 且透明解压；curl 与 urllib.request 不主动带该头，
