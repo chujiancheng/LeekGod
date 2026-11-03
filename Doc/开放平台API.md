@@ -2638,7 +2638,7 @@ A：v1 开放接口不提供这些。它们只在网页端有。
 | `serverTime` / `ts` / `t` / `lockedUntil` | 毫秒时间戳 | 不是秒 |
 | `cash` / `equity` / `price` / `turnover` | 元 | 两位小数 |
 | `qty` / `volume` / `sellable` / `coverable` | 股 | 整数 |
-| `feeRate` | 小数 | 0.0001 = 0.01% |
+| `feeRate` | 小数 | **总费率**（佣金 + 税费），基准 ≈`0.0012` = 0.12%/边；拆分字段见 §6.11 |
 | `changePct` / `marginUsage` / `utilization` / `outerPct` | 百分数 | 2.5 = 2.5% |
 | `priceLimit.pct` | 百分数 | 30 = ±30% |
 | `finance.baseMinuteRate` | 小数/分钟 | 0.0001 = 0.01%/分钟 |
