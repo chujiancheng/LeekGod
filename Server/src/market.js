@@ -1256,6 +1256,19 @@ class Market {
           if (!config.margin.allowNakedShort) this.lendReserved = Math.max(0, this.lendReserved - qty);
           return { ok: false, error: '保证金不足，无法继续开空' };
         }
+        // 港股按金制（2026-11-03，用户拍板「多空对称」）：开空**下单即冻结**
+        // 「市值 × 保证金率 + 税费」，不是等成交才从卖出款里扣。港股券商对卖空的
+        // 资金占用本来就发生在报单那一刻；成交时释放这份冻结、再从卖出款里扣走
+        // 保证金转成 shortMargin（见 settleSell 的开空分支），所以净占用不变、
+        // 只是「在途」的那一段也占钱——连挂多张贴边空单再也无法把额度用到 0 而不占资金。
+        // NPC 豁免：3160 个投资者若每张空单都冻 50% 市值，全池现金会被冻死、盘口直接枯。
+        if (!account.isNPC) {
+          freeze = r2(addMV * ratio + r2(addMV * feeRate));
+          if (account.cash < freeze) {
+            if (!config.margin.allowNakedShort) this.lendReserved = Math.max(0, this.lendReserved - qty);
+            return { ok: false, error: '可用资金不足（开空需冻结保证金）' };
+          }
+        }
         break;
       }
       case ACTIONS.BUY_CLOSE: {
@@ -1756,7 +1769,11 @@ class Market {
       const marginRatio = order.marginRatio != null ? order.marginRatio : config.margin.ratio;
       const proceeds = r2(price * qty);
       const marginAdd = r2(proceeds * marginRatio);
-      acc.cash = r2(acc.cash + proceeds - marginAdd - fee);
+      // 先退下单时冻结的「保证金 + 税费预估」（按挂单价、按本次成交量），
+      // 再按实际成交价扣保证金与手续费——净额与「不冻结」的老口径逐位一致，
+      // 差别只在于下单到成交这段在途时间里这笔钱是被占住的
+      const rel = this.releaseFrozen(order, r2(order.price * qty * (marginRatio + feeRate)));
+      acc.cash = r2(acc.cash + rel + proceeds - marginAdd - fee);
       acc.shortMargin = r2(acc.shortMargin + marginAdd);
       if (!isGhost) {
         acc.shortPos(order.stockId).lots.push({ qty, price, margin: marginAdd, ts: now, reserved: 0 });

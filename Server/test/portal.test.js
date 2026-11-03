@@ -120,13 +120,15 @@ const pingWith = async (key) => {
 
   const row = persist.db.prepare('SELECT * FROM api_keys WHERE id = ?').get(ID_A);
   assert(!!row && row.secret_hash.length === 64, '库里只有 64 位 sha256');
-  assert(!JSON.stringify(row).includes(KEY_A.split('_')[2]), '明文 secret 不落库');
+  // secret 本身允许含 `_`，用 split('_')[2] 会截成片段、随机撞上哈希/备注（通过数 53/54 抖动就是它）
+  const SECRET_A = KEY_A.split('_').slice(2).join('_');
+  assert(!JSON.stringify(row).includes(SECRET_A), '明文 secret 不落库');
 
   r = await api('GET', '/api/open/keys', { token: A.token });
   assert(r.status === 200 && r.data.cap === config.open.maxKeysPerAccount, '列表返回每账号上限');
   const listed = r.data.keys.find((k) => k.id === ID_A);
   assert(!!listed && listed.label === '家用电脑-双均线', '列表能看到自己的 Key 与备注');
-  assert(!JSON.stringify(r.data).includes(KEY_A.split('_')[2]), '列表不含明文 secret');
+  assert(!JSON.stringify(r.data).includes(SECRET_A), '列表不含明文 secret');
   assert(!JSON.stringify(r.data).includes('secret_hash'), '列表不含哈希字段');
 
   // 只读 Key

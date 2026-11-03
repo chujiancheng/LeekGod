@@ -181,7 +181,10 @@
                 '<div class="broker-name">' + esc(b.name) + '</div>' +
                 '<div class="broker-desc">' + esc(b.slogan || b.persona || '') + '</div>' +
                 '<div class="broker-tags">' +
-                  '<span class="tag">佣金 ' + (p.feeRate != null ? (p.feeRate * 10000).toFixed(1) + '‱' : '—') + '</span>' +
+                  '<span class="tag">佣金 ' + ((p.commissionRate != null ? p.commissionRate : p.feeRate) != null
+                    ? ((p.commissionRate != null ? p.commissionRate : p.feeRate) * 10000).toFixed(1) + '‱'
+                    : '—') + '</span>' +
+                  '<span class="tag">税费 ' + (p.taxRate ? (p.taxRate * 100).toFixed(2) + '%' : '—') + '</span>' +
                   '<span class="tag">冷却 ' + ((p.cooldownMs || 0) / 1000).toFixed(1) + 's</span>' +
                   '<span class="tag ' + (b.crowdPct >= 45 ? 'tag-bad' : 'tag-good') + '">' +
                     esc(b.crowdLabel || '') + ' ' + esc(String(b.crowdPct || 0)) + '%</span>' +

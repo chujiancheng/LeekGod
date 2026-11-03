@@ -193,8 +193,18 @@ console.log('\n[5] 状态快照结构完整');
   for (const n of g.news.tape) if (n.publicAt > Date.now()) n.publicAt = Date.now() - 1;
   assert(g.stateFor(token).news.length >= 1, '已公开的消息随快照下发');
   // rules 现在是**账户券商的有效值**（两级兜底后的结果），不再是全局常量。
-  // 本用例的账号开了招伤：佣金万 2、冷却 2.0s、锁仓 10s
-  assert(st.rules && st.rules.feeRate === 0.0002, `规则里是账户券商的有效费率（${st.rules.feeRate}）`);
+  // 本用例的账号开了招伤：佣金万 2、冷却 2.0s、锁仓 T+0
+  // 2026-11-03 起 feeRate 拆成三段：commissionRate（券商佣金）+ taxRate（港股法定税费）
+  // = feeRate（下单/预估用的总费率）。税费是市场规则，不随券商与折扣变。
+  assert(
+    st.rules && Math.abs(st.rules.commissionRate - 0.0002) < 1e-9,
+    `规则里是账户券商的佣金（${st.rules && st.rules.commissionRate}）`
+  );
+  assert(
+    st.rules && st.rules.taxRate > 0.001 &&
+      Math.abs(st.rules.feeRate - (st.rules.commissionRate + st.rules.taxRate)) < 1e-12,
+    `总费率 = 佣金 + 港股法定税费（${st.rules && st.rules.feeRate}）`
+  );
   assert(st.rules.brokers && st.rules.brokers.length === 6, '规则里带六家券商的展示元数据');
   assert(st.account.broker && st.account.broker.key === 'zhaoshang', '账户的券商信息已下发');
   assert(Array.isArray(st.rules.stocks) && st.rules.stocks.length === config.stocks.length, '规则里带股票清单');

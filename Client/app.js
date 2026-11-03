@@ -832,6 +832,17 @@
   }
 
   /**
+   * 港股法定税费（印花税 0.1% + 交易征费 + 交易费 + 结算费，**买卖双边各收一次**）。
+   * 2026-11-03 起 `rules.feeRate` = 佣金 + 税费，`rules.commissionRate` 才是券商佣金；
+   * 老服务端没有拆分字段时退回 feeRate（展示成「佣金」，实际上含费，至少不显示 --）。
+   */
+  function fmtTaxRate(rate) {
+    if (!Number.isFinite(rate)) return '--';
+    return (rate * 100).toFixed(2) + '%';
+  }
+  const commissionOf = (o) => (o && Number.isFinite(o.commissionRate) ? o.commissionRate : o && o.feeRate);
+
+  /**
    * 券商图标。`xs` 走 96px 缩略图（盘口/逐笔/排行榜这些高频小位置）——
    * 1024 原图 262KB~990KB，一屏几十个 12px 图标用原图纯属浪费；
    * 卡片墙与「我的券商」卡才用原图（§11.5）
@@ -885,7 +896,8 @@
         ${o.tag ? `<span class="chip">${esc(o.tag)}</span>` : ''}
       </div>
       <div class="bk-metrics">
-        佣金 <b>${fmtFeeRate(p.feeRate)}</b> · 冷却 <b>${(p.cooldownMs / 1000).toFixed(1)}s</b> ·
+        佣金 <b>${fmtFeeRate(commissionOf(p))}</b> · 税费 <b>${fmtTaxRate(p.taxRate)}</b> ·
+        冷却 <b>${(p.cooldownMs / 1000).toFixed(1)}s</b> ·
         锁仓 <b>${lockShort(p.lock, p.lockMs)}</b> · 融资 <b>${p.leverage}×</b><br>
         保证金 <b>${Math.round((p.financeRatio || 0) * 100)}%</b> · 券源 <b>${p.lendCapacityPct}%</b> ·
         策略 <b>${p.autoMax} 条</b>${p.newsLeadMs ? ` · 提前量 <b>${(p.newsLeadMs / 1000).toFixed(1)}s</b>` : ''}
@@ -4292,7 +4304,8 @@
     const pct = bk.intensity || 0;
 
     const cells = [
-      ['佣金', fmtFeeRate(bk.feeRate), bk.weekly && bk.weekly.isStar ? '本周半价' : ''],
+      ['佣金', fmtFeeRate(commissionOf(bk)), bk.weekly && bk.weekly.isStar ? '本周半价' : ''],
+      ['法定税费', fmtTaxRate(bk.taxRate), '印花税 0.1% + 征费/交易费/结算费，买卖双边'],
       ['下单冷却', (bk.cooldownMs / 1000).toFixed(1) + 's', ''],
       ['卖出锁仓', lockShort(bk.lock, bk.lockMs), bk.lock === 't0' ? '港股 T+0，当天可卖' : '次日开盘解锁'],
       ['融资额度', bk.leverage + '×', '自备 ' + Math.round(bk.financeRatio * 100) + '%'],
@@ -4636,12 +4649,21 @@
       dirTable +
       '<div class="rule-h">撮合与约束</div>' +
       ruleKv('交易单位', '1 手 = ' + lot + ' 股', '金额随股价不同，下单面板会自动折算') +
-      ruleKv('手续费', fmtFeeRate(r.feeRate), '买卖都收，没有最低 5 元') +
+      ruleKv('券商佣金', fmtFeeRate(commissionOf(r)), '买卖都收，没有最低 5 元') +
+      ruleKv(
+        '港股法定税费',
+        fmtTaxRate(r.taxRate),
+        '印花税 0.1% + 交易征费/交易费/结算费，买卖双边各收一次'
+      ) +
       ruleKv('下单冷却', fmtDur(cd), '跨股票共享：冷却里换一只股票下，也算同一笔') +
       ruleKv('卖出锁仓', lockTxt, sameDaySell ? '港股规则：成交即可卖，同一只票日内能反复做' : '按成交所属交易日算，次日开盘才解锁') +
       ruleKv('委托价偏离', '±' + fmtRatio(dev), '相对最新价，防止手滑打错价格') +
       ruleKv('价格笼子', '±' + fmtRatio(cage, 1), '单笔成交价相对最新价的偏离上限') +
-      ruleKv('涨跌停', pl.enabled === false ? '本服未开启' : '±' + fmtRatio(pl.pct == null ? 0.1 : pl.pct), '相对昨收，集合竞价也受它约束') +
+      ruleKv(
+        '涨跌停',
+        pl.enabled === false ? '本服未开启（港股口径）' : '±' + fmtRatio(pl.pct == null ? 0.1 : pl.pct),
+        pl.enabled === false ? '港股主板没有涨跌停，只有市调机制冷静期；本服不模拟' : '相对昨收，集合竞价也受它约束'
+      ) +
       ruleKv('交易方向', '多空双向', sameDaySell ? '多空都 T+0：当天开仓、当天就能平' : '多头与空头都是 T+1，做空也一样锁') +
       '<div class="rule-warn"><b>挂得远，不等于成交得远。</b>脱离价格笼子的委托会留在盘口等着，' +
         '等最新价靠近它才可能成交；想马上成交，就把价格挂在笼子里。</div>' +

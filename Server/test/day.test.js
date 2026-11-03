@@ -237,9 +237,12 @@ console.log('\n[6] 集合竞价：最大成交量原则 + 阶段结束按统一�
 }
 
 // ============================================================
-console.log('\n[7] 集合竞价：竞价位沿用涨跌停，但不受价格笼子约束');
+console.log('\n[7] 集合竞价：竞价位沿用涨跌停（开关打开时），但不受价格笼子约束');
 {
   const { m, B1, S1 } = fresh();
+  // 2026-11-03 起涨跌停**默认关闭**（港股主板没有涨跌停）。这一节验的是「竞价位也受涨跌停
+  // 约束」这条机制还在（改回 A 股口径时它就是生效路径），所以临时把开关打开。
+  config.priceLimit.enabled = true;
   assert(m.band().up === 26 && m.band().down === 14, '昨收 20 → 涨跌停 14 ~ 26');
 
   const over = m.place(B1, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: 1000 });
@@ -252,6 +255,8 @@ console.log('\n[7] 集合竞价：竞价位沿用涨跌停，但不受价格笼�
   m.place(S1, { action: ACTIONS.SELL_OPEN, qty: 100, price: 21.9, now: 1000, noCooldown: true });
   const r = m.runAuction(AFTER_AUCTION);
   assert(r.price === 21.9 && m.lastPrice === 21.9, `跳空 9.5% 能正常开出盘（成交价 ${r.price}，未按笼子撤单）`);
+  // 关回默认值，别把开关状态漏给后面的用例
+  config.priceLimit.enabled = false;
 }
 
 // ============================================================
@@ -350,8 +355,11 @@ console.log('\n[11] 日终结算：昨收滚动、当日高低量额归零、委
   assert(st.canceled >= 1, `${st.canceled} 笔未成交委托当日作废`);
   assert(C.orders.size === 0 && C.orderFrozen === 0, '委托作废后账户挂单表与冻结归零');
   assert(Math.abs(C.cash - 100000000) < 0.01, '冻结资金全额退回');
+  // 涨跌停默认关闭（港股口径）；这里临时打开，验「区间随新昨收滚动」这条日频机制还在
+  config.priceLimit.enabled = true;
   const band = m.band();
   assert(band.up === 27.3 && band.down === 14.7, `涨跌停区间随新昨收滚动到 ${band.down} ~ ${band.up}`);
+  config.priceLimit.enabled = false;
 }
 
 // ============================================================

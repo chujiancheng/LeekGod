@@ -1397,8 +1397,9 @@
     box.innerHTML =
       asksHtml +
       '<div class="book-mid"><span class="num ' + cls(m.change) + '">' +
-        fmtP(m.last) + '</span><span>停 ' + fmtP(m.band && m.band.up) + '/' +
-        fmtP(m.band && m.band.down) + '</span></div>' +
+        fmtP(m.last) + '</span><span>' +
+        (m.band ? '停 ' + fmtP(m.band.up) + '/' + fmtP(m.band.down) : '无涨跌停') +
+        '</span></div>' +
       bidsHtml;
 
     // 深度条宽度走 CSSOM（CSP 不许内联 style 属性）

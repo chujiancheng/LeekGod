@@ -91,7 +91,8 @@ const api = async (method, p, { key, body, headers } = {}) => {
   const KEY = issued.key;
   const row = persist.db.prepare('SELECT * FROM api_keys WHERE id = ?').get(issued.id);
   assert(!!row && row.secret_hash.length === 64, '库里只有 64 位 sha256，不存明文');
-  assert(!JSON.stringify(row).includes(issued.key.split('_')[2]), '明文 secret 没有落库');
+  // secret 允许含 `_`：按前缀切会截成片段，随机撞上哈希（见 portal.test 同款注释）
+  assert(!JSON.stringify(row).includes(issued.key.split('_').slice(2).join('_')), '明文 secret 没有落库');
 
   const readOnly = keys.issue('quant_a', { scopes: 'read' });
   assert(readOnly.ok && readOnly.scopes === 'read', '可以只发 read 权限的 Key');

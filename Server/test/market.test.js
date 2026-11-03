@@ -48,6 +48,13 @@ function pad(name) {
   return acc;
 }
 
+/**
+ * 基准券商的**有效总费率** = 佣金 + 港股法定税费（印花税/征交费/交易费/结算费，双边）。
+ * 2026-11-03 起 `config.trade.feeRate` 只是**佣金**，总费率在 `broker.baseValues().feeRate`。
+ * 测试里 `new Account('玩家A')` 没有券商 → `brokerFor` 回落基准，所以这里直接用 baseValues。
+ */
+const FEE0 = broker.baseValues().feeRate;
+
 /** 某家券商的**有效通道参数**（不带星级/每周之星的干扰：day=0、账户无成交记录） */
 function brokerCfgOf(key) {
   const acc = new Account('cfg', false, 'player');
@@ -65,7 +72,7 @@ console.log('\n[1] 限价撮合与资金结算');
   // 玩家主动买入吃掉
   const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 500, price: 20.1, now: 0 });
   assert(r2.ok && r2.order.filled === 500, '玩家买入 500 股部分成交');
-  const expectCash = config.account.initialCash - 500 * 20.1 - 500 * 20.1 * 0.0001;
+  const expectCash = config.account.initialCash - 500 * 20.1 - 500 * 20.1 * FEE0;
   assert(Math.abs(A.cash - expectCash) < 0.01, `资金扣减正确 (cash=${A.cash.toFixed(2)})`);
   assert(A.longQty('600001') === 500, '多头持仓 500 股');
   assert(A.orders.size === 0, '完全成交后无挂单');
@@ -127,7 +134,7 @@ console.log('\n[5] 开空保证金与盈亏');
   const expectMargin = 10000 * 20 * 0.5;
   assert(Math.abs(A.shortMargin - expectMargin) < 0.01, `保证金 ${expectMargin} 冻结正确`);
   const eq = A.equity(() => 20);
-  const expectEq = cash0 - 10000 * 20 * 0.0001;
+  const expectEq = cash0 - 10000 * 20 * FEE0;
   assert(Math.abs(eq - expectEq) < 1, `开空后权益≈期初−手续费 (eq=${eq.toFixed(2)})`);
 }
 
@@ -180,7 +187,7 @@ console.log('\n[7] 平空实现盈亏');
   assert(r.ok && r.order.filled === 1000, '买入平空成交');
   assert(A.shortQty('600001') === 0, '空头持仓归零');
   // 盈亏 = (20-19)*1000 = 1000，扣手续费（开+平）
-  const fee = 20 * 1000 * 0.0001 + 19 * 1000 * 0.0001;
+  const fee = 20 * 1000 * FEE0 + 19 * 1000 * FEE0;
   const expectPnl = 1000 - fee;
   assert(Math.abs(A.realizedPnL - expectPnl) < 0.5, `已实现盈亏≈${expectPnl.toFixed(2)} (actual=${A.realizedPnL.toFixed(2)})`);
 }
@@ -195,7 +202,7 @@ console.log('\n[8] 资金不足拒绝买入');
 }
 
 // ---- 9. 涨跌停 ----
-console.log('\n[9] 涨跌停（相对昨收 ±30%，依赖交易日时钟）');
+console.log('\n[9] 涨跌停开关（2026-11-03 起默认关闭：港股无涨跌停）');
 {
   const { m, A } = fresh();
   // 涨跌停是**日频机制**：区间以「昨收」为基准，而昨收由每个交易日的收盘结算滚动而来，
@@ -205,16 +212,30 @@ console.log('\n[9] 涨跌停（相对昨收 ±30%，依赖交易日时钟）');
   const { DayCycle } = require('../src/daycycle');
   m.dayCycle = new DayCycle(config.day, 0);
   const now = 10 * 60000;
+
+  // (1) 默认关闭：band 恒为 null，价格不再被夹（港股口径）
+  assert(config.priceLimit.enabled === false, '默认关闭涨跌停（港股主板没有涨跌停）');
+  assert(m.band() === null, '关闭时 band() 返回 null');
+  assert(m.inBand(27.0) && m.inBand(13.0), '关闭时任何价格都在「区间」内');
+  assert(m.clampPrice(27.0) === 27.0, '关闭时 clampPrice 只做取整、不夹区间');
+  const r0 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now });
+  assert(r0.ok, `关闭涨跌停时 27 元（+35%）放行${r0.ok ? '' : '：' + r0.error}`);
+
+  // (2) 显式打开后开关生效（保留 A 股口径的回退能力）
+  config.priceLimit.enabled = true;
   const band = m.band();
   assert(band.up === 26 && band.down === 14, `昨收 20 → 涨跌停 14 ~ 26（${band.down} ~ ${band.up}）`);
-  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now });
-  assert(!r1.ok && /涨跌停/.test(r1.error), '超过涨停价被拒');
-  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 19.0, now: now + 100 });
-  assert(r2.ok, '区间内价格可下单');
+  const r1 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: now + 100 });
+  assert(!r1.ok && /涨跌停/.test(r1.error), '打开后超过涨停价被拒');
+  // now + 5000 是给下单冷却留余量：r0 已成交并记了 lastOrderAt（2000ms），
+  // 用 now + 600 会被冷却拒掉，看起来像"涨跌停还在拦"
+  const r2 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 19.0, now: now + 5000 });
+  assert(r2.ok, `打开后区间内价格可下单${r2.ok ? '' : '：' + r2.error}`);
+
+  // (3) 关回去，别把开关状态漏给后面的用例
   config.priceLimit.enabled = false;
-  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: now + 5000 });
-  assert(r3.ok, '关掉涨跌停后 27 元放行（开关生效）');
-  config.priceLimit.enabled = true;
+  const r3 = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 100, price: 27.0, now: now + 12000 });
+  assert(r3.ok, '再次关闭后 27 元放行（开关可来回切）');
 }
 
 // ---- 10. 部分成交不得越量 ----
@@ -336,7 +357,7 @@ console.log('\n[15] 权益恒等式：总权益 = 初始资金 + 已实现盈亏
 
   m.place(N, { action: ACTIONS.SELL_OPEN, qty: 1000, price: 20, now: 0, noCooldown: true });
   m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20, now: 0 });
-  assert(Math.abs(A.realizedPnL + 2) < 0.01, `开多手续费计入已实现盈亏 (${A.realizedPnL.toFixed(2)})`);
+  assert(Math.abs(A.realizedPnL + 20 * 1000 * FEE0) < 0.01, `开多手续费计入已实现盈亏 (${A.realizedPnL.toFixed(2)})`);
   let r = identity(A);
   assert(Math.abs(r.eq - r.expect) < 0.01, `开多后恒等 (eq=${r.eq.toFixed(2)} expect=${r.expect.toFixed(2)})`);
 
@@ -681,7 +702,7 @@ console.log('\n[24] 融资买入结算与冻结');
   const r = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 1000, price: 20.0, now: 0, finance: true });
   assert(r.ok && r.order.filled === 1000, `融资买入成交${r.ok ? '' : ': ' + r.error}`);
   const cost = 1000 * 20;
-  const fee = cost * config.trade.feeRate;
+  const fee = cost * FEE0;
   const selfPay = cost * fin.ratio;
   const expectCash = config.account.initialCash - selfPay;
   assert(Math.abs(A.cash - expectCash) < 0.01, `只扣自备 ${selfPay}，手续费随负债融资 (cash=${A.cash.toFixed(2)})`);
@@ -778,7 +799,7 @@ console.log('\n[26] 卖平融资仓位：还债、盈亏与预检');
   assert(r.ok && r.order.filled === 1000, `补足现金后卖出成交${r.ok ? '' : ': ' + r.error}`);
   assert(A.financeDebt('600001') === 0, '批次负债已清零');
   assert(A.longQty('600001') === 0, '多头已清仓');
-  const fee = Math.round(1000 * 22 * config.trade.feeRate * 100) / 100;
+  const fee = Math.round(1000 * 22 * FEE0 * 100) / 100;
   const expectCash = 5000 + 22000 - 25000 - fee;
   assert(Math.abs(A.cash - expectCash) < 0.01, `现金 = 期初 + 卖出款 − 还债 − 手续费 (${A.cash.toFixed(2)})`);
   const expectRz = 22000 - 20000 - fee; // 差价按开仓成本 20000 算，负债超成本的部分是历史利息、已在摊入时计过账
@@ -849,7 +870,7 @@ console.log('\n[29] 融资买入买满整 2 倍');
   const r = m.place(A, { action: ACTIONS.BUY_OPEN, qty: 10000, price: 20, now: 0, finance: true });
   assert(r.ok && r.order.filled === 10000, `满 2 倍融资买入成交${r.ok ? '' : ': ' + r.error}`);
   const cost = 10000 * 20;
-  const fee = cost * config.trade.feeRate;
+  const fee = cost * FEE0;
   assert(A.cash === 0, `自备资金刚好用尽，不因手续费挂不出单 (cash=${A.cash})`);
   assert(Math.abs(A.financeDebt('600001') - (cost * 0.5 + fee)) < 0.01,
     `借入本金 + 手续费 ${cost * 0.5 + fee} 一并计入负债`);
@@ -857,7 +878,9 @@ console.log('\n[29] 融资买入买满整 2 倍');
   const eq = A.equity(() => 20);
   assert(Math.abs(eq - (100000 - fee)) < 0.01, `权益只少了手续费 (eq=${eq.toFixed(2)})`);
   const lev = A.longValue('600001', 20) / eq;
-  assert(lev > 2 && lev < 2.001, `实际杠杆 ${lev.toFixed(4)} 倍`);
+  // 手续费**并入负债**，所以实际杠杆比名义 2 倍略高：1/(1−feeRate) ≈ 2.0048
+  // （港股总费率约 0.12%，旧口径万分之一时是 2.0004——这里按总费率留出余量）
+  assert(lev > 2 && lev < 2.006, `实际杠杆 ${lev.toFixed(4)} 倍（含并入负债的手续费）`);
 }
 
 // ---- 30. 开空敞口按保证金率封顶 2 倍 ----

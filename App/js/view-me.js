@@ -259,6 +259,20 @@
     return '万' + Math.round(+rate * 1000000) / 100;
   }
 
+  /**
+   * 佣金 / 税费拆分（2026-11-03 港股口径）：
+   *   `feeRate` = 佣金 + 法定税费，是下单与预估用的**总费率**；
+   *   `commissionRate` 才是券商佣金（吃拥挤税与每周之星），`taxRate` 是印花税等市场费用。
+   * 老服务端没有拆分字段时退回 feeRate（至少不显示 --）。
+   */
+  function commissionOf(o) {
+    return o && Number.isFinite(+o.commissionRate) ? +o.commissionRate : num(o && o.feeRate);
+  }
+  function taxText(o) {
+    const t = o ? num(o.taxRate) : 0;
+    return t > 0 ? ' · 税费 ' + (t * 100).toFixed(2) + '%' : '';
+  }
+
   /** 特权进度条宽度必须走 CSSOM：CSP 的 style-src 没放开 unsafe-inline */
   function paintBars(root) {
     if (!root) return;
@@ -334,8 +348,8 @@
           (b.strengths || []).map((s) => '<span class="tag tag-good">' + esc(s) + '</span>').join('') +
           (b.costs || []).map((s) => '<span class="tag tag-bad">' + esc(s) + '</span>').join('') +
         '</div>' +
-        '<div class="bk-note">佣金 ' + fmtFee(b.feeRate) +
-          (b.weekly && b.weekly.isStar ? '（本周半价）' : '') +
+        '<div class="bk-note">佣金 ' + fmtFee(commissionOf(b)) +
+          (b.weekly && b.weekly.isStar ? '（本周半价）' : '') + taxText(b) +
           ' · 下单冷却 ' + (num(b.cooldownMs) / 1000).toFixed(1) + 's' +
           ' · 融资 ' + num(b.leverage).toFixed(2) + '×' +
           ' · 保证金 ' + Math.round(num(b.marginRatio) * 100) + '%' +
@@ -433,7 +447,7 @@
                   '<span class="bk-abbr">' + esc(m.abbr || '') + '</span>' +
                   (bk.weekly && bk.weekly.key === m.key ? '<span class="tag tag-gold">本周之星</span>' : '') +
                 '</div>' +
-                '<div class="list-t2">佣金 ' + fmtFee(p.feeRate) +
+                '<div class="list-t2">佣金 ' + fmtFee(commissionOf(p)) + taxText(p) +
                   ' · 冷却 ' + (num(p.cooldownMs) / 1000).toFixed(1) + 's' +
                   ' · 融资 ' + num(p.leverage).toFixed(2) + '×' +
                   ' · 拥挤度 ' + num(m.crowdPct) + '%（' + esc(m.crowdLabel || '') + '）</div>' +
@@ -859,13 +873,15 @@
     GS.core.sheet({
       title: '交易规则',
       html:
-        '<div class="field-line"><span>佣金费率</span><b>' + (num(r.feeRate) * 10000).toFixed(2) + '‱</b></div>' +
+        '<div class="field-line"><span>券商佣金</span><b>' + (commissionOf(r) * 10000).toFixed(2) + '‱</b></div>' +
+        '<div class="field-line"><span>港股法定税费</span><b>' +
+          (num(r.taxRate) * 100).toFixed(2) + '%</b><i>买卖双边</i></div>' +
         '<div class="field-line"><span>下单冷却</span><b>' + (num(r.cooldownMs) / 1000).toFixed(1) + ' 秒</b></div>' +
         '<div class="field-line"><span>T+ 锁仓</span><b>' + lockText(r) + '</b></div>' +
         '<div class="field-line"><span>保证金比例</span><b>' + (num(r.marginRatio) * 100).toFixed(0) + '%</b></div>' +
         '<div class="field-line"><span>维持率</span><b>' + (num(r.maintenance) * 100).toFixed(0) + '%</b></div>' +
-        '<div class="field-line"><span>涨跌停</span><b>±' +
-          (r.priceLimit && r.priceLimit.enabled ? num(r.priceLimit.pct) * 100 + '%' : '不设') + '</b></div>' +
+        '<div class="field-line"><span>涨跌停</span><b>' +
+          (r.priceLimit && r.priceLimit.enabled ? '±' + num(r.priceLimit.pct) * 100 + '%' : '不设（港股口径）') + '</b></div>' +
         '<div class="field-line"><span>加钱上限</span><b>' + fmtAmt(dep.maxLifetime) + '</b></div>' +
         '<div class="hint hint-gap">' +
           '4 种动作：买入开多 / 卖出平多 / 卖出开空 / 买入平空，同一只股票多空互斥。' +

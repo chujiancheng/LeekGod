@@ -100,7 +100,12 @@ console.log('\n[2] 两级兜底：覆盖 → 全局默认');
   const plain = new Account('nobroker', false, 'player');
   const bk = broker.forAccount(plain, { day: DAY });
   assert(bk.key === null, '没有券商的账户 key 为空');
-  assert(bk.feeRate === config.trade.feeRate, `费率回落基准（${bk.feeRate}）`);
+  // 2026-11-03：feeRate = 佣金 + 港股法定税费，`config.trade.feeRate` 只是佣金基准
+  assert(bk.commissionRate === config.trade.feeRate, `佣金回落基准（${bk.commissionRate}）`);
+  assert(
+    Math.abs(bk.taxRate - broker.taxRate()) < 1e-12 && Math.abs(bk.feeRate - (bk.commissionRate + bk.taxRate)) < 1e-12,
+    `总费率 = 佣金 + 法定税费（${bk.feeRate}）`
+  );
   assert(bk.cooldownMs === config.trade.cooldownMs && bk.lockMs === config.trade.lockMs, '冷却/锁仓回落基准');
   assert(bk.financeRatio === config.margin.finance.ratio, '融资自备比例回落基准');
   assert(bk.autoMax === config.auto.maxPerAccount, `策略上限回落基准（${bk.autoMax}）`);
@@ -110,7 +115,10 @@ console.log('\n[2] 两级兜底：覆盖 → 全局默认');
   const ghost = new Account('ghost', false, 'player');
   ghost.broker = 'nosuchbank';
   const gb = broker.forAccount(ghost, { day: DAY });
-  assert(gb.key === null && gb.feeRate === config.trade.feeRate, '配置里删掉的券商 → 回落基准（不让整局起不来）');
+  assert(
+    gb.key === null && gb.commissionRate === config.trade.feeRate && Math.abs(gb.taxRate - broker.taxRate()) < 1e-12,
+    '配置里删掉的券商 → 回落基准（不让整局起不来）'
+  );
 
   // NPC 的券商只是展示标签
   const npc = new Account('大米·机构1', true, 'inst');
@@ -162,11 +170,12 @@ console.log('\n[4] 拥挤税');
 {
   const d = broker.forAccount(buyer('dongfeng', 8e7, 5e5), { day: DAY });
   assert(d.crowd.tier === 'heavy' && d.crowd.pct === 68, `东风 68% 重罚档（${d.crowd.tier}）`);
-  assert(Math.abs(d.feeRate - 0.0001 * 1.3) < 1e-9, `东风佣金 ×1.3 = ${(d.feeRate * 10000).toFixed(2)}万`);
+  assert(Math.abs(d.commissionRate - 0.0001 * 1.3) < 1e-9, `东风佣金 ×1.3 = ${(d.commissionRate * 10000).toFixed(2)}万`);
+  assert(Math.abs(d.taxRate - broker.taxRate()) < 1e-12, '拥挤税只作用于佣金，法定税费不变');
   assert(Math.abs(d.lendCapacityMul - 0.9 * 0.7) < 1e-9, `东风券源 ×0.7 = ${d.lendCapacityMul.toFixed(3)}`);
   const t = broker.forAccount(buyer('tianfeng', 8e7, 5e5), { day: DAY });
   assert(t.crowd.tier === 'subsidy', '天疯 16% 补贴档');
-  assert(Math.abs(t.feeRate - 0.00025 * 0.8) < 1e-9, `天疯佣金 ×0.8 = ${(t.feeRate * 10000).toFixed(2)}万`);
+  assert(Math.abs(t.commissionRate - 0.00025 * 0.8) < 1e-9, `天疯佣金 ×0.8 = ${(t.commissionRate * 10000).toFixed(2)}万`);
   assert(t.freeCouponPerDay === 1, '补贴档送每日免息券');
   const z = broker.forAccount(buyer('zhongxin', 8e7, 5e5), { day: DAY });
   assert(z.crowd.tier === 'heavy', '钟信 52% 也是重罚档');
@@ -209,7 +218,8 @@ console.log('\n[6] 每周之星：按交易日轮转、一周一家不重复');
   const acc = buyer(starKey, 3e8, 2e6);
   const bk = broker.forAccount(acc, { day: DAY });
   const plainFee = broker.get(starKey).overrides.feeRate * broker.crowdInfo(starKey).feeMul;
-  assert(Math.abs(bk.feeRate - plainFee * 0.5) < 1e-9, '当周之星佣金减半');
+  assert(Math.abs(bk.commissionRate - plainFee * 0.5) < 1e-9, '当周之星佣金减半（税费不减）');
+  assert(Math.abs(bk.taxRate - broker.taxRate()) < 1e-12, '当周之星也不减免法定税费');
   const notStar = broker.forAccount(buyer('haitong', 3e8, 2e6), { day: DAY });
   assert(notStar.weekly.isStar === false && Math.abs(notStar.weekly.feeMul - 1) < 1e-9, '非当周之星不加成');
   assert(bk.weekly.financeBonus === 0.5, '融资额度 +0.5×');

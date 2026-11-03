@@ -824,7 +824,9 @@ class Game {
     }
     if (next.phase.key === 'auction') {
       logger.info(
-        `[我是股神] 第 ${next.day} 个交易日开盘集合竞价开始（涨跌停 ±${config.priceLimit.enabled ? config.priceLimit.pct * 100 : 0}%）`
+        `[我是股神] 第 ${next.day} 个交易日开盘集合竞价开始（${
+          config.priceLimit.enabled ? `涨跌停 ±${config.priceLimit.pct * 100}%` : '港股口径：无涨跌停'
+        }）`
       );
     }
   }
@@ -2103,7 +2105,11 @@ class Game {
   rulesFor(bk, opts = {}) {
     const primary = this.markets.get(this.stocks[0].id);
     return {
+        // feeRate = 有效总费率（佣金 + 法定税费），下单/预估直接用这个数；
+        // commissionRate / taxRate 是给它拆开展示的（港股税费是市场规则，不随券商变）
         feeRate: bk.feeRate,
+        commissionRate: bk.commissionRate,
+        taxRate: bk.taxRate,
         cooldownMs: bk.cooldownMs,
         lock: bk.lock,
         lockMs: bk.lockMs,
@@ -2459,7 +2465,9 @@ class Game {
       crowdLabel: bk.crowd.label,
       tier: bk.crowd.tier,
       // 有效数值（已含拥挤税与每周加成、已按星级折算）
-      feeRate: bk.feeRate,
+      feeRate: bk.feeRate, // 总费率 = 佣金 + 税费
+      commissionRate: bk.commissionRate,
+      taxRate: bk.taxRate,
       cooldownMs: bk.cooldownMs,
       lock: bk.lock,
       lockMs: bk.lockMs,

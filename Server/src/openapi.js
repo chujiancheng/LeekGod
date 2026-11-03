@@ -410,7 +410,11 @@ function rulesView(game, acc) {
   const now = nowMs();
   const bk = acc ? game.brokerOf(acc, now) : broker.forAccount(null, { day: 0 });
   return {
+    // feeRate = 总费率（佣金 × 拥挤税 × 每周之星 + 法定税费）；下面两项是拆分口径，
+    // 程序化客户端自己算「这一笔要付多少」时直接用 feeRate 即可（买卖双边同费率）
     feeRate: bk.feeRate,
+    commissionRate: bk.commissionRate,
+    taxRate: bk.taxRate,
     cooldownMs: bk.cooldownMs,
     // 锁仓口径（当前港股 T+0 全市场统一；仍兼容 t1-open / t1）。是跨日政策不是秒数，见 config.trade.lock
     lock: bk.lock,

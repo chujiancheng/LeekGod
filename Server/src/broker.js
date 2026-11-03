@@ -218,10 +218,31 @@ function intensityOf(star, cfgOverride) {
 // 有效配置（两级兜底）
 // ------------------------------------------------------------------
 
+/**
+ * 港股法定交易费用合计（**买卖双边各一次**）：印花税 + 交易征费 + 交易费 + 结算费。
+ *
+ * 2026-11-03 起按港交所口径，费率明细见 `config.trade.fee`（≈0.11035%/边）。
+ * 这是**市场规则**，与券商无关：拥挤税、每周之星、转户都不影响它，
+ * 所以它不会被任何折扣乘进去——交易所不会因为你换了个券商就少收印花税。
+ */
+function taxRate() {
+  const f = (config.trade && config.trade.fee) || {};
+  return (
+    (f.stampPct || 0) +
+    (f.levyPct || 0) +
+    (f.tradingPct || 0) +
+    (f.settlementPct || 0)
+  );
+}
+
 function baseValues() {
   const fin = config.margin.finance || {};
   return {
-    feeRate: config.trade.feeRate,
+    // feeRate = 有效总费率（佣金 + 法定税费），下游只认它（冻结、成交扣费、自动策略购买力）
+    feeRate: config.trade.feeRate + taxRate(),
+    // 拆开给展示与「只给佣金打折」用：佣金是券商差异项，税费是市场固定项
+    commissionRate: config.trade.feeRate,
+    taxRate: taxRate(),
     cooldownMs: config.trade.cooldownMs,
     // 锁仓口径（2026-11-02）：`lock` 是**策略**，`lockMs` 只在没有交易日时钟时兜底
     // （单测 / 无时钟模式）。见 config.trade.lock 与 Market.lockFnFor。
@@ -303,7 +324,9 @@ function forAccount(acc, opts = {}) {
     features: {},
     freeCouponAvailable: false,
     // 平铺的有效值（下面的默认 = 全局基准）
-    feeRate: base.feeRate,
+    feeRate: base.feeRate, // 总费率（佣金 + 税费）
+    commissionRate: base.commissionRate,
+    taxRate: base.taxRate,
     cooldownMs: base.cooldownMs,
     lock: base.lock,
     lockMs: base.lockMs,
@@ -349,8 +372,12 @@ function forAccount(acc, opts = {}) {
     financeBonus: isStarBroker ? weekly.financeBonus : 0,
   };
 
-  // 费率：券商基值 × 拥挤税 × 每周之星
-  out.feeRate = (ov.feeRate == null ? base.feeRate : ov.feeRate) * crowd.feeMul * out.weekly.feeMul;
+  // 费率：**佣金**吃拥挤税与每周之星，**法定税费**原样叠加上去（不打折）。
+  // 顺序不能反：先合成总费率再乘折扣，等于让交易所给玩家的印花税也打折。
+  out.commissionRate =
+    (ov.feeRate == null ? base.commissionRate : ov.feeRate) * crowd.feeMul * out.weekly.feeMul;
+  out.taxRate = base.taxRate;
+  out.feeRate = out.commissionRate + out.taxRate;
   // 通道（冷却 / 锁仓）与风控（维持率）是服务能力与风险属性，不随星级变
   out.cooldownMs = ov.cooldownMs == null ? base.cooldownMs : ov.cooldownMs;
   // 锁仓：现在是口径而非时长（T+0 / 次日竞价开始 / 次日竞价结束），所以不受星级递进影响。
@@ -609,7 +636,11 @@ function describe(key) {
     suitable: b.suitable || '',
     // 数值预览（星级按满额算，让玩家开户前看到「养成之后能拿到什么」）
     preview: {
-      feeRate: (b.overrides.feeRate == null ? baseValues().feeRate : b.overrides.feeRate) * crowd.feeMul,
+      commissionRate: (b.overrides.feeRate == null ? baseValues().commissionRate : b.overrides.feeRate) * crowd.feeMul,
+      taxRate: baseValues().taxRate,
+      feeRate:
+        (b.overrides.feeRate == null ? baseValues().commissionRate : b.overrides.feeRate) * crowd.feeMul +
+        baseValues().taxRate,
       cooldownMs: b.overrides.cooldownMs == null ? baseValues().cooldownMs : b.overrides.cooldownMs,
       lock: b.overrides.lock == null ? baseValues().lock : b.overrides.lock,
       lockMs: b.overrides.lockMs == null ? baseValues().lockMs : b.overrides.lockMs,
@@ -743,6 +774,7 @@ module.exports = {
   // 有效配置
   forAccount,
   baseValues,
+  taxRate,
   interestWaived,
   glitchDelay,
   privilegeList,

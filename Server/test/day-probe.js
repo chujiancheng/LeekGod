@@ -196,16 +196,21 @@ function run(limitOn) {
     `日收益 std ${pct(dsd)}（真实十只港股近两年 3.10%；|日收益| 真实 1.67/3.01/4.65/10.40%）`
   );
   console.log(`超过 ±10% 的交易日占比: ${((over10 / Math.max(1, abs.length)) * 100).toFixed(1)}%`);
-  console.log(
-    `连续竞价时段「价格贴在涨跌停上」的采样占比: ${pinnedPct.toFixed(1)}%` +
-      `（目标 < 5%）`
-  );
-  console.log(
-    `最长连续贴板天数: 中位 ${quantile(streaks, 0.5)} 天 | p90 ${quantile(streaks, 0.9)} 天 | 最大 ${quantile(
-      streaks,
-      1
-    )} 天`
-  );
+  // 涨跌停关闭时（港股口径）没有「贴板」这回事，采样数恒为 0——别打 0.0% 骗人
+  if (config.priceLimit.enabled) {
+    console.log(
+      `连续竞价时段「价格贴在涨跌停上」的采样占比: ${pinnedPct.toFixed(1)}%` +
+        `（目标 < 5%）`
+    );
+    console.log(
+      `最长连续贴板天数: 中位 ${quantile(streaks, 0.5)} 天 | p90 ${quantile(streaks, 0.9)} 天 | 最大 ${quantile(
+        streaks,
+        1
+      )} 天`
+    );
+  } else {
+    console.log(`涨跌停已关闭（港股口径）：贴板采样 ${tradingSamples} 个，跳过贴板统计`);
+  }
   console.log(`强平调用次数: ${liqCount}（${(liqCount / Math.max(1, SEEDS * DAYS)).toFixed(1)} 次/天）`);
   const sample = daily.slice(0, 10).map((x) => (x >= 0 ? '+' : '') + x.toFixed(1) + '%');
   console.log(`（前 10 个日收益样本）${sample.join(' ')}`);
