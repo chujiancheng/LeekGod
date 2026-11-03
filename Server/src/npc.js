@@ -26,6 +26,17 @@ function roundLot(q, lot) {
   return Math.max(lot, Math.round(q / lot) * lot);
 }
 
+/**
+ * NPC 预算用的**总费率**。forAccount 对 NPC 直接返回全局基准（券商只是展示标签，
+ * 见 broker.js 的 isNPC 分支），所以 NPC 结算被扣的就是 `broker.baseValues().feeRate`
+ * = 佣金 + 港股法定税费。预算必须用这个，而不是 `config.trade.feeRate`（那只是佣金）：
+ * 2026-11-03 税费拆分后每边多了 ≈0.11035%，按纯佣金预算会让每笔实扣超出预算 0.11% 市值，
+ * 现金被扣负（平空/外股吃单无冻结环节兜底）或在现金边界被 place 的冻结检查拒单。
+ */
+function npcFeeRate() {
+  return broker.baseValues().feeRate;
+}
+
 /** 五类 NPC 总户数 */
 function totalNpcCount(cfg = config.npc) {
   return Object.values(cfg.types).reduce((s, t) => s + t.count, 0);
@@ -876,7 +887,7 @@ class NpcManager {
 
       const rq = (cfg.qtyPct && cfg.qtyPct[n.type]) || [0.00005, 0.0002];
       const maxByType = market.stock.floatShares * rand(rq[0], rq[1]);
-      let qty = Math.min(addMV / price, maxByType, n.acc.cash / (price * (1 + config.trade.feeRate)));
+      let qty = Math.min(addMV / price, maxByType, n.acc.cash / (price * (1 + npcFeeRate())));
       qty = Math.floor(qty / lot) * lot;
       if (qty < lot) return;
       // 外股只吃对手价
@@ -2378,7 +2389,7 @@ class NpcManager {
   }
 
   cashCapacity(n, price) {
-    const fullUnit = price * (1 + config.trade.feeRate);
+    const fullUnit = price * (1 + npcFeeRate());
     const fullCap = Math.floor(n.acc.cash / fullUnit); // 挂单冻结已从 cash 扣除
     const fin = config.margin.finance;
     if (!fin || !fin.enabled) return fullCap;
@@ -2390,7 +2401,7 @@ class NpcManager {
   /** 买入开多参数：现金够全款就全款；不够且融资开放时下融资单（仍受维持保证金预检约束） */
   buyOpenOpts(n, qty, price, now) {
     const fin = config.margin.finance;
-    const fullNeed = price * qty * (1 + config.trade.feeRate);
+    const fullNeed = price * qty * (1 + npcFeeRate());
     const useFinance = !!(fin && fin.enabled && n.acc.cash < fullNeed);
     return {
       action: ACTIONS.BUY_OPEN,
@@ -2408,7 +2419,7 @@ class NpcManager {
    * 会被"平空需支付买入款"拒绝。目标量本身作为上限
    */
   closeCapacity(n, price, qty) {
-    const P = price * (1 + config.trade.feeRate);
+    const P = price * (1 + npcFeeRate());
     const afford = (q) =>
       Math.min(qty, Math.floor((n.acc.cash + n.acc.previewShortMargin(this.stock.id, q)) / P));
     let cap = afford(qty);

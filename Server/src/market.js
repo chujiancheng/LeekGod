@@ -1693,7 +1693,10 @@ class Market {
   /** 买入方向结算（开多 / 平空） */
   settleBuy(order, price, qty, now) {
     const acc = order.account;
-    const feeRate = order.feeRate != null ? order.feeRate : config.trade.feeRate;
+    // feeRate 兜底只给「没有带费率的委托」用——orders 表不持久化 fee_rate，跨重启恢复的
+    // live 挂单就落到这里。兜底必须用含税总费率（佣金 + 港股法定税费），不能只给
+    // config.trade.feeRate（纯佣金）：税费拆分后按它扣费会漏收 ≈0.11%/边。
+    const feeRate = order.feeRate != null ? order.feeRate : broker.baseValues().feeRate;
     const fee = r2(price * qty * feeRate);
     // 系统兜底账户只是虚拟对手盘，不参与建仓/持仓统计，否则会无限累积
     const isGhost = acc === SYSTEM_ACCOUNT;
@@ -1749,7 +1752,8 @@ class Market {
   /** 卖出方向结算（平多 / 开空） */
   settleSell(order, price, qty, now) {
     const acc = order.account;
-    const feeRate = order.feeRate != null ? order.feeRate : config.trade.feeRate;
+    // 兜底口径同 settleBuy：orders 表不持久化 fee_rate，恢复单必须按含税总费率扣
+    const feeRate = order.feeRate != null ? order.feeRate : broker.baseValues().feeRate;
     const fee = r2(price * qty * feeRate);
     const isGhost = acc === SYSTEM_ACCOUNT;
 
