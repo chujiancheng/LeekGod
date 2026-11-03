@@ -4294,7 +4294,7 @@
     const cells = [
       ['佣金', fmtFeeRate(bk.feeRate), bk.weekly && bk.weekly.isStar ? '本周半价' : ''],
       ['下单冷却', (bk.cooldownMs / 1000).toFixed(1) + 's', ''],
-      ['卖出锁仓', lockShort(bk.lock, bk.lockMs), bk.lock === 't0' ? '当天可卖' : '次日开盘解锁'],
+      ['卖出锁仓', lockShort(bk.lock, bk.lockMs), bk.lock === 't0' ? '港股 T+0，当天可卖' : '次日开盘解锁'],
       ['融资额度', bk.leverage + '×', '自备 ' + Math.round(bk.financeRatio * 100) + '%'],
       ['保证金', Math.round(bk.marginRatio * 100) + '%', ''],
       ['维持率', Math.round(bk.maintenance * 100) + '%', bk.features && bk.features.zeroBufferLiquidation ? '零缓冲' : ''],
@@ -4638,11 +4638,11 @@
       ruleKv('交易单位', '1 手 = ' + lot + ' 股', '金额随股价不同，下单面板会自动折算') +
       ruleKv('手续费', fmtFeeRate(r.feeRate), '买卖都收，没有最低 5 元') +
       ruleKv('下单冷却', fmtDur(cd), '跨股票共享：冷却里换一只股票下，也算同一笔') +
-      ruleKv('卖出锁仓', lockTxt, sameDaySell ? '成交即可卖，日内可反复做' : '按成交所属交易日算，次日开盘才解锁') +
+      ruleKv('卖出锁仓', lockTxt, sameDaySell ? '港股规则：成交即可卖，同一只票日内能反复做' : '按成交所属交易日算，次日开盘才解锁') +
       ruleKv('委托价偏离', '±' + fmtRatio(dev), '相对最新价，防止手滑打错价格') +
       ruleKv('价格笼子', '±' + fmtRatio(cage, 1), '单笔成交价相对最新价的偏离上限') +
       ruleKv('涨跌停', pl.enabled === false ? '本服未开启' : '±' + fmtRatio(pl.pct == null ? 0.1 : pl.pct), '相对昨收，集合竞价也受它约束') +
-      ruleKv('交易方向', '多空双向', sameDaySell ? '当天买当天就能卖' : '多头与空头都是 T+1，做空也一样锁') +
+      ruleKv('交易方向', '多空双向', sameDaySell ? '多空都 T+0：当天开仓、当天就能平' : '多头与空头都是 T+1，做空也一样锁') +
       '<div class="rule-warn"><b>挂得远，不等于成交得远。</b>脱离价格笼子的委托会留在盘口等着，' +
         '等最新价靠近它才可能成交；想马上成交，就把价格挂在笼子里。</div>' +
       '<div class="rule-tip"><b>同股多空互斥：</b>一只股票上持有多头（或有买入开仓在途）就不能再卖出开空，' +
@@ -6228,8 +6228,9 @@
 
   // ---------- 锁仓（见服务端 src/market.js lockFnFor / lockTextFor） ----------
   //
-  // 2026-11-02 起锁仓不再是「N 秒」而是**跨日政策**：滑泰 T+0（成交即可卖）、
-  // 天疯 T+1 且次日 09:15 就解锁、其余券商 T+1 到次日 09:25（开盘集合竞价收完才解锁）。
+  // 2026-11-03 起按**港股规则**：T+0 交易（成交即可卖，多空对称），全市场统一；
+  // 港股真正的 T+2 是交收（钱券两日后到账、影响提款），不影响可卖性，本游戏没有交收环节。
+  // 代码仍认 `t1-open`（次日 09:15）/ `t1`（次日 09:25）两档，留给改回 A 股口径时用。
   // 服务端把政策字符串放在 rules.lock（券商覆盖后），lockMs 只在没有交易日时钟的
   // 老口径里还有意义——所以这里先认 lock，认不出来才退回秒数。
 
@@ -6248,7 +6249,7 @@
     const tip = short.indexOf('T+1') === 0
       ? 'T+1 锁仓：下一个交易日开盘集合竞价结束后才能卖'
       : short === 'T+0'
-        ? 'T+0：成交即可卖（这里锁着是别的原因，比如已挂借融券）'
+        ? '港股 T+0：成交即可卖；这里锁着是别的原因（比如已挂借融券）'
         : '锁仓中，暂时不能卖';
     return `<span class="tag lock" title="${tip}">锁仓中 ${short}</span>`;
   }

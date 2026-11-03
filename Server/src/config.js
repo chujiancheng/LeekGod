@@ -160,14 +160,20 @@ const config = {
     // 注意它必须小于 tick（3 秒），否则玩家会在一个 tick 里堆多张单、撮合时序变得不可预期。
     cooldownMs: 2000,
     /**
-     * 买入锁仓口径（2026-11-02 起从「固定时长」改成「跨日政策」）：
-     *   t0        成交即可卖（滑泰专属特权：全服唯一的日内 T+0）
+     * 卖出锁仓口径（2026-11-03 起按**港股规则**：T+0 交易 / T+2 交收）。
+     *
+     * 港股当天买入就能当天卖出，同一只票日内可以反复做，所以**全市场统一 `t0`**——
+     * 不存在「今天买的今天不能卖」这条线，做空（买入平空）同样当天可平。
+     * 港股真正的 T+2 是**交收**（钱和券两个工作日后到账、影响提款），不影响可卖性；
+     * 本游戏没有提款/交收环节，所以落到玩法上就是纯粹的 T+0。
+     *
+     * 下面两档保留但当前无人使用（改回 A 股口径时把 `lock` 或券商覆盖指到它们即可）：
      *   t1-open   锁到**次日开盘集合竞价开始**（09:15，能在竞价里挂卖单）
      *   t1        锁到**次日开盘集合竞价结束**（09:25，开盘连续竞价才可卖）
-     * 语义是真实 A 股的 T+1——买在今天的仓位，最早明天才走。实现见 Market.lockFnFor：
-     * 解锁时刻由「成交时间 + 交易日时钟」算出来，是纯函数，不落库、重启后依然成立。
+     * 实现见 Market.lockFnFor：解锁时刻由「成交时间 + 交易日时钟」算出来，是纯函数，
+     * 不落库、重启后依然成立。
      */
-    lock: 't1',
+    lock: 't0',
     // 兜底时长：**只在没有交易日时钟时生效**（单元测试、day.enabled=false 的无钟模式）。
     // 有钟时一律走上面的 lock 口径，这个字段与券商无关，不要拿它做差异化。
     lockMs: 10 * 1000,
@@ -1581,7 +1587,6 @@ const config = {
         overrides: {
           feeRate: 0.0003,
           cooldownMs: 3000,
-          lock: 't1',
           financeRatio: 0.4,
           marginRatio: 0.4,
           lendCapacityMul: 1,
@@ -1603,13 +1608,12 @@ const config = {
         targetShare: 0.16,
         virtualClients: 2880,
         crowd: 0.34,
-        strengths: ['下单冷却 0.5 秒（全服最快）', 'T+0 日内交易（全服唯一：成交即可卖）', '自动化策略槽 4 个（基准 2）'],
+        strengths: ['下单冷却 0.5 秒（全服最快）', '自动化策略槽 4 个（基准 2）', '融券券源 0.9×，做空不缺券'],
         costs: ['融资最高仅 1.67×（借钱能力最弱）', '保证金比例 60%（最高）'],
         suitable: '打板、日内高频、挂自动化策略的人',
         overrides: {
           feeRate: 0.00015,
           cooldownMs: 500,
-          lock: 't0',
           financeRatio: 0.6,
           marginRatio: 0.6,
           lendCapacityMul: 0.9,
@@ -1637,7 +1641,6 @@ const config = {
         overrides: {
           feeRate: 0.0002,
           cooldownMs: 2000,
-          lock: 't1',
           financeRatio: 0.5,
           marginRatio: 0.5,
           lendCapacityMul: 0.6,
@@ -1670,7 +1673,6 @@ const config = {
         overrides: {
           feeRate: 0.00025,
           cooldownMs: 2000,
-          lock: 't1-open',
           financeRatio: 0.3,
           marginRatio: 0.3,
           maintenance: 0.25,
@@ -1705,7 +1707,6 @@ const config = {
         overrides: {
           feeRate: 0.00005,
           cooldownMs: 2500,
-          lock: 't1',
           financeRatio: 0.55,
           marginRatio: 0.55,
           lendCapacityMul: 0.9,
@@ -1737,7 +1738,6 @@ const config = {
         overrides: {
           feeRate: 0.0001,
           cooldownMs: 1500,
-          lock: 't1',
           financeRatio: 0.5,
           marginRatio: 0.5,
           maintenance: 0.33,

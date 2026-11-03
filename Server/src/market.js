@@ -166,8 +166,9 @@ class Market {
   /**
    * 该账户的**锁仓判定口径**（成交 → 可卖）。
    *
-   * 2026-11-02 起锁仓从「固定时长」变成「跨日政策」（见 config.trade.lock）：
-   *   - `t0`      → 返回 0，成交即可卖；
+   * 2026-11-03 起按港股规则：**全市场 `t0`**（T+0 交易，成交即可卖；港股真正的
+   * T+2 是交收，不影响可卖性，本游戏没有交收环节）。下面两档保留给「改回 A 股口径」时用：
+   *   - `t0`      → 返回 0，成交即可卖（当前默认）；
    *   - `t1-open` → 锁到次一交易日**开盘集合竞价开始**（09:15，能在竞价里挂卖单）；
    *   - `t1`      → 锁到次一交易日**开盘集合竞价结束**（09:25，开盘连续竞价才可卖）。
    *
@@ -176,13 +177,14 @@ class Market {
    * 所以① 不新增存档字段、② 重启后自然成立、③ 跨日不需任何"解锁"动作。
    *
    * 没有交易日时钟（单测、`day.enabled=false`）或 NPC 时回落固定时长口径 `trade.lockMs`：
-   * NPC 是做市商，给它上 T+1 会让它当天买的库存当天卖不掉，盘口直接死给你看。
+   * NPC 是做市商/投资者，走的是内部撮合节奏，不该被玩家的 T+1/T+0 口径牵动；
+   * 真给它上 T+1 会让当天买的库存当天卖不掉，盘口直接死给你看（这是 2026-10 踩过的坑）。
    */
   lockFnFor(account, now = Date.now()) {
     const dc = this.dayCycle;
     if (!dc || !dc.ok) return config.trade.lockMs;
     if (!account || account.isNPC) return config.trade.lockMs;
-    const policy = this.brokerFor(account, now).lock || 't1';
+    const policy = this.brokerFor(account, now).lock || 't0';
     if (policy === 't0') return 0;
     const auctionMs = (dc.phases[0] && dc.phases[0].ms) || 0;
     const offset = policy === 't1-open' ? 0 : auctionMs;
@@ -198,7 +200,7 @@ class Market {
     const dc = this.dayCycle;
     if (!dc || !dc.ok) return `${Math.round(config.trade.lockMs / 1000)} 秒锁仓中`;
     if (!account || account.isNPC) return `${Math.round(config.trade.lockMs / 1000)} 秒锁仓中`;
-    const policy = this.brokerFor(account, now).lock || 't1';
+    const policy = this.brokerFor(account, now).lock || 't0';
     if (policy === 't0') return null;
     return policy === 't1-open' ? 'T+1 锁仓中，次日 09:15 解锁' : 'T+1 锁仓中，次日 09:25 解锁';
   }

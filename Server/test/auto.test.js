@@ -286,22 +286,22 @@ console.log('\n[7] 存档往返：策略随重启恢复');
   cleanup();
 }
 
-// ---- 8. 自动策略的锁仓口径按账户券商取（滑泰 5 秒 / 基准 10 秒） ----
-// 自动策略走的是 market.place 同一条下单路径，锁仓闸门必须与手动下单同源：
-// 早先 auto 只读全局 10 秒，滑泰玩家手动能卖、策略却要干等到 10 秒，两边打架。
-console.log('\n[8] 自动策略的锁仓口径按账户券商取');
+// ---- 8. 自动策略的锁仓口径与手动下单同源（港股 T+0：成交即可卖） ----
+// 自动策略走的是 market.place 同一条下单路径，锁仓闸门必须与手动下单同源。
+// 2026-11-03 起全市场 T+0，任何券商都**没有锁仓期**：批次刚成交（ts = now）策略就能卖，
+// 不该再出现「等待解锁」这种中间态（那是 A 股 T+1 口径下的产物）。
+console.log('\n[8] 自动策略的锁仓口径与手动下单同源（港股 T+0）');
 {
   const lot = stock.lotSize;
-  // 时刻显式指定：批次 ts = T − 6000，则 now − ts 恰好 6000ms，
-  // 落在「滑泰 5 秒已解锁」与「基准 10 秒仍锁着」之间，两侧各验一次
-  const sellAt6s = (account, brokerKey) => {
+  // ageMs = 批次成交到现在的毫秒数。T+0 下给 0（刚成交）也应当立刻可卖
+  const sellAfter = (account, brokerKey, ageMs) => {
     const T = nextT();
     g.day.reanchor(T - (config.day.phases[0].ms + 90 * 1000)); // 锚回上午连续竞价，避免长跑后漂到休市被整体冻结
     const lr = g.onboard(account, account, brokerKey);
     assert(lr.ok, `${brokerKey} 玩家 ${account} 开户成功`);
     const a = g.store.get(account);
     a.longPos(stock.id).lots.push({
-      qty: lot, price: P(g).lastPrice, ts: T - 6000, reserved: 0, debt: 0, principal: 0,
+      qty: lot, price: P(g).lastPrice, ts: T - ageMs, reserved: 0, debt: 0, principal: 0,
     });
     const cr = g.auto.create(a, 'tps', { position: 'long', tp: 0.01, sl: 0, qty: 0 }, STOCK.id);
     assert(cr.ok, `${account} 止盈止损策略创建成功`);
@@ -310,18 +310,16 @@ console.log('\n[8] 自动策略的锁仓口径按账户券商取');
     return { acc: a, s };
   };
 
-  // 滑泰：锁仓砍半 5 秒 → 6 秒后策略就能卖
-  const ht = sellAt6s('autohuatai', 'huatai');
-  assert(ht.s.done, '滑泰：6 秒后自动策略即卖出（锁仓 5 秒生效）');
-  assert(ht.acc.orders.size > 0 || ht.acc.longQty(stock.id) < lot, '滑泰：已发出卖出委托或持仓减少');
-
-  // 对照：钟信（10 秒锁仓）同样 6 秒，策略只能等
-  const zx = sellAt6s('autozhongxin', 'zhongxin');
-  assert(!zx.s.done, '钟信：6 秒仍锁着，策略未完成');
-  assert(zx.s.state.waiting === true, '钟信：策略转入「等待解锁」而不是空转卖出');
-  assert(zx.acc.orders.size === 0 && zx.acc.longQty(stock.id) === lot, '钟信：没有发出任何卖单，持仓原样');
-  g.auto.remove(ht.acc, ht.s.id);
-  g.auto.remove(zx.acc, zx.s.id);
+  for (const bk of ['zhongxin', 'huatai', 'tianfeng']) {
+    const r = sellAfter('auto' + bk, bk, 0); // 刚成交（0 秒前）
+    assert(r.s.done, `${bk}：T+0 下刚成交也能立刻卖，策略应完成`);
+    assert(
+      r.acc.orders.size > 0 || r.acc.longQty(stock.id) < lot,
+      `${bk}：已发出卖出委托或持仓减少`
+    );
+    assert(!r.s.state || r.s.state.waiting !== true, `${bk}：不该进入「等待解锁」中间态`);
+    g.auto.remove(r.acc, r.s.id);
+  }
 }
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

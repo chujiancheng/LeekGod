@@ -225,7 +225,7 @@ function baseValues() {
     cooldownMs: config.trade.cooldownMs,
     // 锁仓口径（2026-11-02）：`lock` 是**策略**，`lockMs` 只在没有交易日时钟时兜底
     // （单测 / 无时钟模式）。见 config.trade.lock 与 Market.lockFnFor。
-    lock: config.trade.lock || 't1',
+    lock: config.trade.lock || 't0',
     lockMs: config.trade.lockMs,
     marginRatio: config.margin.ratio,
     maintenance: config.margin.maintenance,

@@ -412,7 +412,7 @@ function rulesView(game, acc) {
   return {
     feeRate: bk.feeRate,
     cooldownMs: bk.cooldownMs,
-    // 锁仓口径（t0 / t1-open / t1）。锁仓是跨日政策，不再是秒数，见 config.trade.lock
+    // 锁仓口径（当前港股 T+0 全市场统一；仍兼容 t1-open / t1）。是跨日政策不是秒数，见 config.trade.lock
     lock: bk.lock,
     lockMs: bk.lockMs,
     marginRatio: bk.marginRatio,

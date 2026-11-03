@@ -814,7 +814,6 @@ console.log('\n[17] 快照的锁仓口径 = 账户券商（rules / lockedUntil /
   const stock0 = config.stocks[0];
   const lot = stock0.lotSize;
   const DAY = config.day.phases.reduce((s, p) => s + p.ms, 0);
-  const AUCTION = config.day.phases[0].ms;
   const seed = (account, brokerKey, ageMs) => {
     const tk = g.onboard(account, account, brokerKey).token;
     const a = g.accountFor(tk);
@@ -824,36 +823,22 @@ console.log('\n[17] 快照的锁仓口径 = 账户券商（rules / lockedUntil /
     return { st, pos: st.account.positions.find((p) => p.stockId === stock0.id), ts };
   };
 
-  // 滑泰 T+0：当天买的，lockedUntil 就是成交时刻本身（等价于"立即可卖"）
-  const ht = seed('lockprobe_h', 'huatai', 6000);
-  assert(ht.st.rules.lock === 't0', `滑泰下发的锁仓口径 = t0（${ht.st.rules.lock}）`);
-  const htLot = ht.pos.long.lots.find((l) => l.ts === ht.ts);
-  assert(htLot && htLot.lockedUntil === ht.ts, `滑泰 lockedUntil = ts（差 ${htLot && htLot.lockedUntil - ht.ts}ms）`);
-  assert(htLot.sellable === true, '滑泰 6 秒前的批次在持仓切片里已标可卖');
-  assert(ht.pos.long.sellable === lot, `滑泰 long.sellable 计入该批次（${ht.pos.long.sellable}）`);
-
-  // 钟信 T+1：解锁时刻 = 次一交易日开盘竞价结束（09:25），是绝对时间戳而不是 ts+常量
-  const zx = seed('lockprobe_z', 'zhongxin', 6000);
-  assert(zx.st.rules.lock === 't1', `钟信下发的锁仓口径 = t1（${zx.st.rules.lock}）`);
-  const zxLot = zx.pos.long.lots.find((l) => l.ts === zx.ts);
-  const zxDayEnd = g.day.locate(zx.ts).dayEndsAt;
-  assert(
-    zxLot && zxLot.lockedUntil === zxDayEnd + AUCTION,
-    `钟信 lockedUntil = 次日开盘竞价结束（${zxLot && zxLot.lockedUntil - (zxDayEnd + AUCTION)}ms 偏差）`
-  );
-  assert(zxLot.sellable === false, '钟信同样 6 秒前的批次仍标不可卖（T+1）');
-  assert(zx.pos.long.sellable === 0, `钟信 long.sellable = 0（${zx.pos.long.sellable}）`);
-
-  // 天疯 T+1·竞价开始：与钟信只差一个竞价段，且必须 < 钟信的解锁时刻
-  const tf = seed('lockprobe_t', 'tianfeng', 6000);
-  const tfLot = tf.pos.long.lots.find((l) => l.ts === tf.ts);
-  assert(
-    tfLot.lockedUntil === zxDayEnd && tfLot.lockedUntil < zxLot.lockedUntil,
-    `天疯 unlockedAt 早一个竞价段（${zxLot.lockedUntil - tfLot.lockedUntil}ms）`
-  );
-  // 「昨天买的今天可卖」这一条不在这里验：本局开盘锚点就在今天上午，往前推一整天会落到
-  // startAt 之前被时钟夹回第 1 天（elapsed 负值），造不出真正的"昨天"。
-  // 那条边界由 market.test [35](3) 用 startAt=0 的独立市场覆盖。
+  // 2026-11-03 起按港股规则：**全市场 T+0**（成交即可卖），券商之间不再有锁仓差异。
+  // 切片里的 lockedUntil 就是成交时刻本身 —— 玩家据此算「还要等多久」，T+0 下恒为 0。
+  for (const [acct, bk, label] of [
+    ['lockprobe_z', 'zhongxin', '钟信'],
+    ['lockprobe_h', 'huatai', '滑泰'],
+    ['lockprobe_t', 'tianfeng', '天疯'],
+  ]) {
+    const r = seed(acct, bk, 6000);
+    assert(r.st.rules.lock === 't0', `${label} 下发的锁仓口径 = t0（${r.st.rules.lock}）`);
+    const l0 = r.pos.long.lots.find((l) => l.ts === r.ts);
+    assert(l0 && l0.lockedUntil === r.ts, `${label} lockedUntil = ts（差 ${l0 && l0.lockedUntil - r.ts}ms）`);
+    assert(l0.sellable === true, `${label} 6 秒前的批次在持仓切片里已标可卖`);
+    assert(r.pos.long.sellable === lot, `${label} long.sellable 计入该批次（${r.pos.long.sellable}）`);
+  }
+  // 空头对称 T+0（当天开当天可平）由 market.test [35](3) 覆盖；「前一天买的今天可卖」
+  // 那条边界也放在那边——本局开盘锚点就在今天上午，往前推一整天会被时钟夹回第 1 天。
 }
 
 // ---- 18. 玩家榜分页（排行 tab 翻页）：切片连续、名次由 offset 决定、越界与脏值都被夹住 ----

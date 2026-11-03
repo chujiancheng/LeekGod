@@ -1024,57 +1024,50 @@ console.log('\n[34] 旧档多空并存：只许平仓，不再新增任何一侧
 // 这类参数曾经是「配置里写了、文案里写了，撮合层却没读」：锁仓判定写死全局值，
 // glitchDelay 是零调用方的死函数。这条用例把「per-broker 的参数必须由 market/store
 // 真正消费」钉住。2026-11-02 起锁仓从「5/8/10 秒」改成 T+0 / T+1 三种跨日政策。
-console.log('\n[35] 券商通道（T+0 / T+1 锁仓 + 偶发卡顿）落在撮合层');
+console.log('\n[35] 券商通道（港股 T+0 锁仓 + 偶发卡顿）落在撮合层');
 {
   const lot = stock.lotSize;
   const m = new Market(stock);
   m.lastPrice = 20;
-  // 锁仓从「固定时长」改成「跨日政策」（2026-11-02）后，判定必须有交易日时钟——
-  // 没有钟就没有"次日"，`lockFnFor` 会退回 trade.lockMs 的兜底口径。
-  // 这里挂在 startAt=0、并取「第 2 天上午连续竞价」做基准时刻，方便构造"昨天买的"。
+  // 2026-11-03 起按港股规则：全市场 T+0（成交即可卖），券商之间**不再有锁仓差异**。
+  // 判定仍走同一个 lockFnFor（t0 → 0），所以这一节要求「当天买 → 当天卖」真的走完撮合，
+  // 而不是只看配置里那一个字符串。
   const { DayCycle } = require('../src/daycycle');
   m.dayCycle = new DayCycle(config.day, 0);
   const DAY = config.day.phases.reduce((s, p) => s + p.ms, 0);
   const auctionMs = config.day.phases[0].ms;
   const base = DAY + auctionMs + 60000; // 第 2 天，竞价结束后 1 分钟（上午连续竞价）
 
-  // (1) 滑泰 T+0：当天买、当天就能卖（全服唯一的日内权限）
-  const A = new Account('滑泰玩家');
-  A.broker = 'huatai';
-  A.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
-  m.place(pad('垫单甲'), { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base - 1, noCooldown: true });
-  const s1 = m.place(A, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(s1.ok && s1.order.filled === lot, `滑泰 T+0：当天买的批次当天可卖${s1.ok ? '' : '（' + s1.error + '）'}`);
+  // (1) 任意券商都是 T+0：当天买的批次当天就能卖，且不残留「锁仓中」文案
+  for (const [key, label] of [['zhongxin', '钟信'], ['huatai', '滑泰'], ['tianfeng', '天疯']]) {
+    const acc = new Account(label + '玩家');
+    acc.broker = key;
+    acc.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+    m.place(pad('垫买-' + key), { action: ACTIONS.BUY_OPEN, qty: lot, price: 20, now: base - 1, noCooldown: true });
+    const r = m.place(acc, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base, noCooldown: true });
+    assert(r.ok && r.order.filled === lot, `${label} T+0：当天买的当天可卖${r.ok ? '' : '（' + r.error + '）'}`);
+    assert(m.lockTextFor(acc, base) === null, `${label} T+0：不该有「锁仓中」文案（${m.lockTextFor(acc, base)}）`);
+    // 券商 overrides 里的 lock 已删干净，六个 key 一律继承 base
+    assert(brokerCfgOf(key).lock === 't0', `${label} 的 lock 口径 = t0（${brokerCfgOf(key).lock}）`);
+  }
 
-  // (2) 基准（t1）：当天买的当天卖不掉，文案要说清是「次日 09:25」
-  const B = new Account('基准玩家');
-  B.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
-  const s2 = m.place(B, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(!s2.ok && /次日 09:25/.test(s2.error), `基准 T+1：当天不可卖，文案含次日 09:25（${s2.error}）`);
-
-  // (3) 基准（t1）：昨天买的、今天已过竞价 → 可卖
-  B.longPos(stock.id).lots[0].ts = base - DAY;
-  const s3 = m.place(B, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: base });
-  assert(s3.ok, `基准 T+1：昨天买的今天可卖${s3.ok ? '' : '（' + s3.error + '）'}`);
-
-  // (4) 天疯（t1-open）：昨天买的、今天**竞价一开始**就能卖（比基准早一个竞价段）
-  const D = new Account('天疯玩家');
-  D.broker = 'tianfeng';
-  D.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - DAY, reserved: 0 });
-  const early = DAY + Math.floor(auctionMs / 2); // 第 2 天开盘竞价的中间（基准还没解锁）
-  const s4 = m.place(D, { action: ACTIONS.SELL_CLOSE, qty: lot, price: 20, now: early, noCooldown: true });
-  assert(s4.ok, `天疯 T+1·竞价开始即可卖（${early} 时点）${s4.ok ? '' : '（' + s4.error + '）'}`);
-
-  // (5) 挂借闸门与卖出闸门同源：滑泰当天就能挂借，基准当天不能
-  const L1 = new Account('滑泰挂借');
-  L1.broker = 'huatai';
-  L1.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
+  // (2) 挂借闸门与卖出闸门同源：当天买入即可挂借（T+0 下没有「等一天」这回事）
+  const L1 = new Account('挂借玩家');
+  L1.broker = 'zhongxin';
+  L1.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 1, reserved: 0 });
   const l1 = m.lendShares(L1, lot, base);
-  assert(l1.ok, `滑泰 T+0：当天可挂借${l1.ok ? '' : '（' + l1.error + '）'}`);
-  const L2 = new Account('基准挂借');
-  L2.longPos(stock.id).lots.push({ qty: lot, price: 20, ts: base - 6000, reserved: 0 });
-  const l2 = m.lendShares(L2, lot, base);
-  assert(!l2.ok, `基准 T+1：当天不能挂借（${l2.error}）`);
+  assert(l1.ok, `T+0：当天买入即可挂借${l1.ok ? '' : '（' + l1.error + '）'}`);
+
+  // (3) 做空对称 T+0：当天开的空头当天可平（否则「多头 T+0、空头锁一天」是免费套利）
+  const S = new Account('做空玩家');
+  S.broker = 'zhongxin';
+  S.cash = 1000000;
+  S.shortPos(stock.id).lots.push({ qty: lot, price: 20, margin: 20 * lot * 0.5, ts: base - 6000, reserved: 0 });
+  m.place(pad('垫卖-' + stock.id), { action: ACTIONS.SELL_OPEN, qty: lot, price: 20, now: base - 1, noCooldown: true });
+  const sc = m.place(S, { action: ACTIONS.BUY_CLOSE, qty: lot, price: 20, now: base, noCooldown: true });
+  assert(sc.ok && sc.order.filled === lot, `做空 T+0：当天开的空头当天可平${sc.ok ? '' : '（' + sc.error + '）'}`);
+  assert(S.shortQty(stock.id) === 0, `平空后空头归零（剩 ${S.shortQty(stock.id)}）`);
+
 
   // (6) 嗨通：偶发通道卡顿 —— 命中时这一单要多等 1 个 tick。
   // 用一个固定值的 Math.random 替身把「命中 / 不命中」两条分支都走成确定性的
